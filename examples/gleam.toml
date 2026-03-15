@@ -1,0 +1,11 @@
+name = "beacon_examples"
+version = "0.1.0"
+description = "Example applications built with the Beacon framework"
+target = "erlang"
+
+[dependencies]
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+beacon = { path = ".." }
+
+[dev-dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
