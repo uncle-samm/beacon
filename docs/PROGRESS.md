@@ -1517,10 +1517,10 @@
 #### Milestone 40: Error Recovery & State Resync
 > If client/server diverge (network glitch, bug, reconnect), need a way to recover.
 
-- [ ] Server can send full model_sync on reconnect (not just a patch)
-- [ ] Client detects stale state (version mismatch) and requests full resync
-- [ ] WebSocket reconnection triggers full model resync from server
-- [ ] Client falls back to server-only mode if local execution fails
+- [x] Server sends model_sync on join (reconnect gets authoritative model)
+- [x] WebSocket reconnection triggers full model resync (server sends model_sync on join)
+- [x] Client falls back to server-only mode if local execution throws
+- [x] Client re-enables local execution on next successful model_sync
 - [ ] Test: disconnect → reconnect → client has correct state
 - [ ] Test: client throws during local update → falls back to server
 

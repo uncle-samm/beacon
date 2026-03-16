@@ -75,7 +75,8 @@ function handleEventLocally(handlerId, eventData) {
     clientRender();
     return App.msg_affects_model(msg);
   } catch (e) {
-    console.error("[beacon] Local update failed:", e);
+    console.error("[beacon] Local update failed, falling back to server-only:", e);
+    clientInitialized = false; // disable local execution
     return true;
   }
 }
@@ -164,7 +165,7 @@ function handlePatch(payload) {
 }
 
 function handleModelSync(modelJson, version) {
-  if (!clientInitialized || !window.BeaconApp) return;
+  if (!window.BeaconApp) return;
   const App = window.BeaconApp;
   if (!App.decode_model) return;
 
@@ -172,8 +173,16 @@ function handleModelSync(modelJson, version) {
     const result = App.decode_model(modelJson);
     if (result.isOk()) {
       clientModel = result[0];
-      // Re-render with authoritative model + our local state
-      clientRender();
+
+      // Re-enable local execution if it was disabled by a failure
+      if (!clientInitialized && clientLocal !== null) {
+        clientInitialized = true;
+        console.log("[beacon] Local execution re-enabled after model sync");
+      }
+
+      if (clientInitialized) {
+        clientRender();
+      }
       console.log("[beacon] Model synced v" + version);
     }
   } catch (e) {

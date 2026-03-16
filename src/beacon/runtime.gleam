@@ -235,7 +235,22 @@ fn handle_message(
       case dict.get(state.connections, conn_id) {
         Ok(subject) -> {
           process.send(subject, transport.SendMount(payload: mount_json))
-          log.debug("beacon.runtime", "Sent rendered mount to " <> conn_id)
+          // Also send model_sync so client has authoritative model state
+          case state.serialize_model {
+            Some(serialize) -> {
+              let model_json = serialize(model_to_use)
+              process.send(
+                subject,
+                transport.SendModelSync(
+                  model_json: model_json,
+                  version: state.event_clock,
+                  ack_clock: state.event_clock,
+                ),
+              )
+            }
+            None -> Nil
+          }
+          log.debug("beacon.runtime", "Sent mount + model_sync to " <> conn_id)
         }
         Error(Nil) -> {
           log.warning(
