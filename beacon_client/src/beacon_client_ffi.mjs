@@ -332,12 +332,37 @@ function getPath(node) {
   return parts.join(".");
 }
 
+// === SPA Navigation ===
+function setupNavigation() {
+  // Intercept internal link clicks for SPA navigation
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest("a[href]");
+    if (!a) return;
+    // Only intercept same-origin links without data-beacon-external
+    if (a.hostname !== location.hostname) return;
+    if (a.hasAttribute("data-beacon-external")) return;
+    if (a.target === "_blank") return;
+
+    e.preventDefault();
+    const path = a.pathname + a.search;
+    if (path !== location.pathname + location.search) {
+      history.pushState(null, "", path);
+      send({ type: "navigate", path: path });
+    }
+  });
+
+  // Handle browser back/forward
+  window.addEventListener("popstate", () => {
+    send({ type: "navigate", path: location.pathname + location.search });
+  });
+}
+
 // === Exports for Gleam FFI ===
 export function query_selector(sel) { const el = document.querySelector(sel); return el ? { type: "Ok", 0: el } : { type: "Error", 0: undefined }; }
 export function log(msg) { console.log("[beacon]", msg); return undefined; }
 
 // === Auto-boot ===
 if (typeof document !== "undefined") {
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => boot("#beacon-app"));
-  else boot("#beacon-app");
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { boot("#beacon-app"); setupNavigation(); });
+  else { boot("#beacon-app"); setupNavigation(); }
 }

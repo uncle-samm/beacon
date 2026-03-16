@@ -10,6 +10,7 @@ import beacon/error
 import beacon/log
 import beacon/middleware
 import beacon/pubsub
+import beacon/route
 import beacon/runtime
 import beacon/ssr
 import beacon/state_manager
@@ -53,6 +54,10 @@ pub type AppConfig(model, msg) {
     middlewares: List(middleware.Middleware),
     /// Static file serving directory (e.g., "priv/static").
     static_dir: Option(String),
+    /// Route patterns for URL matching.
+    route_patterns: List(route.RoutePattern),
+    /// Called when URL changes — produces a Msg for the update loop.
+    on_route_change: Option(fn(route.Route) -> msg),
   )
 }
 
@@ -104,6 +109,8 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       deserialize_model: config.deserialize_model,
       subscriptions: config.subscriptions,
       on_pubsub: config.on_pubsub,
+      route_patterns: config.route_patterns,
+      on_route_change: config.on_route_change,
     )
 
   // Create transport with per-connection runtime factory

@@ -363,6 +363,8 @@ pub fn start(port: Int) -> Result(Nil, error.BeaconError) {
       deserialize_model: option.None,
       subscriptions: [],
       on_pubsub: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
     )
   case runtime.start(config) {
     Ok(runtime_subject) -> {

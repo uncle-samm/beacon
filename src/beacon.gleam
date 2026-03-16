@@ -24,6 +24,8 @@ pub type Node(msg) =
 import beacon/log
 import beacon/middleware
 import beacon/pubsub
+import beacon/route
+import gleam/list
 import gleam/int
 import gleam/option.{type Option, None, Some}
 
@@ -89,6 +91,10 @@ pub opaque type AppBuilder(model, msg) {
     /// For app_with_local: wraps model+local into a combined model type.
     /// When set, the "model" in the builder is actually #(Model, Local).
     has_local: Bool,
+    /// Route patterns for URL matching (e.g., ["/", "/blog/:slug"]).
+    route_patterns: List(route.RoutePattern),
+    /// Called when the URL changes — produces a Msg for the update loop.
+    on_route_change: Option(fn(route.Route) -> msg),
   )
 }
 
@@ -117,6 +123,8 @@ pub fn app(
     serialize_model: None,
     deserialize_model: None,
     has_local: False,
+    route_patterns: [],
+    on_route_change: None,
   )
 }
 
@@ -142,6 +150,8 @@ pub fn app_with_effects(
     serialize_model: None,
     deserialize_model: None,
     has_local: False,
+    route_patterns: [],
+    on_route_change: None,
   )
 }
 
@@ -188,6 +198,8 @@ pub fn app_with_local(
     serialize_model: None,
     deserialize_model: None,
     has_local: True,
+    route_patterns: [],
+    on_route_change: None,
   )
 }
 
@@ -209,6 +221,33 @@ pub fn model_encoder(
   encoder: fn(model) -> String,
 ) -> AppBuilder(model, msg) {
   AppBuilder(..builder, serialize_model: option.Some(encoder))
+}
+
+/// Register URL route patterns for the app.
+/// Patterns can include dynamic segments with `:param`.
+/// ```gleam
+/// beacon.app(init, update, view)
+/// |> beacon.routes(["/", "/blog", "/blog/:slug"])
+/// |> beacon.on_route_change(OnRouteChange)
+/// |> beacon.start(8080)
+/// ```
+pub fn routes(
+  builder: AppBuilder(model, msg),
+  patterns: List(String),
+) -> AppBuilder(model, msg) {
+  AppBuilder(
+    ..builder,
+    route_patterns: list.map(patterns, route.pattern),
+  )
+}
+
+/// Set the callback that produces a Msg when the URL route changes.
+/// This is called on initial page load and on client-side navigation.
+pub fn on_route_change(
+  builder: AppBuilder(model, msg),
+  handler: fn(route.Route) -> msg,
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, on_route_change: Some(handler))
 }
 
 /// Set the secret key for session tokens.
@@ -326,6 +365,8 @@ pub fn start(
       on_pubsub: builder.on_pubsub,
       middlewares: builder.middlewares,
       static_dir: builder.static_dir,
+      route_patterns: builder.route_patterns,
+      on_route_change: builder.on_route_change,
     )
   case application.start(config) {
     Ok(_app) -> {

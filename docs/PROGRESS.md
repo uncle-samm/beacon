@@ -1525,16 +1525,19 @@
 - [ ] Test: client throws during local update → falls back to server
 
 #### Milestone 41: Routing
-> Single page only right now. Need URL-based navigation for real apps.
+> URL-based navigation with SPA transitions.
 
-- [ ] `beacon.route("/path", handler)` API for declaring routes
-- [ ] Server-side route matching on initial HTTP request
-- [ ] Client-side route transitions without full page reload
-- [ ] URL parameters and query string parsing
-- [ ] Route-specific init/update/view functions
-- [ ] Browser back/forward navigation support
-- [ ] Test: navigate between routes, each has own state
-- [ ] Test: direct URL access renders correct route (SSR)
+- [x] `beacon/route.gleam` — Route type, pattern matching, param extraction, query parsing
+- [x] `beacon.routes(["/", "/blog/:slug"])` API for declaring route patterns
+- [x] `beacon.on_route_change(OnRouteChange)` callback for URL changes
+- [x] URL parameters and query string parsing (`:param` segments, `?key=value`)
+- [x] Client-side SPA navigation — intercepts `<a>` clicks, pushState, no reload
+- [x] Browser back/forward navigation (popstate handler)
+- [x] `ClientNavigate` wire message — client sends path to server on navigation
+- [x] Runtime dispatches `on_route_change(Route)` Msg on navigation
+- [x] 13 route tests (matching, params, query, wildcard, first-wins)
+- [ ] Test: navigate between routes, each has own state (needs example app)
+- [ ] Test: direct URL access renders correct route (SSR needs per-request render)
 
 #### Milestone 42: Server Functions
 > Let users call server-side logic from the client (like tRPC/server actions).

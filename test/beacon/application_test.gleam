@@ -40,6 +40,8 @@ fn test_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
       on_pubsub: option.None,
     middlewares: [],
     static_dir: option.None,
+    route_patterns: [],
+    on_route_change: option.None,
   )
 }
 

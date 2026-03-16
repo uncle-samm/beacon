@@ -10,6 +10,7 @@ import beacon/error
 import beacon/handler.{type HandlerRegistry}
 import beacon/log
 import beacon/pubsub
+import beacon/route
 import beacon/template/rendered.{type Rendered}
 import beacon/transport
 import beacon/view
@@ -42,6 +43,8 @@ pub type RuntimeMessage(msg) {
     target_path: String,
     clock: Int,
   )
+  /// A client navigated to a new URL path.
+  ClientNavigated(conn_id: transport.ConnectionId, path: String)
   /// An effect dispatched a message back to the runtime.
   EffectDispatched(message: msg)
   /// Shutdown the runtime.
@@ -79,6 +82,10 @@ pub type RuntimeState(model, msg) {
     deserialize_model: Option(fn(String) -> Result(model, String)),
     /// Secret key for session tokens.
     secret_key: String,
+    /// Route patterns for URL matching.
+    route_patterns: List(route.RoutePattern),
+    /// Called when URL changes — produces a Msg for the update loop.
+    on_route_change: option.Option(fn(route.Route) -> msg),
   )
 }
 
@@ -106,6 +113,10 @@ pub type RuntimeConfig(model, msg) {
     /// Called when a PubSub notification arrives on a subscribed topic.
     /// Returns the Msg to dispatch into the update loop.
     on_pubsub: option.Option(fn() -> msg),
+    /// Route patterns for URL matching.
+    route_patterns: List(route.RoutePattern),
+    /// Called when URL changes — produces a Msg for the update loop.
+    on_route_change: option.Option(fn(route.Route) -> msg),
   )
 }
 
@@ -131,6 +142,8 @@ pub fn start(
           serialize_model: config.serialize_model,
           deserialize_model: config.deserialize_model,
           secret_key: "",
+          route_patterns: config.route_patterns,
+          on_route_change: config.on_route_change,
         )
       log.info("beacon.runtime", "Runtime initialising")
       // Execute initial effects
@@ -315,6 +328,22 @@ fn handle_message(
           )
           actor.continue(state)
         }
+      }
+    }
+
+    ClientNavigated(conn_id, path) -> {
+      log.info("beacon.runtime", "Navigation: " <> conn_id <> " → " <> path)
+      case state.on_route_change {
+        option.Some(make_msg) -> {
+          let matched_route = case route.match_path(state.route_patterns, path) {
+            option.Some(r) -> r
+            option.None -> route.from_path(path)
+          }
+          let msg = make_msg(matched_route)
+          let new_state = run_update(state, msg)
+          actor.continue(new_state)
+        }
+        option.None -> actor.continue(state)
       }
     }
 
@@ -536,6 +565,12 @@ pub fn connect_transport_with_ssr(
             ClientJoined(conn_id: conn_id, token: token),
           )
         }
+        transport.ClientNavigate(path) -> {
+          process.send(
+            runtime,
+            ClientNavigated(conn_id: conn_id, path: path),
+          )
+        }
         transport.ClientHeartbeat -> {
           // Heartbeat is handled directly by transport, no runtime action needed.
           Nil
@@ -601,6 +636,11 @@ pub fn connect_transport_per_connection(
                 process.send(
                   runtime_subject,
                   ClientJoined(conn_id: conn_id, token: token),
+                )
+              transport.ClientNavigate(path) ->
+                process.send(
+                  runtime_subject,
+                  ClientNavigated(conn_id: conn_id, path: path),
                 )
               transport.ClientHeartbeat -> Nil
             }

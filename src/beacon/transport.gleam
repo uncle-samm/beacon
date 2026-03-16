@@ -49,6 +49,8 @@ pub type ClientMessage {
   /// Client is requesting initial state after connecting.
   /// Includes an optional session token for state recovery.
   ClientJoin(token: String)
+  /// Client navigated to a new URL path (SPA navigation).
+  ClientNavigate(path: String)
 }
 
 /// Messages sent from the server to the client (browser).
@@ -204,6 +206,10 @@ fn client_message_decoder() -> decode.Decoder(ClientMessage) {
     "join" -> {
       use token <- decode.optional_field("token", "", decode.string)
       decode.success(ClientJoin(token: token))
+    }
+    "navigate" -> {
+      use path <- decode.field("path", decode.string)
+      decode.success(ClientNavigate(path: path))
     }
     _unknown -> decode.failure(ClientHeartbeat, "ClientMessage type")
   }
