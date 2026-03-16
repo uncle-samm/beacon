@@ -12,6 +12,7 @@ import beacon/examples/chat
 import beacon/examples/counter
 import beacon/examples/counter_local
 import beacon/examples/pong
+import beacon/examples/triple_counter
 import gleam/io
 
 pub fn main() {
@@ -20,6 +21,7 @@ pub fn main() {
     ["chat", ..] -> chat.start()
     ["counter", ..] -> counter.main()
     ["local", ..] -> counter_local.main()
+    ["triple", ..] -> triple_counter.start()
     ["ai", ..] -> start_ai_chat()
     ["pong", ..] -> start_pong()
     _ -> {

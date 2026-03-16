@@ -52,7 +52,7 @@ pub fn render_page_includes_title_test() {
 
 pub fn render_page_includes_script_tag_test() {
   let page = ssr.render_page(test_config())
-  let assert True = str_contains(page.html, "<script src=\"/beacon.js\"")
+  let assert True = str_contains(page.html, "<script src=\"/beacon_client.js\"")
   let assert True = str_contains(page.html, "data-beacon-auto")
 }
 

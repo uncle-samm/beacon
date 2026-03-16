@@ -1,6 +1,9 @@
 // Beacon Client Runtime — the ONLY JavaScript that runs in the browser.
-// This replaces the old hand-written beacon.js entirely.
 // Event delegation, WebSocket, DOM morphing, Rendered format — all here.
+// When BeaconApp is available (compiled user code), runs updates LOCALLY.
+// Local-only events produce ZERO WebSocket traffic.
+
+import { Ok, Error as GleamError } from "./gleam.mjs";
 
 // === State ===
 const _pd = {};
@@ -13,10 +16,68 @@ let eventClock = 0;
 let cachedStatics = null;
 let cachedDynamics = [];
 
+// === Client-Side State (when BeaconApp is available) ===
+let clientModel = null;
+let clientLocal = null;
+let clientRegistry = null;
+let clientInitialized = false;
+
 // === Process Dictionary (handler registry storage) ===
 export function pd_set(key, value) { _pd[key] = value; return undefined; }
 export function pd_get(key) {
-  return key in _pd ? { type: "Ok", 0: _pd[key] } : { type: "Error", 0: undefined };
+  return key in _pd ? new Ok(_pd[key]) : new GleamError(undefined);
+}
+
+// === Client-Side Execution ===
+export function initClient() {
+  if (clientInitialized || !window.BeaconApp) return;
+  const App = window.BeaconApp;
+  if (!App.init || !App.init_local || !App.update || !App.view_to_html) return;
+
+  try {
+    clientModel = App.init();
+    clientLocal = App.init_local(clientModel);
+
+    // Build handler registry via phantom render (SSR already rendered DOM)
+    App.start_render();
+    App.view_to_html(clientModel, clientLocal);
+    clientRegistry = App.finish_render();
+    clientInitialized = true;
+    console.log("[beacon] Client-side execution ready");
+  } catch (e) {
+    console.error("[beacon] initClient failed:", e);
+  }
+}
+
+function clientRender() {
+  if (!clientInitialized || !appRoot) return;
+  const App = window.BeaconApp;
+  App.start_render();
+  const html = App.view_to_html(clientModel, clientLocal);
+  clientRegistry = App.finish_render();
+  morphInnerHTML(appRoot, html);
+  attachEvents();
+}
+
+// Returns true if the event needs to be sent to the server.
+function handleEventLocally(handlerId, eventData) {
+  if (!clientInitialized) return true;
+  const App = window.BeaconApp;
+
+  const result = App.resolve_handler(clientRegistry, handlerId, eventData);
+  if (!result.isOk()) return true;
+
+  try {
+    const msg = result[0];
+    const updateResult = App.update(clientModel, clientLocal, msg);
+    clientModel = updateResult[0];
+    clientLocal = updateResult[1];
+    clientRender();
+    return App.msg_affects_model(msg);
+  } catch (e) {
+    console.error("[beacon] Local update failed:", e);
+    return true;
+  }
 }
 
 // === Initialization ===
@@ -183,7 +244,15 @@ function attachEvents() {
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-click")) {
         e.preventDefault(); eventClock++;
-        send({ type: "event", name: "click", handler_id: t.getAttribute("data-beacon-event-click"), data: "{}", target_path: getPath(t), clock: eventClock });
+        const hid = t.getAttribute("data-beacon-event-click");
+        if (clientInitialized) {
+          const needsServer = handleEventLocally(hid, "{}");
+          if (needsServer) {
+            send({ type: "event", name: "click", handler_id: hid, data: "{}", target_path: getPath(t), clock: eventClock });
+          }
+        } else {
+          send({ type: "event", name: "click", handler_id: hid, data: "{}", target_path: getPath(t), clock: eventClock });
+        }
         return;
       }
       t = t.parentNode;
@@ -194,7 +263,16 @@ function attachEvents() {
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-input")) {
         eventClock++;
-        send({ type: "event", name: "input", handler_id: t.getAttribute("data-beacon-event-input"), data: JSON.stringify({ value: t.value || "" }), target_path: getPath(t), clock: eventClock });
+        const hid = t.getAttribute("data-beacon-event-input");
+        const data = JSON.stringify({ value: t.value || "" });
+        if (clientInitialized) {
+          const needsServer = handleEventLocally(hid, data);
+          if (needsServer) {
+            send({ type: "event", name: "input", handler_id: hid, data: data, target_path: getPath(t), clock: eventClock });
+          }
+        } else {
+          send({ type: "event", name: "input", handler_id: hid, data: data, target_path: getPath(t), clock: eventClock });
+        }
         return;
       }
       t = t.parentNode;
@@ -205,7 +283,15 @@ function attachEvents() {
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-submit")) {
         e.preventDefault(); eventClock++;
-        send({ type: "event", name: "submit", handler_id: t.getAttribute("data-beacon-event-submit"), data: "{}", target_path: getPath(t), clock: eventClock });
+        const hid = t.getAttribute("data-beacon-event-submit");
+        if (clientInitialized) {
+          const needsServer = handleEventLocally(hid, "{}");
+          if (needsServer) {
+            send({ type: "event", name: "submit", handler_id: hid, data: "{}", target_path: getPath(t), clock: eventClock });
+          }
+        } else {
+          send({ type: "event", name: "submit", handler_id: hid, data: "{}", target_path: getPath(t), clock: eventClock });
+        }
         return;
       }
       t = t.parentNode;

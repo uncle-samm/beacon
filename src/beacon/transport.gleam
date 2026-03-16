@@ -470,7 +470,7 @@ fn default_page_html() -> String {
   <> "</style>"
   <> "</head><body>"
   <> "<div id=\"beacon-app\"></div>"
-  <> "<script src=\"/beacon.js\" data-beacon-auto></script>"
+  <> "<script src=\"/beacon_client.js\" data-beacon-auto></script>"
   <> "</body></html>"
 }
 

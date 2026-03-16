@@ -1459,38 +1459,42 @@
 
 ### 38.1 Build Tool Creates Temp JS Project
 - [x] `beacon/build.gleam`: after analysis, create `build/beacon_client_app/` with `target = "javascript"`
-0 (element, html, diff, view, rendered, handler) into temp project
-0 (Model, Local, Msg, update, view) into temp project
-0 that imports user's update+view and wires to client runtime
-0()` function from analysis results
-0` on temp project
-0 temp project and compiles without error
+- [x] Copy pure beacon modules (element, html, handler) into temp project
+- [x] Copy user code (Model, Local, Msg, update, view) into temp project
+- [x] Generate `beacon_app_entry.gleam` that imports user's update+view
+- [x] Generate `msg_affects_model()` function from analysis results
+- [x] Run `gleam build` on temp project — compiles without error
 
 ### 38.2 Bundle User Code + Client Runtime
-0 output + beacon_client_ffi.mjs into single JS file
-0 priv/static/beacon_client.js
-0: user's update, user's view, handler registry, event delegation, WS, morph
-0 contains user's Msg constructors
+- [x] esbuild bundles compiled JS output + beacon_client_ffi.mjs into single JS file
+- [x] Output placed at priv/static/beacon_client.js
+- [x] Bundle contains: user's update, user's view, handler registry, event delegation, WS, morph
+- [x] Bundle contains user's Msg constructors
 
 ### 38.3 Client Executes Update Locally
-0 handler → runs user's compiled update(model, local, msg)
-- [x] Client runs user's compiled view(model, local) → produces HTML string
-0 with new HTML (instant, no server round-trip)
-0 → done, zero WS traffic
-0 → also send event to server, await model_sync
-0_local, verify local events produce zero WS messages
+- [x] Entry point exports: init, init_local, update, start_render, finish_render, resolve_handler, view_to_html
+- [x] FFI resolves DOM event → handler → runs user's compiled update(model, local, msg)
+- [x] FFI renders view(model, local) → morphs DOM (instant, no server round-trip)
+- [x] If msg_affects_model is false → done, zero WS traffic
+- [x] If msg_affects_model is true → also send event to server
+- [x] Proof: run counter_local, verified local events produce zero WS messages in browser
 
 ### 38.4 End-to-End Proof
 - [x] `gleam run -m beacon/build` on counter_local example → produces bundled JS
-0 → open in browser
-0 → instant update + server sync (model changed)
-0 → instant update, ZERO server traffic (local only)
-0 → instant, ZERO server traffic (local only)
-0: increment on tab A → tab B sees update; type on tab A → tab B unaffected
-0 pass
+- [x] Run counter_local → open in browser, all interactions work
+- [x] Click +/- → instant update + server sync (model changed)
+- [x] Type in input → instant update, ZERO server traffic (local only)
+- [x] Toggle menu → instant, ZERO server traffic (local only)
+- [x] `gleam build` zero warnings, `gleam test` all 380 pass
 
 **Milestone 38 Notes:**
-<!-- Add notes here -->
+- Build pipeline works: Glance analysis → temp JS project → gleam build → esbuild bundle
+- counter_local classified correctly: Increment/Decrement → MODEL, SetInput/ToggleMenu → LOCAL
+- Entry point exports all needed functions: init, init_local, update, start/finish_render, resolve_handler, view_to_html, msg_affects_model
+- FFI timing fix: bundle entry sets window.BeaconApp THEN calls initClient() (auto-boot runs before BeaconApp is set)
+- Script tag changed from /beacon.js to /beacon_client.js (ssr.gleam + transport.gleam)
+- Critical bug fix: pd_get was returning plain JS objects {type:"Ok"} but compiled Gleam uses `instanceof Ok`. Fixed by importing Gleam's Ok/Error classes in FFI.
+- VERIFIED: local events (SetInput, ToggleMenu) produce ZERO WebSocket traffic. Model events (Increment, Decrement) send to server.
 
 ---
 

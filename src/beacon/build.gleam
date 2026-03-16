@@ -210,19 +210,46 @@ import app
 import beacon/element
 import beacon_client/handler
 
+/// Initialize Model.
+pub fn init() -> app.Model {
+  app.init()
+}
+
+/// Initialize Local from Model.
+pub fn init_local(model: app.Model) -> app.Local {
+  app.init_local(model)
+}
+
+/// Run update locally.
+pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {
+  app.update(model, local, msg)
+}
+
+/// Start a render cycle (resets handler registry).
+pub fn start_render() {
+  handler.start_render()
+}
+
+/// Finish a render cycle (returns populated handler registry).
+pub fn finish_render() {
+  handler.finish_render()
+}
+
+/// Resolve a handler ID to a Msg value.
+pub fn resolve_handler(registry, handler_id: String, data: String) {
+  handler.resolve(registry, handler_id, data)
+}
+
+/// Render view to HTML string.
+pub fn view_to_html(model: app.Model, local: app.Local) -> String {
+  element.to_string(app.view(model, local))
+}
+
 /// Check if a Msg variant affects the Model (needs server sync).
 pub fn msg_affects_model(msg: app.Msg) -> Bool {
   case msg {
 " <> affects_model_body <> "
   }
-}
-
-/// Render view to HTML string (for client-side diffing).
-pub fn render_view(model: app.Model, local: app.Local) -> String {
-  handler.start_render()
-  let node = app.view(model, local)
-  let _registry = handler.finish_render()
-  element.to_string(node)
 }
 "
 }
@@ -245,7 +272,7 @@ fn bundle_js() -> Result(Nil, String) {
   }
   // Create a tiny entry that imports both the FFI and user entry
   let entry_js =
-    "import './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\n"
+    "import { initClient } from './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\ninitClient();\n"
   case simplifile.write("build/beacon_client_app/bundle_entry.mjs", entry_js) {
     Ok(Nil) -> Nil
     Error(_) -> Nil

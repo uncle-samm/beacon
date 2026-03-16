@@ -165,7 +165,7 @@ fn build_html_document(
     "\">",
     view_html,
     "</div>",
-    "<script src=\"/beacon.js\" data-beacon-auto></script>",
+    "<script src=\"/beacon_client.js\" data-beacon-auto></script>",
     "</body></html>",
   ])
 }
