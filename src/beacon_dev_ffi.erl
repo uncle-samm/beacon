@@ -1,6 +1,7 @@
 -module(beacon_dev_ffi).
 -export([run_command/1, sleep/1, check_for_changes/1, get_file_timestamps/1,
-         do_hot_swap/0, string_contains/2, int_to_string/1, find_gleam_files/1]).
+         do_hot_swap/0, string_contains/2, int_to_string/1, find_gleam_files/1,
+         start_native_watcher/1, poll_native_watcher/0, native_watcher_available/0]).
 
 %% Persistent state for file modification tracking
 -define(TIMESTAMP_KEY, beacon_dev_timestamps).
@@ -98,3 +99,53 @@ string_contains(Haystack, Needle) ->
 
 int_to_string(N) ->
     integer_to_binary(N).
+
+%% Check if a native file watcher (fswatch or inotifywait) is available.
+native_watcher_available() ->
+    case os:type() of
+        {unix, darwin} ->
+            case os:find_executable("fswatch") of
+                false -> false;
+                _ -> true
+            end;
+        {unix, linux} ->
+            case os:find_executable("inotifywait") of
+                false -> false;
+                _ -> true
+            end;
+        _ -> false
+    end.
+
+%% Start a native file watcher process. Returns a port.
+%% On macOS: uses fswatch. On Linux: uses inotifywait.
+start_native_watcher(Dirs) ->
+    DirStr = lists:join(" ", [binary_to_list(D) || D <- Dirs]),
+    Cmd = case os:type() of
+        {unix, darwin} ->
+            "fswatch -1 --include '\\.gleam$' --exclude '.*' " ++ DirStr;
+        {unix, linux} ->
+            "inotifywait -r -e modify,create,delete --include '\\.gleam$' " ++ DirStr;
+        _ ->
+            "sleep 999999"  %% Fallback: never triggers
+    end,
+    Port = open_port({spawn, Cmd}, [stream, exit_status, binary]),
+    erlang:put(beacon_native_watcher_port, Port),
+    {ok, nil}.
+
+%% Poll the native watcher — returns true if a change was detected.
+%% Non-blocking: checks if the port has sent any data.
+poll_native_watcher() ->
+    case erlang:get(beacon_native_watcher_port) of
+        undefined -> false;
+        Port ->
+            receive
+                {Port, {data, _}} ->
+                    %% Change detected! Restart the watcher for next change.
+                    true;
+                {Port, {exit_status, _}} ->
+                    %% Watcher exited (fswatch -1 does this after one event)
+                    true
+            after 100 ->
+                false
+            end
+    end.

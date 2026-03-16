@@ -20,50 +20,72 @@ pub fn main() {
     Error(reason) -> log.error("beacon.dev", "Initial build failed: " <> reason)
   }
 
-  // Start watch loop
-  watch_loop(watch_dirs)
+  // Choose watch strategy
+  case native_watcher_available() {
+    True -> {
+      log.info("beacon.dev", "Using native file watcher (fswatch/inotifywait)")
+      let _ = start_native_watcher(watch_dirs)
+      native_watch_loop(watch_dirs)
+    }
+    False -> {
+      log.info("beacon.dev", "Native watcher not available, using 500ms polling")
+      let _ = get_file_timestamps(watch_dirs)
+      poll_watch_loop(watch_dirs)
+    }
+  }
 }
 
-/// Watch loop — polls for file changes and triggers recompile.
-fn watch_loop(dirs: List(String)) -> Nil {
-  // Get current modification times
-  let _timestamps = get_file_timestamps(dirs)
-
-  // Wait and check for changes
-  sleep(1000)
-
-  // Check for changes
-  case check_for_changes(dirs) {
+/// Native watch loop — uses fswatch/inotifywait for instant detection.
+fn native_watch_loop(dirs: List(String)) -> Nil {
+  let changed = poll_native_watcher()
+  case changed {
     True -> {
-      log.info("beacon.dev", "File change detected, recompiling...")
-      case run_build() {
-        Ok(Nil) -> {
-          log.info("beacon.dev", "Recompile succeeded")
-          // Hot-swap modules
-          case hot_swap_modules() {
-            Ok(count) ->
-              log.info(
-                "beacon.dev",
-                "Hot-swapped " <> int_to_string(count) <> " module(s)",
-              )
-            Error(reason) ->
-              log.warning("beacon.dev", "Hot swap failed: " <> reason)
-          }
-          // Rebuild client JS if needed
-          case run_client_build() {
-            Ok(Nil) ->
-              log.info("beacon.dev", "Client JS rebuilt")
-            Error(_) -> Nil
-          }
-        }
-        Error(reason) ->
-          log.error("beacon.dev", "Recompile failed: " <> reason)
-      }
+      log.info("beacon.dev", "File change detected (native), recompiling...")
+      handle_recompile()
+      // Restart watcher for next change
+      let _ = start_native_watcher(dirs)
+      Nil
     }
     False -> Nil
   }
+  native_watch_loop(dirs)
+}
 
-  watch_loop(dirs)
+/// Polling watch loop — fallback when native watcher unavailable.
+fn poll_watch_loop(dirs: List(String)) -> Nil {
+  sleep(500)
+  case check_for_changes(dirs) {
+    True -> {
+      log.info("beacon.dev", "File change detected (polling), recompiling...")
+      handle_recompile()
+    }
+    False -> Nil
+  }
+  poll_watch_loop(dirs)
+}
+
+/// Handle recompile + hot swap + client rebuild.
+fn handle_recompile() -> Nil {
+  case run_build() {
+    Ok(Nil) -> {
+      log.info("beacon.dev", "Recompile succeeded")
+      case hot_swap_modules() {
+        Ok(count) ->
+          log.info(
+            "beacon.dev",
+            "Hot-swapped " <> int_to_string(count) <> " module(s)",
+          )
+        Error(reason) ->
+          log.warning("beacon.dev", "Hot swap failed: " <> reason)
+      }
+      case run_client_build() {
+        Ok(Nil) -> log.info("beacon.dev", "Client JS rebuilt")
+        Error(_) -> Nil
+      }
+    }
+    Error(reason) ->
+      log.error("beacon.dev", "Recompile failed: " <> reason)
+  }
 }
 
 /// Run `gleam build` and return success/failure.
@@ -123,3 +145,12 @@ fn string_contains(haystack: String, needle: String) -> Bool
 
 @external(erlang, "beacon_dev_ffi", "int_to_string")
 fn int_to_string(n: Int) -> String
+
+@external(erlang, "beacon_dev_ffi", "native_watcher_available")
+fn native_watcher_available() -> Bool
+
+@external(erlang, "beacon_dev_ffi", "start_native_watcher")
+fn start_native_watcher(dirs: List(String)) -> Result(Nil, String)
+
+@external(erlang, "beacon_dev_ffi", "poll_native_watcher")
+fn poll_native_watcher() -> Bool
