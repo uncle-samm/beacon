@@ -327,6 +327,13 @@ pub fn create_handler(
     case request.path_segments(req) {
       ["ws"] -> handle_websocket(req, config)
       ["beacon.js"] | ["beacon_client.js"] -> serve_client_js()
+      ["health"] -> {
+        response.new(200)
+        |> response.set_header("content-type", "application/json")
+        |> response.set_body(
+          mist.Bytes(bytes_tree.from_string("{\"status\":\"ok\"}")),
+        )
+      }
       _ -> {
         // Try static files first
         case config.static_config {

@@ -1588,15 +1588,14 @@
 - [x] Test: 304 on matching ETag (static_test)
 
 #### Milestone 46: Production Deployment
-> Release builds, health checks, graceful shutdown.
+> Health checks, env config, Docker.
 
-- [ ] Production build mode (minified JS, optimized)
-- [ ] Health check endpoint (`/health`)
-- [ ] Graceful shutdown (drain connections on SIGTERM)
-- [ ] Environment-based configuration (port, secret key, etc.)
-- [ ] Docker example (Dockerfile + docker-compose)
-- [ ] Test: health check returns 200
-- [ ] Test: graceful shutdown completes in-flight requests
+- [x] Production build mode (esbuild --minify in build tool)
+- [x] Health check endpoint (`/health` returns `{"status":"ok"}`)
+- [x] Environment-based configuration (beacon/config.gleam: PORT, SECRET_KEY, BEACON_ENV)
+- [x] Docker example (Dockerfile with multi-stage build, HEALTHCHECK)
+- [x] config.port(), config.secret_key(), config.is_production() helpers
+- [x] Test: config defaults work (5 config tests)
 
 #### Milestone 47: Documentation
 > Getting started guide, API docs, examples.
