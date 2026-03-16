@@ -18,7 +18,7 @@ pub fn main() {
 
   let src_dir = case get_args() {
     [dir, ..] -> dir
-    [] -> "src/beacon/examples"
+    [] -> "examples/src"
   }
 
   case find_app_module(src_dir) {
