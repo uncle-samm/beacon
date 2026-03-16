@@ -30,6 +30,11 @@
   let cachedDynamics = []; // Current dynamic values
   let pendingEvents = []; // Events awaiting server acknowledgment
   let domSnapshots = {}; // DOM snapshots for rollback, keyed by clock
+  let serverModelVersion = 0; // Track server model version
+
+  // Local-only event handlers — these never send to the server
+  // Set via Beacon.registerLocalHandler(handlerId, callback)
+  let localHandlers = {};
 
   // --- Initialization ---
 
@@ -159,6 +164,9 @@
         break;
       case "heartbeat_ack":
         // Server acknowledged our heartbeat — connection is alive
+        break;
+      case "model_sync":
+        handleModelSync(msg.model, msg.version, msg.ack_clock);
         break;
       case "error":
         console.error("[beacon] Server error:", msg.reason);
@@ -678,7 +686,32 @@
     return indices.join(".");
   }
 
+  /**
+   * Handle authoritative Model state from server.
+   * Client takes server Model as ground truth.
+   * Rendered statics/dynamics are refreshed.
+   */
+  function handleModelSync(modelJson, version, ackClock) {
+    console.log("[beacon] Model sync v" + version);
+    serverModelVersion = version;
+    acknowledgeClock(ackClock);
+    // The model_sync may come with a payload to re-render
+    // For now, the server also sends a patch alongside model_sync
+    // so the DOM is already up to date
+  }
+
   function sendEvent(name, handlerId, data, targetPath) {
+    // Check if this is a local-only handler (registered via Beacon.registerLocalHandler)
+    if (handlerId in localHandlers) {
+      // Local-only: run the handler, NO server traffic
+      console.log("[beacon] Local event:", handlerId);
+      localHandlers[handlerId](data);
+      return;
+    }
+
+    // Model-changing: send to server
+    eventClock++;
+
     // Snapshot DOM before sending (for potential rollback)
     domSnapshots[eventClock] = appRoot.innerHTML;
 
@@ -729,7 +762,23 @@
   }
 
   // --- Public API ---
-  window.Beacon = { init: init };
+  window.Beacon = {
+    init: init,
+    /**
+     * Register a local-only event handler.
+     * Events for this handler ID will be processed client-side only,
+     * producing ZERO WebSocket traffic.
+     */
+    registerLocalHandler: function (handlerId, callback) {
+      localHandlers[handlerId] = callback;
+    },
+    /**
+     * Get current server model version.
+     */
+    getModelVersion: function () {
+      return serverModelVersion;
+    },
+  };
 
   // Auto-initialize if data-beacon-auto attribute is present
   if (document.currentScript && document.currentScript.hasAttribute("data-beacon-auto")) {

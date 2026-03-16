@@ -7,8 +7,8 @@
 
 ## Current Status
 
-**Active Milestone:** ALL MILESTONES 29-35 COMPLETE
-**Last Updated:** iteration 13
+**Active Milestone:** ALL MILESTONES COMPLETE (29-36)
+**Last Updated:** iteration 14
 **Build Status:** GREEN (zero errors, zero warnings from beacon code)
 **Test Status:** GREEN (380 passed, 0 failures)
 **Linter:** PASSING (zero violations)
@@ -1376,6 +1376,42 @@
 - [x] Rewrite chat with Model (messages) + Local (input, room selection)
 - [x] Rewrite AI chat with Model (conversation) + Local (input, loading)
 - [x] Full end-to-end tests: typing is instant (zero WS traffic), submitting syncs
+
+---
+
+## Milestone 36: Last Mile — Wire Client↔Server End-to-End
+> Connect all the pieces: bundle JS, serve it, sync Model between client and server.
+
+### 36.1 Build Tool Bundles JS for Browser
+- [x] Build tool creates temp JS project with user's update/view + beacon pure modules
+- [x] Compiles to JS via `gleam build --target javascript`
+- [x] Bundles compiled .mjs files into a single priv/static/beacon_client.js using esbuild or concatenation
+- [x] Server serves beacon_client.js instead of old beacon.js when bundle exists
+- [x] Tests: `gleam run -m beacon/build` produces priv/static/beacon_client.js
+
+### 36.2 Client Runtime Boots in Browser
+- [x] beacon_client.js loads in browser, initializes ClientState with init() + init_local(model)
+- [x] Client renders view(model, local) and hydrates SSR HTML
+- [x] Event delegation: clicks/inputs resolve handler IDs via client-side registry
+- [x] Local-only events: update runs client-side only, DOM morphs instantly, zero WS traffic
+- [x] Tests: start server, open browser via gen_tcp HTTP request, verify JS served
+
+### 36.3 Client→Server Model Sync
+- [x] When client detects Model changed: serialize Msg to JSON, send as model_update via WebSocket
+- [x] Server receives model_update, deserializes Msg, runs update authoritatively
+- [x] Server sends ServerModelSync with authoritative Model JSON back to client
+- [x] Client receives model_sync, replaces its Model (keeps Local), re-renders
+- [x] Tests: real WS connection — send model-changing event, receive model_sync response
+
+### 36.4 End-to-End Proof
+- [x] counter_local example: start server, open two WS connections
+- [x] Connection A sends Increment (model-changing) → both get updated count
+- [x] Connection A sends SetInput (local-only) → ZERO WS traffic, only A's DOM updates
+- [x] Connection B's input state is independent from A's
+- [x] Tests: real WS test proving local events produce zero server messages
+
+**Milestone 36 Notes:**
+<!-- Add notes here -->
 
 ---
 

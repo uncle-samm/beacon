@@ -1,10 +1,10 @@
 ---
 active: true
-iteration: 2
+iteration: 1
 session_id: 
 max_iterations: 200
 completion_promise: "BEACON_COMPLETE"
-started_at: "2026-03-16T08:53:19Z"
+started_at: "2026-03-16T09:34:42Z"
 ---
 
-You are building Beacon, a full-stack Gleam web framework. Read docs/PROGRESS.md and .claude/plans/bubbly-squishing-naur.md for full context. Milestones 29-35 add CLIENT-SIDE update execution. The user writes one Model (server shared) and one Local (client instant). The update function runs on BOTH sides — compiled to JS via build tool. Auto-inference: if only Local changed, zero server traffic. If Model changed, sync with server. Milestone 29: remove Erlang FFI from pure modules (element, view, rendered). Milestone 30: app_with_local API + runtime support. Milestone 31: build tool (Glance analyze, codegen, compile to JS). Milestone 32: JS handler registry. Milestone 33: client MVU runtime. Milestone 34: server sync protocol. Milestone 35: integration + rewrite examples. gleam build zero warnings, gleam test all pass, existing tests must not break. Output BEACON_COMPLETE when all 7 milestones done.
+You are building Beacon, a full-stack Gleam web framework. Read docs/PROGRESS.md — milestone 36 is the LAST MILE. All pieces exist but are not connected end-to-end. Tasks: (1) Build tool bundles compiled JS into priv/static/beacon_client.js — creates temp JS project, compiles user update+view to JS, concatenates into one servable file. (2) Client runtime boots in browser — loads beacon_client.js, initializes Model+Local, renders view, event delegation works, local-only events update DOM with ZERO WebSocket traffic. (3) Client→Server model sync — model-changing events serialize Msg to JSON, send via WS, server runs update authoritatively, sends model_sync back, client merges. (4) End-to-end proof with real WebSocket connections — two connections, one sends local event (zero traffic), one sends model event (syncs to both). gleam build zero warnings, gleam test all pass. Output BEACON_COMPLETE when all 4 tasks done with real working integration.
