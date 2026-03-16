@@ -16,57 +16,68 @@ pub fn main() {
   log.configure()
   log.info("beacon.build", "Starting client-side compilation")
 
-  let src_dir = case get_args() {
-    [dir, ..] -> dir
+  let arg = case get_args() {
+    [a, ..] -> a
     [] -> "examples/src"
   }
 
-  case find_app_module(src_dir) {
-    Ok(#(path, source)) -> {
-      log.info("beacon.build", "Found app module: " <> path)
-      case analyzer.analyze(source) {
-        Ok(analysis) -> {
-          // Log analysis
-          list.each(analysis.msg_variants, fn(v) {
-            let label = case v.affects_model {
-              True -> "MODEL"
-              False -> "LOCAL"
-            }
-            log.info("beacon.build", "  " <> v.name <> " → " <> label)
-          })
+  // If arg is a .gleam file, use it directly. Otherwise search the directory.
+  case string.ends_with(arg, ".gleam") {
+    True -> {
+      case simplifile.read(arg) {
+        Ok(source) -> {
+          log.info("beacon.build", "Using specified module: " <> arg)
+          compile_module(arg, source)
+        }
+        Error(_) -> log.error("beacon.build", "Cannot read file: " <> arg)
+      }
+    }
+    False -> {
+      case find_app_module(arg) {
+        Ok(#(path, source)) -> {
+          log.info("beacon.build", "Found app module: " <> path)
+          compile_module(path, source)
+        }
+        Error(reason) -> log.error("beacon.build", reason)
+      }
+    }
+  }
+}
 
-          // Step 3: Create temp JS project
-          log.info("beacon.build", "Creating temp JS project...")
-          case create_temp_project(path, source, analysis) {
+/// Compile a specific module to JavaScript.
+fn compile_module(path: String, source: String) -> Nil {
+  case analyzer.analyze(source) {
+    Ok(analysis) -> {
+      list.each(analysis.msg_variants, fn(v) {
+        let label = case v.affects_model {
+          True -> "MODEL"
+          False -> "LOCAL"
+        }
+        log.info("beacon.build", "  " <> v.name <> " → " <> label)
+      })
+      log.info("beacon.build", "Creating temp JS project...")
+      case create_temp_project(path, source, analysis) {
+        Ok(Nil) -> {
+          log.info("beacon.build", "Compiling to JavaScript...")
+          case compile_js() {
             Ok(Nil) -> {
-              // Step 4: Compile to JS
-              log.info("beacon.build", "Compiling to JavaScript...")
-              case compile_js() {
-                Ok(Nil) -> {
-                  // Step 5: Bundle with esbuild
-                  log.info("beacon.build", "Bundling with esbuild...")
-                  case bundle_js() {
-                    Ok(Nil) ->
-                      log.info(
-                        "beacon.build",
-                        "Done! priv/static/beacon_client.js updated",
-                      )
-                    Error(reason) ->
-                      log.error("beacon.build", "Bundle failed: " <> reason)
-                  }
-                }
+              log.info("beacon.build", "Bundling with esbuild...")
+              case bundle_js() {
+                Ok(Nil) ->
+                  log.info("beacon.build", "Done! priv/static/beacon_client.js updated")
                 Error(reason) ->
-                  log.error("beacon.build", "Compile failed: " <> reason)
+                  log.error("beacon.build", "Bundle failed: " <> reason)
               }
             }
             Error(reason) ->
-              log.error("beacon.build", "Project creation failed: " <> reason)
+              log.error("beacon.build", "Compile failed: " <> reason)
           }
         }
-        Error(reason) -> log.error("beacon.build", "Analysis failed: " <> reason)
+        Error(reason) ->
+          log.error("beacon.build", "Project creation failed: " <> reason)
       }
     }
-    Error(reason) -> log.error("beacon.build", reason)
+    Error(reason) -> log.error("beacon.build", "Analysis failed: " <> reason)
   }
 }
 
