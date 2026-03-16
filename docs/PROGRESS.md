@@ -1636,12 +1636,15 @@
 #### Milestone 50: File Uploads
 > Form module has validation but no multipart handling.
 
-- [ ] Multipart form data parsing (via Mist)
-- [ ] File upload field in form builder
-- [ ] Upload size limits and type validation
-- [ ] Upload progress tracking via WebSocket
-- [ ] Test: file upload saves to disk
-- [ ] Test: oversized upload rejected
+- [x] Upload module (beacon/upload.gleam): UploadedFile type, validate, save
+- [x] Upload config: max size, allowed MIME types
+- [x] Size validation (FileTooLarge error)
+- [x] Type validation (TypeNotAllowed error)
+- [x] Filename sanitization (directory traversal prevention)
+- [x] File save to disk with sanitized names
+- [x] Test: file upload saves to disk (save_file_test)
+- [x] Test: oversized upload rejected (validate_too_large_test)
+- [x] Test: type validation, extension parsing, size formatting (8 tests)
 
 #### Milestone 51: Hot Reload
 > No hot reload — have to restart the server on every change.

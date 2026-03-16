@@ -1,5 +1,5 @@
 -module(beacon_test_ffi).
--export([unique_ref/0, pd_put/2, pd_get/1, string_contains/2, do_crash/0]).
+-export([unique_ref/0, pd_put/2, pd_get/1, string_contains/2, do_crash/0, ensure_dir/1]).
 
 %% Returns a unique binary string.
 unique_ref() ->
@@ -19,6 +19,13 @@ string_contains(Haystack, Needle) ->
     case binary:match(Haystack, Needle) of
         nomatch -> false;
         _ -> true
+    end.
+
+%% Ensure a directory exists (creates it if needed).
+ensure_dir(Path) ->
+    case filelib:ensure_dir(<<Path/binary, "/dummy">>) of
+        ok -> {ok, nil};
+        {error, _} -> {error, nil}
     end.
 
 %% Intentionally crash for testing error boundaries.
