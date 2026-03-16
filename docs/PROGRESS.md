@@ -7,10 +7,10 @@
 
 ## Current Status
 
-**Active Milestone:** P1 — Production Readiness
-**Last Completed:** 42 — Server Functions (P0 complete)
+**Active Milestone:** 43 — Middleware & Auth (P1 Production Readiness)
+**Last Completed:** 42 — Server Functions (P0 complete, 397 tests)
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (380 passed, 0 failures)
+**Test Status:** GREEN (397 passed, 0 failures)
 **Linter:** PASSING (zero violations)
 
 ---
@@ -1555,19 +1555,56 @@
 ### P1: Production Readiness (needed before deploying real apps)
 
 #### Milestone 43: Middleware & Auth
-> TODO: Design middleware/plug system, session management, auth helpers, CSRF protection.
+> Middleware pipeline, session management, auth helpers.
+
+- [ ] Request/response middleware pipeline (before/after hooks)
+- [ ] Session middleware (cookie-based sessions)
+- [ ] Auth helpers (login/logout, session-bound user)
+- [ ] CSRF protection middleware
+- [ ] Rate limiting middleware
+- [ ] Test: middleware chain executes in order
+- [ ] Test: auth rejects unauthenticated requests
 
 #### Milestone 44: Form Handling
-> TODO: Form validation, multi-field forms, file uploads, form state management.
+> Multi-field forms, validation, file uploads.
+
+- [ ] Form builder API (`beacon.form()` with typed fields)
+- [ ] Server-side validation with error messages
+- [ ] Client-side validation feedback (instant, local)
+- [ ] File upload support (multipart form data)
+- [ ] Test: form submission with validation errors
+- [ ] Test: file upload end-to-end
 
 #### Milestone 45: CSS & Asset Pipeline
-> TODO: CSS modules or scoped styles, static asset serving, asset fingerprinting/cache busting.
+> Scoped styles, static assets, cache busting.
+
+- [ ] Scoped CSS support (per-component styles)
+- [ ] Static asset serving with cache headers
+- [ ] Asset fingerprinting for cache busting
+- [ ] CSS hot reload in dev mode
+- [ ] Test: static files served with correct content type
+- [ ] Test: fingerprinted assets return 304 on revalidation
 
 #### Milestone 46: Production Deployment
-> TODO: Release builds, Docker support, health checks, graceful shutdown, environment config.
+> Release builds, health checks, graceful shutdown.
+
+- [ ] Production build mode (minified JS, optimized)
+- [ ] Health check endpoint (`/health`)
+- [ ] Graceful shutdown (drain connections on SIGTERM)
+- [ ] Environment-based configuration (port, secret key, etc.)
+- [ ] Docker example (Dockerfile + docker-compose)
+- [ ] Test: health check returns 200
+- [ ] Test: graceful shutdown completes in-flight requests
 
 #### Milestone 47: Documentation
-> TODO: Getting started guide, API reference, example walkthrough, architecture docs.
+> Getting started guide, API docs, examples.
+
+- [ ] Getting started guide (hello world to deployed app)
+- [ ] API reference for all public modules
+- [ ] Example walkthrough (counter, chat, routing app)
+- [ ] Architecture overview doc
+- [ ] CHANGELOG with all milestones
+- [ ] Test: `gleam docs build` succeeds
 
 ### P2: Nice-to-Have (framework polish)
 
