@@ -7,10 +7,10 @@
 
 ## Current Status
 
-**Active Milestone:** 43 — Middleware & Auth (P1 Production Readiness)
-**Last Completed:** 42 — Server Functions (P0 complete, 397 tests)
+**Active Milestone:** P2 — Nice-to-Have (framework polish)
+**Last Completed:** 47 — Documentation (P1 complete)
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (397 passed, 0 failures)
+**Test Status:** GREEN (418 passed, 0 failures)
 **Linter:** PASSING (zero violations)
 
 ---
@@ -1600,12 +1600,12 @@
 #### Milestone 47: Documentation
 > Getting started guide, API docs, examples.
 
-- [ ] Getting started guide (hello world to deployed app)
-- [ ] API reference for all public modules
-- [ ] Example walkthrough (counter, chat, routing app)
-- [ ] Architecture overview doc
-- [ ] CHANGELOG with all milestones
-- [ ] Test: `gleam docs build` succeeds
+- [x] Getting started guide (docs/GETTING_STARTED.md — hello world to deployed app)
+- [x] API reference for all public modules (`gleam docs build` succeeds)
+- [x] Example walkthrough (counter, chat, counter_local, triple_counter in src/beacon/examples/)
+- [x] Architecture overview doc (docs/ARCHITECTURE.md — module map, wire protocol, state layers)
+- [x] CHANGELOG with all milestones (CHANGELOG.md — P0 and P1)
+- [x] Test: `gleam docs build` succeeds
 
 ### P2: Nice-to-Have (framework polish)
 
