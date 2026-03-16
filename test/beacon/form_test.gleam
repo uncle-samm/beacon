@@ -161,6 +161,56 @@ pub fn session_csrf_wrong_session_fails_test() {
   let assert False = form.verify_session_csrf(store, "other_session", token)
 }
 
+pub fn validate_email_valid_test() {
+  let f = form.new("secret")
+    |> form.add_field("email", "user@example.com")
+    |> form.validate_email("email")
+  let assert False = form.has_errors(f)
+}
+
+pub fn validate_email_invalid_test() {
+  let f = form.new("secret")
+    |> form.add_field("email", "not-an-email")
+    |> form.validate_email("email")
+  let assert True = form.has_errors(f)
+}
+
+pub fn validate_max_length_test() {
+  let f = form.new("secret")
+    |> form.add_field("name", "toolongvalue")
+    |> form.validate_max_length("name", 5)
+  let assert True = form.has_errors(f)
+}
+
+pub fn validate_matches_test() {
+  let f = form.new("secret")
+    |> form.add_field("password", "abc123")
+    |> form.add_field("confirm", "abc123")
+    |> form.validate_matches("confirm", "password", "Passwords must match")
+  let assert False = form.has_errors(f)
+}
+
+pub fn validate_matches_mismatch_test() {
+  let f = form.new("secret")
+    |> form.add_field("password", "abc123")
+    |> form.add_field("confirm", "xyz789")
+    |> form.validate_matches("confirm", "password", "Passwords must match")
+  let assert True = form.has_errors(f)
+}
+
+pub fn validate_pipeline_test() {
+  let f = form.new("secret")
+    |> form.add_field("name", "")
+    |> form.add_field("email", "bad")
+    |> form.validate([
+      form.validate_required(_, "name"),
+      form.validate_email(_, "email"),
+    ])
+  let assert True = form.has_errors(f)
+  let assert True = form.field_has_errors(f, "name")
+  let assert True = form.field_has_errors(f, "email")
+}
+
 fn unique_id() -> String {
   do_unique_id()
 }

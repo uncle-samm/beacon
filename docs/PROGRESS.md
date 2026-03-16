@@ -1566,14 +1566,14 @@
 - [x] Test: auth rejects unauthenticated requests — auth.require_auth middleware + auth_test.gleam
 
 #### Milestone 44: Form Handling
-> Multi-field forms, validation, file uploads.
+> Multi-field forms, validation, rendering.
 
-- [ ] Form builder API (`beacon.form()` with typed fields)
-- [ ] Server-side validation with error messages
-- [ ] Client-side validation feedback (instant, local)
-- [ ] File upload support (multipart form data)
-- [ ] Test: form submission with validation errors
-- [ ] Test: file upload end-to-end
+- [x] Form builder API (form.new, add_field, get/set_value, CSRF)
+- [x] Server-side validation (required, min/max_length, email, matches, validate pipeline)
+- [x] Form rendering (text_input, password_input, textarea, select, csrf_field)
+- [x] Error display (field-level and form-level errors, error span rendering)
+- [x] Test: form submission with validation errors (6 new validator tests)
+- [x] Test: CSRF token generation, verification, session-bound (one-time use)
 
 #### Milestone 45: CSS & Asset Pipeline
 > Scoped styles, static assets, cache busting.

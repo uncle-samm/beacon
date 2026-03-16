@@ -158,6 +158,123 @@ pub fn validate_min_length(
   }
 }
 
+/// Validate that a field matches a regex-like pattern (email format).
+pub fn validate_email(form: Form, field_name: String) -> Form {
+  case get_field(form, field_name) {
+    Ok(field) -> {
+      case string.contains(field.value, "@") && string.contains(field.value, ".") {
+        True -> form
+        False -> add_error(form, field_name, "Invalid email address")
+      }
+    }
+    Error(Nil) -> form
+  }
+}
+
+/// Validate that a field's value has a maximum length.
+pub fn validate_max_length(
+  form: Form,
+  field_name: String,
+  max: Int,
+) -> Form {
+  case get_field(form, field_name) {
+    Ok(field) -> {
+      case string.length(field.value) > max {
+        True ->
+          add_error(
+            form,
+            field_name,
+            "Must be at most " <> int.to_string(max) <> " characters",
+          )
+        False -> form
+      }
+    }
+    Error(Nil) -> form
+  }
+}
+
+/// Validate that two fields match (e.g., password confirmation).
+pub fn validate_matches(
+  form: Form,
+  field_name: String,
+  other_field: String,
+  error_msg: String,
+) -> Form {
+  let val1 = get_value(form, field_name)
+  let val2 = get_value(form, other_field)
+  case val1 == val2 {
+    True -> form
+    False -> add_error(form, field_name, error_msg)
+  }
+}
+
+/// Validate a form by running multiple validation functions.
+pub fn validate(
+  form: Form,
+  validators: List(fn(Form) -> Form),
+) -> Form {
+  list.fold(validators, clear_errors(form), fn(f, validator) {
+    validator(f)
+  })
+}
+
+/// Render a password input field.
+pub fn password_input(
+  form: Form,
+  name: String,
+  attrs: List(Attr),
+) -> Node(msg) {
+  let value = get_value(form, name)
+  let base_attrs = [
+    element.attr("type", "password"),
+    element.attr("name", name),
+    element.attr("value", value),
+    element.on("input", name),
+  ]
+  let all_attrs = list.append(base_attrs, attrs)
+  element.el("input", all_attrs, [])
+}
+
+/// Render a textarea field.
+pub fn textarea(
+  form: Form,
+  name: String,
+  attrs: List(Attr),
+) -> Node(msg) {
+  let value = get_value(form, name)
+  let base_attrs = [
+    element.attr("name", name),
+    element.on("input", name),
+  ]
+  let all_attrs = list.append(base_attrs, attrs)
+  element.el("textarea", all_attrs, [element.text(value)])
+}
+
+/// Render a select dropdown.
+pub fn select(
+  form: Form,
+  name: String,
+  options: List(#(String, String)),
+  attrs: List(Attr),
+) -> Node(msg) {
+  let current = get_value(form, name)
+  let base_attrs = [
+    element.attr("name", name),
+    element.on("change", name),
+  ]
+  let all_attrs = list.append(base_attrs, attrs)
+  let option_nodes =
+    list.map(options, fn(opt) {
+      let #(value, label) = opt
+      let selected_attrs = case value == current {
+        True -> [element.attr("value", value), element.attr("selected", "selected")]
+        False -> [element.attr("value", value)]
+      }
+      element.el("option", selected_attrs, [element.text(label)])
+    })
+  element.el("select", all_attrs, option_nodes)
+}
+
 /// Generate a CSRF token.
 fn generate_csrf_token(secret_key: String) -> String {
   let data = int.to_string(erlang_unique_integer())
