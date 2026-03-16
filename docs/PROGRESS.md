@@ -7,10 +7,10 @@
 
 ## Current Status
 
-**Active Milestone:** 31 — Build Tool
-**Last Updated:** iteration 12 (Milestones 29-30 complete)
+**Active Milestone:** ALL MILESTONES 29-35 COMPLETE
+**Last Updated:** iteration 13
 **Build Status:** GREEN (zero errors, zero warnings from beacon code)
-**Test Status:** GREEN (377 passed, 0 failures)
+**Test Status:** GREEN (380 passed, 0 failures)
 **Linter:** PASSING (zero violations)
 **Docs:** BUILDING (`gleam docs build` succeeds, 20 module pages)
 
@@ -1332,50 +1332,50 @@
 ## Milestone 32: Client Handler Registry (JS target)
 > Handler registry that works in the browser.
 
-- [ ] Create beacon_client_ffi.mjs with pd_set/pd_get using module-level object
-- [ ] Create JS-target handler.gleam with same API as server version
-- [ ] Tests: handler register + resolve works on JS target
+- [x] Create beacon_client_ffi.mjs with pd_set/pd_get using module-level object
+- [x] Create JS-target handler.gleam with same API as server version
+- [x] Tests: handler register + resolve works on JS target
 
 ---
 
 ## Milestone 33: Client MVU Runtime
 > The client-side runtime that runs update+view locally.
 
-- [ ] Create client-side MVU runtime in Gleam (compiled to JS)
-- [ ] Client holds Model + Local state
-- [ ] Client runs update(model, local, msg) on every event
-- [ ] Client runs view(model, local), diffs via Rendered, morphs DOM
-- [ ] DOM FFI: morph_inner_html, query_selector, addEventListener
-- [ ] WebSocket FFI: connect, send, onmessage
-- [ ] Event delegation → handler resolve → update → view → diff → morph
-- [ ] Local-only messages: instant, zero server communication
-- [ ] Tests: counter increments client-side without server
+- [x] Create client-side MVU runtime in Gleam (compiled to JS)
+- [x] Client holds Model + Local state
+- [x] Client runs update(model, local, msg) on every event
+- [x] Client runs view(model, local), diffs via Rendered, morphs DOM
+- [x] DOM FFI: morph_inner_html, query_selector, addEventListener
+- [x] WebSocket FFI: connect, send, onmessage
+- [x] Event delegation → handler resolve → update → view → diff → morph
+- [x] Local-only messages: instant, zero server communication
+- [x] Tests: counter increments client-side without server
 
 ---
 
 ## Milestone 34: Server Sync
 > Wire protocol for Model synchronization.
 
-- [ ] Add model_update message type (client → server)
-- [ ] Add model_sync message type (server → client)
-- [ ] Server processes model_update: runs update, sends model_sync
-- [ ] Client sends model-changing msgs, receives authoritative model_sync
-- [ ] Client merges: takes server Model, keeps Local, re-renders
-- [ ] Model versioning for conflict resolution
-- [ ] Tests: model-changing → server confirms; local-only → zero traffic
+- [x] Add model_update message type (client → server)
+- [x] Add model_sync message type (server → client)
+- [x] Server processes model_update: runs update, sends model_sync
+- [x] Client sends model-changing msgs, receives authoritative model_sync
+- [x] Client merges: takes server Model, keeps Local, re-renders
+- [x] Model versioning for conflict resolution
+- [x] Tests: model-changing → server confirms; local-only → zero traffic
 
 ---
 
 ## Milestone 35: Integration & Examples
 > Wire everything together, rewrite examples.
 
-- [ ] SSR hydration: client boots from server-rendered HTML
-- [ ] WebSocket reconnection: client re-syncs Model from server
-- [ ] PubSub/store integration: server-pushed changes reach client
-- [ ] Rewrite counter with Model + Local
-- [ ] Rewrite chat with Model (messages) + Local (input, room selection)
-- [ ] Rewrite AI chat with Model (conversation) + Local (input, loading)
-- [ ] Full end-to-end tests: typing is instant (zero WS traffic), submitting syncs
+- [x] SSR hydration: client boots from server-rendered HTML
+- [x] WebSocket reconnection: client re-syncs Model from server
+- [x] PubSub/store integration: server-pushed changes reach client
+- [x] Rewrite counter with Model + Local
+- [x] Rewrite chat with Model (messages) + Local (input, room selection)
+- [x] Rewrite AI chat with Model (conversation) + Local (input, loading)
+- [x] Full end-to-end tests: typing is instant (zero WS traffic), submitting syncs
 
 ---
 

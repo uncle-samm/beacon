@@ -62,6 +62,9 @@ pub type ServerMessage {
   ServerHeartbeatAck
   /// Server-initiated error message.
   ServerError(reason: String)
+  /// Authoritative Model state from server.
+  /// Client takes this as ground truth, keeps its Local state.
+  ServerModelSync(model_json: String, version: Int, ack_clock: Int)
 }
 
 /// Internal messages that the connection actor can receive.
@@ -75,6 +78,8 @@ pub type InternalMessage {
   SendMount(payload: String)
   /// An error needs to be sent to the client.
   SendError(reason: String)
+  /// Send authoritative Model state to the client.
+  SendModelSync(model_json: String, version: Int, ack_clock: Int)
 }
 
 /// State held by each WebSocket connection actor.
@@ -161,6 +166,14 @@ pub fn encode_server_message(msg: ServerMessage) -> String {
       json.object([
         #("type", json.string("error")),
         #("reason", json.string(reason)),
+      ])
+      |> json.to_string
+    ServerModelSync(model_json, version, ack_clock) ->
+      json.object([
+        #("type", json.string("model_sync")),
+        #("model", json.string(model_json)),
+        #("version", json.int(version)),
+        #("ack_clock", json.int(ack_clock)),
       ])
       |> json.to_string
   }
@@ -371,6 +384,18 @@ fn handle_websocket(
                 state.connection,
                 state.id,
                 ServerError(reason: reason),
+              )
+              mist.continue(state)
+            }
+            SendModelSync(model_json, version, ack_clock) -> {
+              send_message(
+                state.connection,
+                state.id,
+                ServerModelSync(
+                  model_json: model_json,
+                  version: version,
+                  ack_clock: ack_clock,
+                ),
               )
               mist.continue(state)
             }
