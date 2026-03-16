@@ -13,6 +13,7 @@ import beacon/element.{
 }
 import beacon/template/rendered.{type Rendered}
 import gleam/list
+import gleam/string
 import gleam/string_tree.{type StringTree}
 
 /// Convert a Node tree into a Rendered struct.
@@ -164,5 +165,6 @@ fn escape_attr(text: String) -> String {
   |> do_replace(">", "&gt;")
 }
 
-@external(erlang, "beacon_element_ffi", "string_replace")
-fn do_replace(subject: String, pattern: String, replacement: String) -> String
+fn do_replace(subject: String, pattern: String, replacement: String) -> String {
+  string.replace(subject, pattern, replacement)
+}

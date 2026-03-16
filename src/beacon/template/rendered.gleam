@@ -5,7 +5,7 @@
 /// Reference: LiveView's Rendered struct with static/dynamic splitting,
 /// fingerprint-based change detection, and integer-keyed JSON wire format.
 
-import gleam/crypto
+import gleam/bit_array
 import gleam/int
 import gleam/json
 import gleam/list
@@ -112,15 +112,26 @@ pub fn to_html(rendered: Rendered) -> String {
 // --- Internal ---
 
 /// Compute a fingerprint from static template parts.
-/// Uses a hash of concatenated statics to uniquely identify the template structure.
+/// Uses djb2 hash — pure Gleam, works on both Erlang and JS targets.
+/// Only needs equality checking (not security), so djb2 is sufficient.
 fn compute_fingerprint(statics: List(String)) -> Int {
   let combined = list.fold(statics, "", fn(acc, s) { acc <> "|" <> s })
-  let hash =
-    crypto.hash(crypto.Sha256, <<combined:utf8>>)
-  // Take first 8 bytes as an integer for a compact fingerprint
-  case hash {
-    <<a:int-size(64), _rest:bits>> -> a
-    _ -> 0
+  djb2_hash(combined)
+}
+
+/// djb2 hash function — fast, pure Gleam, works on any target.
+fn djb2_hash(input: String) -> Int {
+  let bytes = bit_array.from_string(input)
+  djb2_loop(bytes, 5381)
+}
+
+fn djb2_loop(bytes: BitArray, hash: Int) -> Int {
+  case bytes {
+    <<byte:int-size(8), rest:bits>> -> {
+      let new_hash = { hash * 33 + byte } % 2_147_483_647
+      djb2_loop(rest, new_hash)
+    }
+    _ -> hash
   }
 }
 

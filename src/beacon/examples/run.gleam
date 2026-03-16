@@ -10,6 +10,7 @@ import beacon
 import beacon/examples/ai_chat
 import beacon/examples/chat
 import beacon/examples/counter
+import beacon/examples/counter_local
 import beacon/examples/pong
 import gleam/io
 
@@ -18,6 +19,7 @@ pub fn main() {
   case args {
     ["chat", ..] -> chat.start()
     ["counter", ..] -> counter.main()
+    ["local", ..] -> counter_local.main()
     ["ai", ..] -> start_ai_chat()
     ["pong", ..] -> start_pong()
     _ -> {

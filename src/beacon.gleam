@@ -86,6 +86,9 @@ pub opaque type AppBuilder(model, msg) {
     on_pubsub: Option(fn() -> msg),
     serialize_model: Option(fn(model) -> String),
     deserialize_model: Option(fn(String) -> Result(model, String)),
+    /// For app_with_local: wraps model+local into a combined model type.
+    /// When set, the "model" in the builder is actually #(Model, Local).
+    has_local: Bool,
   )
 }
 
@@ -113,6 +116,7 @@ pub fn app(
     on_pubsub: None,
     serialize_model: None,
     deserialize_model: None,
+    has_local: False,
   )
 }
 
@@ -137,6 +141,53 @@ pub fn app_with_effects(
     on_pubsub: None,
     serialize_model: None,
     deserialize_model: None,
+    has_local: False,
+  )
+}
+
+/// Create an app with separate Model (server/shared) and Local (client/instant) state.
+/// `init` returns the server Model. `init_local` derives initial Local from Model.
+/// `update` takes both and returns both — framework auto-infers what needs the server.
+///
+/// ```gleam
+/// beacon.app_with_local(init, init_local, update, view) |> beacon.start(8080)
+/// ```
+pub fn app_with_local(
+  init: fn() -> model,
+  init_local: fn(model) -> local,
+  update: fn(model, local, msg) -> #(model, local),
+  view: fn(model, local) -> Node(msg),
+) -> AppBuilder(#(model, local), msg) {
+  // Wrap into a combined model: #(model, local)
+  let combined_init = fn() {
+    let model = init()
+    let local = init_local(model)
+    #(model, local)
+  }
+  let combined_update = fn(combined: #(model, local), msg: msg) {
+    let #(model, local) = combined
+    let #(new_model, new_local) = update(model, local, msg)
+    #(new_model, new_local)
+  }
+  let combined_view = fn(combined: #(model, local)) {
+    let #(model, local) = combined
+    view(model, local)
+  }
+  AppBuilder(
+    init_simple: Some(combined_init),
+    init_effect: None,
+    update_simple: Some(combined_update),
+    update_effect: None,
+    view: combined_view,
+    title: "Beacon",
+    secret_key: generate_secret(),
+    middlewares: [middleware.secure_headers()],
+    static_dir: None,
+    subscriptions: [],
+    on_pubsub: None,
+    serialize_model: None,
+    deserialize_model: None,
+    has_local: True,
   )
 }
 

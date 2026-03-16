@@ -10,6 +10,7 @@
 
 import gleam/json
 import gleam/list
+import gleam/string
 import gleam/string_tree.{type StringTree}
 
 /// A node in the virtual DOM tree.
@@ -216,5 +217,6 @@ fn escape_attr(text: String) -> String {
   |> do_replace(">", "&gt;")
 }
 
-@external(erlang, "beacon_element_ffi", "string_replace")
-fn do_replace(subject: String, pattern: String, replacement: String) -> String
+fn do_replace(subject: String, pattern: String, replacement: String) -> String {
+  string.replace(subject, pattern, replacement)
+}

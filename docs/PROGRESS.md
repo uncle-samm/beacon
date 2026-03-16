@@ -7,10 +7,10 @@
 
 ## Current Status
 
-**Active Milestone:** ALL MILESTONES 25-28 COMPLETE
-**Last Updated:** iteration 11
+**Active Milestone:** 31 — Build Tool
+**Last Updated:** iteration 12 (Milestones 29-30 complete)
 **Build Status:** GREEN (zero errors, zero warnings from beacon code)
-**Test Status:** GREEN (344 passed, 0 failures)
+**Test Status:** GREEN (377 passed, 0 failures)
 **Linter:** PASSING (zero violations)
 **Docs:** BUILDING (`gleam docs build` succeeds, 20 module pages)
 
@@ -1286,6 +1286,96 @@
 
 **Milestone 28 Notes:**
 <!-- Add notes here -->
+
+---
+
+## Milestone 29: Pure Module Cleanup
+> Remove Erlang FFI from modules that need to compile to JS target.
+
+- [x] Replace string_replace FFI in element.gleam with gleam/string.replace
+- [x] Replace string_replace FFI in view.gleam with gleam/string.replace
+- [x] Replace crypto.hash in rendered.gleam with pure Gleam djb2 hash
+- [x] Verify all existing 377 tests still pass
+- [x] Verify element.gleam, html.gleam, diff.gleam, view.gleam, rendered.gleam have ZERO Erlang FFI
+
+---
+
+## Milestone 30: Model + Local API
+> Server-side support for the dual-state architecture.
+
+- [x] Add `app_with_local(init, init_local, update, view)` to beacon.gleam — init_local: fn(Model) -> Local
+- [x] AppBuilder gains `local` type parameter
+- [x] RuntimeConfig: update becomes `fn(model, local, msg) -> #(model, local)`
+- [x] RuntimeState carries `local` value (server uses init_local(model) default)
+- [x] run_update and ClientJoined pass local through update/view
+- [x] Backward compatible: existing app() wraps with local=Nil
+- [x] Write counter_local example: Model(count) + Local(input, menu_open)
+- [x] Tests: new API works server-side, existing tests pass
+
+---
+
+## Milestone 31: Build Tool
+> Compiles user's update+view to JavaScript via temp project.
+
+- [x] Create beacon/build.gleam CLI (`gleam run -m beacon/build`)
+- [x] Glance analyzer: find Model, Local, Msg, update, view in user code
+- [x] Msg classifier: analyze update case arms → model-changing vs local-only
+- [x] Generate msg_affects_model() function
+- [x] Generate JSON codecs for Model and Msg types
+- [x] Create temp JS-target project in build/beacon_client/
+- [x] Copy pure beacon modules + user modules into temp project
+- [x] Compile to JS, bundle into priv/static/beacon_client.js
+- [x] Tests: build tool runs on counter_local example without error
+
+---
+
+## Milestone 32: Client Handler Registry (JS target)
+> Handler registry that works in the browser.
+
+- [ ] Create beacon_client_ffi.mjs with pd_set/pd_get using module-level object
+- [ ] Create JS-target handler.gleam with same API as server version
+- [ ] Tests: handler register + resolve works on JS target
+
+---
+
+## Milestone 33: Client MVU Runtime
+> The client-side runtime that runs update+view locally.
+
+- [ ] Create client-side MVU runtime in Gleam (compiled to JS)
+- [ ] Client holds Model + Local state
+- [ ] Client runs update(model, local, msg) on every event
+- [ ] Client runs view(model, local), diffs via Rendered, morphs DOM
+- [ ] DOM FFI: morph_inner_html, query_selector, addEventListener
+- [ ] WebSocket FFI: connect, send, onmessage
+- [ ] Event delegation → handler resolve → update → view → diff → morph
+- [ ] Local-only messages: instant, zero server communication
+- [ ] Tests: counter increments client-side without server
+
+---
+
+## Milestone 34: Server Sync
+> Wire protocol for Model synchronization.
+
+- [ ] Add model_update message type (client → server)
+- [ ] Add model_sync message type (server → client)
+- [ ] Server processes model_update: runs update, sends model_sync
+- [ ] Client sends model-changing msgs, receives authoritative model_sync
+- [ ] Client merges: takes server Model, keeps Local, re-renders
+- [ ] Model versioning for conflict resolution
+- [ ] Tests: model-changing → server confirms; local-only → zero traffic
+
+---
+
+## Milestone 35: Integration & Examples
+> Wire everything together, rewrite examples.
+
+- [ ] SSR hydration: client boots from server-rendered HTML
+- [ ] WebSocket reconnection: client re-syncs Model from server
+- [ ] PubSub/store integration: server-pushed changes reach client
+- [ ] Rewrite counter with Model + Local
+- [ ] Rewrite chat with Model (messages) + Local (input, room selection)
+- [ ] Rewrite AI chat with Model (conversation) + Local (input, loading)
+- [ ] Full end-to-end tests: typing is instant (zero WS traffic), submitting syncs
 
 ---
 
