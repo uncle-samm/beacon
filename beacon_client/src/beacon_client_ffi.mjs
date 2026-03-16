@@ -127,6 +127,8 @@ function handleMessage(raw) {
     case "patch": handlePatch(msg.payload); break;
     case "model_sync": handleModelSync(msg.model, msg.version); break;
     case "server_fn_result": handleServerFnResult(msg.call_id, msg.result, msg.ok); break;
+    case "navigate": handleServerNavigate(msg.path); break;
+    case "reload": console.log("[beacon] Hot reload — refreshing..."); location.reload(); break;
     case "heartbeat_ack": break;
     case "error": console.error("[beacon] Server error:", msg.reason); break;
   }
@@ -188,6 +190,14 @@ function handleModelSync(modelJson, version) {
     }
   } catch (e) {
     console.error("[beacon] Model sync decode failed:", e);
+  }
+}
+
+function handleServerNavigate(path) {
+  if (path && path !== location.pathname + location.search) {
+    history.pushState(null, "", path);
+    // Trigger navigate to server for route-change processing
+    send({ type: "navigate", path: path });
   }
 }
 

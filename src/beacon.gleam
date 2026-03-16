@@ -258,13 +258,14 @@ pub fn on_route_change(
 
 /// Create a redirect effect — navigates the client to a new URL.
 /// Use this in update to redirect after login, logout, etc.
+/// The effect sends a ServerNavigate message to the client, which
+/// updates the URL bar and triggers a route change.
 pub fn redirect(path: String) -> effect.Effect(msg) {
-  effect.none()
-  // Note: actual redirect is handled client-side via server_fn or model_sync.
-  // For now, this is a placeholder that the user handles in their update.
-  // The path is used for server-side routing decisions.
-  let _ = path
-  effect.none()
+  effect.from(fn(_dispatch) {
+    // Broadcast redirect to all connections via PubSub
+    // The runtime will pick this up and send ServerNavigate
+    pubsub.broadcast("beacon:redirect", path)
+  })
 }
 
 /// Register a server function callable from the client.

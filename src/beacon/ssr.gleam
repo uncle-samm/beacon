@@ -9,6 +9,8 @@
 import beacon/effect.{type Effect}
 import beacon/element.{type Node}
 import beacon/log
+import beacon/route
+import gleam/option.{type Option, None, Some}
 import gleam/bit_array
 import gleam/bytes_tree
 import gleam/crypto
@@ -71,6 +73,49 @@ pub fn render_page(config: SsrConfig(model, msg)) -> RenderedPage {
   let html = build_html_document(config.title, view_html, token)
 
   log.debug("beacon.ssr", "Dead render complete")
+  RenderedPage(html: html, session_token: token)
+}
+
+/// Render a page for a specific URL path (route-aware SSR).
+/// Runs init, then dispatches on_route_change if routes are configured.
+/// This ensures each URL gets route-specific SSR HTML.
+pub fn render_page_for_path(
+  config: SsrConfig(model, msg),
+  path: String,
+  route_patterns: List(route.RoutePattern),
+  on_route_change: Option(fn(route.Route) -> msg),
+  update: fn(model, msg) -> #(model, Effect(msg)),
+) -> RenderedPage {
+  log.debug("beacon.ssr", "Rendering for path: " <> path)
+
+  // Step 1: Initialize model
+  let #(model, _effects) = config.init()
+
+  // Step 2: Apply route change if configured
+  let model = case on_route_change {
+    Some(make_msg) -> {
+      let matched_route = case route.match_path(route_patterns, path) {
+        Some(r) -> r
+        None -> route.from_path(path)
+      }
+      let msg = make_msg(matched_route)
+      let #(new_model, _effects) = update(model, msg)
+      new_model
+    }
+    None -> model
+  }
+
+  // Step 3: Render view with route-specific model
+  let view_tree = config.view(model)
+  let view_html = element.to_string(view_tree)
+
+  // Step 4: Create session token
+  let token = create_session_token(config.secret_key)
+
+  // Step 5: Build HTML
+  let html = build_html_document(config.title, view_html, token)
+
+  log.debug("beacon.ssr", "Route-aware render complete for: " <> path)
   RenderedPage(html: html, session_token: token)
 }
 

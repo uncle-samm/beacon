@@ -1,7 +1,8 @@
 -module(beacon_dev_ffi).
 -export([run_command/1, sleep/1, check_for_changes/1, get_file_timestamps/1,
          do_hot_swap/0, string_contains/2, int_to_string/1, find_gleam_files/1,
-         start_native_watcher/1, poll_native_watcher/0, native_watcher_available/0]).
+         start_native_watcher/1, poll_native_watcher/0, native_watcher_available/0,
+         notify_browser_reload/0]).
 
 %% Persistent state for file modification tracking
 -define(TIMESTAMP_KEY, beacon_dev_timestamps).
@@ -99,6 +100,17 @@ string_contains(Haystack, Needle) ->
 
 int_to_string(N) ->
     integer_to_binary(N).
+
+%% Notify connected browsers to reload via PubSub.
+notify_browser_reload() ->
+    %% Broadcast to the beacon:reload topic — any listening WS connections will pick this up
+    try pg:get_members(beacon_pg, <<"beacon:reload">>) of
+        Pids ->
+            [Pid ! {beacon_reload} || Pid <- Pids],
+            nil
+    catch
+        _:_ -> nil
+    end.
 
 %% Check if a native file watcher (fswatch or inotifywait) is available.
 native_watcher_available() ->

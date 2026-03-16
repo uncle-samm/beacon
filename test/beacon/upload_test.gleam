@@ -90,5 +90,15 @@ fn contains(haystack: String, needle: String) -> Bool {
   }
 }
 
+pub fn parse_multipart_not_multipart_test() {
+  let assert Error(upload.ParseError(..)) =
+    upload.parse_multipart(<<>>, "application/json")
+}
+
+pub fn parse_multipart_no_boundary_test() {
+  let assert Error(upload.ParseError(..)) =
+    upload.parse_multipart(<<>>, "multipart/form-data")
+}
+
 @external(erlang, "beacon_test_ffi", "string_contains")
 fn do_contains(haystack: String, needle: String) -> Bool

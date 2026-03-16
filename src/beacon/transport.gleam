@@ -72,6 +72,10 @@ pub type ServerMessage {
   ServerModelSync(model_json: String, version: Int, ack_clock: Int)
   /// Server function result.
   ServerFnResult(call_id: String, result: String, ok: Bool)
+  /// Server-initiated navigation (redirect).
+  ServerNavigate(path: String)
+  /// Dev mode: tell browser to reload.
+  ServerReload
 }
 
 /// Internal messages that the connection actor can receive.
@@ -89,6 +93,8 @@ pub type InternalMessage {
   SendModelSync(model_json: String, version: Int, ack_clock: Int)
   /// Send server function result to the client.
   SendServerFnResult(call_id: String, result: String, ok: Bool)
+  /// Send navigation redirect to the client.
+  SendNavigate(path: String)
 }
 
 /// State held by each WebSocket connection actor.
@@ -192,6 +198,15 @@ pub fn encode_server_message(msg: ServerMessage) -> String {
         #("result", json.string(result)),
         #("ok", json.bool(ok)),
       ])
+      |> json.to_string
+    ServerNavigate(path) ->
+      json.object([
+        #("type", json.string("navigate")),
+        #("path", json.string(path)),
+      ])
+      |> json.to_string
+    ServerReload ->
+      json.object([#("type", json.string("reload"))])
       |> json.to_string
   }
 }
@@ -442,6 +457,14 @@ fn handle_websocket(
                   result: result,
                   ok: ok,
                 ),
+              )
+              mist.continue(state)
+            }
+            SendNavigate(path) -> {
+              send_message(
+                state.connection,
+                state.id,
+                ServerNavigate(path: path),
               )
               mist.continue(state)
             }

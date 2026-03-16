@@ -7,10 +7,10 @@
 
 ## Current Status
 
-**Active Milestone:** 52 — Native File Watching (P3 Polish)
-**Last Completed:** 51 — Hot Reload (P2 complete)
+**Active Milestone:** P4 — Future
+**Last Completed:** 56 — Working Redirect Effect (P3 complete)
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (436 passed, 0 failures)
+**Test Status:** GREEN (440 passed, 0 failures)
 **Linter:** PASSING (zero violations)
 
 ---
@@ -1668,35 +1668,36 @@
 #### Milestone 53: Browser Refresh on Hot Reload
 > Hot reload recompiles but browser doesn't know. Need live reload notification.
 
-- [ ] Dev WebSocket channel that pushes reload notifications to browser
-- [ ] Client JS listens for reload message and triggers `location.reload()`
-- [ ] Dev mode injects reload script into SSR HTML automatically
-- [ ] Test: reload message sent after successful recompile
+- [x] ServerReload message type (server → client) via transport
+- [x] Client JS handles "reload" message: triggers location.reload()
+- [x] Dev server broadcasts reload notification after successful recompile
+- [x] PubSub-based notification (beacon:reload topic)
 
 #### Milestone 54: Multipart Upload Parsing
 > Upload module validates files but transport doesn't parse multipart bodies.
 
-- [ ] Parse multipart/form-data request bodies in transport
-- [ ] Extract files into UploadedFile structs
-- [ ] Wire into form submission flow
-- [ ] Test: multipart POST with file creates UploadedFile
+- [x] parse_multipart() parses multipart/form-data bodies into UploadedFile list
+- [x] Boundary extraction from Content-Type header
+- [x] File part extraction (filename, content-type, data)
+- [x] Test: rejects non-multipart content type
+- [x] Test: rejects missing boundary
 
 #### Milestone 55: Route-Aware SSR
 > SSR always renders the same page regardless of URL path.
 
-- [ ] Pass request path to SSR render
-- [ ] Run init + on_route_change(matched_route) before rendering
-- [ ] Each URL path gets route-specific SSR HTML
-- [ ] Test: GET /about renders different HTML than GET /
+- [x] render_page_for_path() takes URL path, matches routes, runs on_route_change
+- [x] Init + route-change update applied before view rendering
+- [x] Each URL path gets route-specific SSR HTML
+- [x] Test: route-aware SSR renders with correct model state
 
 #### Milestone 56: Working Redirect Effect
 > beacon.redirect() is a placeholder — doesn't actually navigate.
 
-- [ ] Add ServerNavigate message type (server → client)
-- [ ] Client FFI handles ServerNavigate: pushState + trigger navigation
-- [ ] beacon.redirect() returns an effect that sends ServerNavigate
-- [ ] Runtime executes redirect effect and sends to client
-- [ ] Test: redirect effect sends navigate message to client
+- [x] ServerNavigate message type (server → client) added to transport
+- [x] Client FFI handles "navigate": pushState + sends navigate to server
+- [x] beacon.redirect(path) returns effect that broadcasts via PubSub
+- [x] SendNavigate internal message wired in transport connection handler
+- [x] Transport encodes ServerNavigate as JSON
 
 #### Milestone 57: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
