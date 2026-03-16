@@ -7,7 +7,7 @@
 
 ## Current Status
 
-**Active Milestone:** P2 — Nice-to-Have (framework polish)
+**Active Milestone:** 48 — Build Tool Hardening (P2)
 **Last Completed:** 47 — Documentation (P1 complete)
 **Build Status:** GREEN (zero errors, zero warnings)
 **Test Status:** GREEN (418 passed, 0 failures)
@@ -1607,21 +1607,57 @@
 - [x] CHANGELOG with all milestones (CHANGELOG.md — P0 and P1)
 - [x] Test: `gleam docs build` succeeds
 
-### P2: Nice-to-Have (framework polish)
+### P2: Hardening & DX (make it real)
 
-#### Milestone 48: Hot Reload
-> TODO: Watch mode for dev, automatic recompile + browser refresh on file change.
+#### Milestone 48: Build Tool Hardening
+> The build tool is fragile — only finds one app module, only handles simple types,
+> can't compile update branches that reference server-only code (stores, ETS).
 
-#### Milestone 49: Context System
-> TODO: Replace make_init/make_update factory pattern with framework-provided Context that gives update/init access to stores without closures.
+- [ ] Generate stubs for server-only code paths (MODEL branches skip server deps in JS)
+- [ ] Support complex Model field types (List, Option, custom types)
+- [ ] Multi-module support (find app module across nested directories)
+- [ ] Better error messages when compilation fails
+- [ ] Test: triple_counter compiles to JS (store-dependent branches stubbed)
+- [ ] Test: Model with List(String) field generates correct codec
 
-#### Milestone 50: Build Tool Improvements
-> TODO: Multi-module support, handle apps with server dependencies (stores), watch mode, source maps, tree shaking.
+#### Milestone 49: Advanced Routing
+> Current routing is basic — no nested routes, layouts, or guards.
 
-#### Milestone 51: Streaming & Progressive Loading
-> TODO: Streaming HTML responses, progressive hydration, lazy loading of routes/components.
+- [ ] Nested routes with shared layouts
+- [ ] Route guards (auth-protected routes)
+- [ ] Redirect helpers (beacon.redirect("/login"))
+- [ ] 404 not-found handler
+- [ ] Route-specific middleware
+- [ ] Test: nested route renders with parent layout
+- [ ] Test: guard redirects unauthenticated user
 
-#### Milestone 52: Rate Limiting & Security
+#### Milestone 50: File Uploads
+> Form module has validation but no multipart handling.
+
+- [ ] Multipart form data parsing (via Mist)
+- [ ] File upload field in form builder
+- [ ] Upload size limits and type validation
+- [ ] Upload progress tracking via WebSocket
+- [ ] Test: file upload saves to disk
+- [ ] Test: oversized upload rejected
+
+#### Milestone 51: Hot Reload
+> No hot reload — have to restart the server on every change.
+
+- [ ] File watcher that detects .gleam file changes
+- [ ] Auto-run `gleam build` on change
+- [ ] Hot-swap compiled BEAM modules (Erlang code loading)
+- [ ] Auto-rebuild client JS bundle on change
+- [ ] Browser refresh notification via WebSocket
+- [ ] Test: file change triggers recompile
+
+#### Milestone 52: Context System
+> TODO: Replace make_init/make_update factory pattern with framework-provided Context.
+
+#### Milestone 53: Streaming & Progressive Loading
+> TODO: Streaming HTML responses, progressive hydration, lazy loading.
+
+#### Milestone 54: Security Hardening
 > TODO: WebSocket rate limiting, input sanitization, CSP headers, secure defaults.
 
 ---
