@@ -61,7 +61,7 @@ fn counter_config() -> runtime.RuntimeConfig(CounterModel, CounterMsg) {
     init: counter_init,
     update: counter_update,
     view: counter_view,
-    decode_event: counter_decode_event,
+    decode_event: option.Some(counter_decode_event),
       serialize_model: option.None,
       deserialize_model: option.None,
       subscriptions: [],
@@ -225,7 +225,7 @@ pub fn runtime_effect_dispatches_message_test() {
       },
       update: counter_update,
       view: counter_view,
-      decode_event: counter_decode_event,
+      decode_event: option.Some(counter_decode_event),
       serialize_model: option.None,
       deserialize_model: option.None,
       subscriptions: [],
@@ -274,7 +274,7 @@ pub fn runtime_survives_view_crash_test() {
           False -> element.el("div", [], [element.text("ok")])
         }
       },
-      decode_event: counter_decode_event,
+      decode_event: option.Some(counter_decode_event),
       serialize_model: option.None,
       deserialize_model: option.None,
       subscriptions: [],
@@ -339,7 +339,7 @@ pub fn state_recovery_from_token_test() {
       init: counter_init,
       update: counter_update,
       view: counter_view,
-      decode_event: counter_decode_event,
+      decode_event: option.Some(counter_decode_event),
       serialize_model: option.Some(fn(m: CounterModel) {
         int.to_string(m.count)
       }),

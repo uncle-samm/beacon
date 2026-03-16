@@ -7,6 +7,7 @@
 import beacon/effect.{type Effect}
 import beacon/element.{type Node}
 import beacon/error
+import beacon/handler.{type HandlerRegistry}
 import beacon/log
 import beacon/pubsub
 import beacon/template/rendered.{type Rendered}
@@ -57,8 +58,11 @@ pub type RuntimeState(model, msg) {
     /// The view function: model → Node tree.
     view: fn(model) -> Node(msg),
     /// Function to decode client events into user messages.
-    /// Returns Ok(msg) if the event is recognized, Error otherwise.
-    decode_event: fn(String, String, String, String) -> Result(msg, error.BeaconError),
+    /// If None, the handler registry is used instead (automatic decoding).
+    decode_event: Option(fn(String, String, String, String) -> Result(msg, error.BeaconError)),
+    /// Handler registry from the last view render.
+    /// Used for automatic event decoding when decode_event is None.
+    handler_registry: Option(HandlerRegistry(msg)),
     /// Currently connected clients: conn_id → transport subject.
     connections: Dict(transport.ConnectionId, Subject(transport.InternalMessage)),
     /// The runtime's own subject for dispatching effect messages.
@@ -88,7 +92,8 @@ pub type RuntimeConfig(model, msg) {
     /// The view function.
     view: fn(model) -> Node(msg),
     /// Decode client events into user messages.
-    decode_event: fn(String, String, String, String) -> Result(msg, error.BeaconError),
+    /// If None, the handler registry (from on_click/on_input) is used automatically.
+    decode_event: Option(fn(String, String, String, String) -> Result(msg, error.BeaconError)),
     /// Serialize model to a string for session token embedding.
     /// If None, state recovery is disabled (reconnect re-runs init).
     serialize_model: option.Option(fn(model) -> String),
@@ -118,6 +123,7 @@ pub fn start(
           update: config.update,
           view: config.view,
           decode_event: config.decode_event,
+          handler_registry: None,
           connections: dict.new(),
           self: subject,
           previous_rendered: None,
@@ -219,7 +225,9 @@ fn handle_message(
         }
       }
       // Render view with the model (current or recovered)
+      handler.start_render()
       let current_vdom = model_to_use |> state.view
+      let view_registry = handler.finish_render()
       let current_rendered = view.render(current_vdom)
       let mount_json =
         rendered.to_mount_json(current_rendered)
@@ -236,12 +244,13 @@ fn handle_message(
           )
         }
       }
-      // Cache the Rendered and update model (may have been recovered)
+      // Cache the Rendered, handler registry, and update model
       actor.continue(
         RuntimeState(
           ..state,
           model: model_to_use,
           previous_rendered: Some(current_rendered),
+          handler_registry: Some(view_registry),
         ),
       )
     }
@@ -258,7 +267,23 @@ fn handle_message(
           <> "] clock="
           <> int.to_string(clock),
       )
-      case state.decode_event(event_name, handler_id, event_data, target_path) {
+      // Try handler registry first (automatic), then fall back to decode_event
+      let resolve_result = case state.handler_registry {
+        Some(registry) -> handler.resolve(registry, handler_id, event_data)
+        None -> Error(error.RuntimeError(reason: "No handler registry"))
+      }
+      let resolve_result = case resolve_result {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> {
+          // Fall back to decode_event if provided
+          case state.decode_event {
+            Some(decode_fn) ->
+              decode_fn(event_name, handler_id, event_data, target_path)
+            None -> Error(error.RuntimeError(reason: "Unknown handler: " <> handler_id))
+          }
+        }
+      }
+      case resolve_result {
         Ok(msg) -> {
           let new_state = run_update(RuntimeState(..state, event_clock: clock), msg)
           actor.continue(new_state)
@@ -300,10 +325,12 @@ fn run_update(
   let #(new_model, effects) = state.update(state.model, msg)
   log.debug("beacon.runtime", "Model updated")
 
-  // Render new view — wrapped in error boundary
-  let new_rendered = case rescue_view(state.view, new_model) {
+  // Render new view — wrapped in error boundary + handler registry
+  handler.start_render()
+  let #(new_rendered, new_registry) = case rescue_view(state.view, new_model) {
     Ok(vdom) -> {
       let new_r = view.render(vdom)
+      let view_registry = handler.finish_render()
       // Diff against previous Rendered and broadcast
       case state.previous_rendered {
         Some(old_r) -> {
@@ -315,31 +342,35 @@ fn run_update(
           )
         }
         None -> {
-          // No previous render — send full mount
           let mount_json =
             rendered.to_mount_json(new_r)
             |> json.to_string
           broadcast_patch(RuntimeState(..state, model: new_model), mount_json)
         }
       }
-      Some(new_r)
+      #(Some(new_r), Some(view_registry))
     }
     Error(reason) -> {
-      // View rendering crashed — send error, keep old Rendered
       log.error(
         "beacon.runtime",
         "View rendering failed: " <> reason,
       )
       let _ = broadcast_error(state, "View rendering error: " <> reason)
-      state.previous_rendered
+      let _ = handler.finish_render()
+      #(state.previous_rendered, state.handler_registry)
     }
   }
 
   // Execute effects
   run_effects(effects, state.self)
 
-  // Return updated state with new Rendered cached
-  RuntimeState(..state, model: new_model, previous_rendered: new_rendered)
+  // Return updated state with new Rendered and handler registry cached
+  RuntimeState(
+    ..state,
+    model: new_model,
+    previous_rendered: new_rendered,
+    handler_registry: new_registry,
+  )
 }
 
 /// Safely execute the view function, catching any crashes.

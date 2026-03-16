@@ -358,7 +358,7 @@ pub fn start(port: Int) -> Result(Nil, error.BeaconError) {
       init: init,
       update: update,
       view: view,
-      decode_event: decode_event,
+      decode_event: option.Some(decode_event),
       serialize_model: option.None,
       deserialize_model: option.None,
       subscriptions: [],

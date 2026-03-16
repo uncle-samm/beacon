@@ -1,30 +1,21 @@
-/// Multi-room, multi-user chat — demonstrates:
-/// - Per-connection runtime (each tab gets its own MVU process)
-/// - Shared state via ETS (message history accessible to all)
-/// - PubSub for broadcasting new messages to all connected users
-/// - Each user has their own session state (username, room, input)
-///
-/// Architecture:
-///   Browser Tab A → Runtime A (Model: username="Alice", room="general")
-///   Browser Tab B → Runtime B (Model: username="Bob", room="random")
-///   Shared ETS table → all messages for all rooms
-///   PubSub "chat:messages" → broadcasts new messages to all runtimes
+/// Multi-room chat — demonstrates:
+/// - Per-connection runtimes (each tab = own username/room)
+/// - Shared state via beacon/store (no FFI needed)
+/// - PubSub for broadcasting to other users
+/// - beacon.on_click, beacon.on_input — no decode_event
 
-import beacon/effect
-import beacon/element
-import beacon/error
-import beacon/log
-import beacon/pubsub
+import beacon
+import beacon/html
+import beacon/store
 import gleam/list
 import gleam/string
 
-/// A single chat message.
+/// A chat message.
 pub type ChatMessage {
   ChatMessage(sender: String, text: String, room: String, id: Int)
 }
 
-/// Per-session model — each browser tab has its own instance.
-/// Messages are NOT stored here — they're in the shared ETS store.
+/// Per-session model.
 pub type Model {
   Model(
     username: String,
@@ -33,291 +24,188 @@ pub type Model {
     current_room: String,
     input_text: String,
     available_rooms: List(String),
-    /// Messages visible in the current view (pulled from shared store).
     visible_messages: List(ChatMessage),
   )
 }
 
 /// Messages.
 pub type Msg {
-  UpdateInput(text: String)
-  UpdateUsername(text: String)
+  UpdateInput(String)
+  UpdateUsername(String)
   SetUsername
   SendMessage
-  SwitchRoom(room: String)
-  /// A new message arrived via PubSub — refresh visible messages.
+  SwitchRoom(String)
   NewMessageBroadcast
 }
 
-/// The shared message store — backed by ETS so all runtimes can access it.
-pub type ChatStore
-
-/// Initialize the shared chat store. Call once at app startup.
-pub fn init_store(name: String) -> ChatStore {
-  log.info("chat", "Initializing shared message store")
-  chat_ets_new(name)
-}
-
-/// Add a message to the shared store.
-pub fn store_message(store: ChatStore, msg: ChatMessage) -> Nil {
-  chat_ets_append(store, msg.room, msg)
-}
-
-/// Get all messages for a room from the shared store.
-pub fn get_messages(store: ChatStore, room: String) -> List(ChatMessage) {
-  chat_ets_get_messages(store, room)
-}
-
 /// Initialize per-session model.
-pub fn init() -> #(Model, effect.Effect(Msg)) {
-  let rooms = ["general", "random", "help"]
-  #(
-    Model(
-      username: "",
-      username_input: "",
-      has_username: False,
-      current_room: "general",
-      input_text: "",
-      available_rooms: rooms,
-      visible_messages: [],
-    ),
-    effect.none(),
+pub fn init() -> Model {
+  Model(
+    username: "",
+    username_input: "",
+    has_username: False,
+    current_room: "general",
+    input_text: "",
+    available_rooms: ["general", "random", "help"],
+    visible_messages: [],
   )
 }
 
-/// Update per-session model.
-/// The `store` is captured in a closure when wiring up the app.
+/// Create an update function that captures the shared message store.
 pub fn make_update(
-  store: ChatStore,
-) -> fn(Model, Msg) -> #(Model, effect.Effect(Msg)) {
-  fn(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
+  messages: store.ListStore(ChatMessage),
+) -> fn(Model, Msg) -> Model {
+  fn(model: Model, msg: Msg) -> Model {
     case msg {
-      UpdateInput(text) -> #(Model(..model, input_text: text), effect.none())
-
-      UpdateUsername(text) -> #(
-        Model(..model, username_input: text),
-        effect.none(),
-      )
+      UpdateInput(text) -> Model(..model, input_text: text)
+      UpdateUsername(text) -> Model(..model, username_input: text)
 
       SetUsername -> {
         let name = string.trim(model.username_input)
         case string.is_empty(name) {
-          True -> #(model, effect.none())
-          False -> {
-            log.info("chat", name <> " joined")
-            let messages = get_messages(store, model.current_room)
-            #(
-              Model(
-                ..model,
-                username: name,
-                has_username: True,
-                visible_messages: messages,
-              ),
-              effect.none(),
+          True -> model
+          False ->
+            Model(
+              ..model,
+              username: name,
+              has_username: True,
+              visible_messages: store.get_all(messages, model.current_room),
             )
-          }
         }
       }
 
       SendMessage -> {
         let text = string.trim(model.input_text)
         case string.is_empty(text) {
-          True -> #(model, effect.none())
+          True -> model
           False -> {
             let message =
               ChatMessage(
                 sender: model.username,
                 text: text,
                 room: model.current_room,
-                id: erlang_unique_integer(),
+                id: unique_int(),
               )
-            // Store in shared ETS
-            store_message(store, message)
-            log.info(
-              "chat",
-              "[#" <> model.current_room <> "] " <> model.username <> ": " <> text,
-            )
-            // Broadcast to all connected users via PubSub
-            pubsub.broadcast("chat:messages", NewMessageBroadcast)
-            // Refresh visible messages
-            let messages = get_messages(store, model.current_room)
-            #(
-              Model(..model, input_text: "", visible_messages: messages),
-              effect.none(),
+            store.append(messages, model.current_room, message)
+            // No manual broadcast needed — store.append auto-notifies watchers
+            Model(
+              ..model,
+              input_text: "",
+              visible_messages: store.get_all(messages, model.current_room),
             )
           }
         }
       }
 
-      SwitchRoom(room) -> {
-        let messages = get_messages(store, room)
-        #(
-          Model(..model, current_room: room, visible_messages: messages),
-          effect.none(),
+      SwitchRoom(room) ->
+        Model(
+          ..model,
+          current_room: room,
+          visible_messages: store.get_all(messages, room),
         )
-      }
 
-      NewMessageBroadcast -> {
-        // Another user sent a message — refresh our visible messages
-        let messages = get_messages(store, model.current_room)
-        #(Model(..model, visible_messages: messages), effect.none())
-      }
+      NewMessageBroadcast ->
+        Model(
+          ..model,
+          visible_messages: store.get_all(messages, model.current_room),
+        )
     }
   }
 }
 
 /// Render the chat view.
-pub fn view(model: Model) -> element.Node(Msg) {
+pub fn view(model: Model) -> beacon.Node(Msg) {
   case model.has_username {
     False -> view_login(model)
     True -> view_chat(model)
   }
 }
 
-fn view_login(model: Model) -> element.Node(Msg) {
-  element.el("div", [element.attr("class", "chat-login")], [
-    element.el("h1", [], [element.text("Beacon Chat")]),
-    element.el("p", [], [
-      element.text("Enter your name to join:"),
-    ]),
-    element.el("div", [element.attr("class", "login-form")], [
-      element.el(
-        "input",
-        [
-          element.attr("type", "text"),
-          element.attr("placeholder", "Your name..."),
-          element.attr("value", model.username_input),
-          element.on("input", "update_username"),
-        ],
-        [],
-      ),
-      element.el(
-        "button",
-        [element.on("click", "set_username")],
-        [element.text("Join Chat")],
-      ),
+fn view_login(model: Model) -> beacon.Node(Msg) {
+  html.div([html.class("chat-login")], [
+    html.h1([], [html.text("Beacon Chat")]),
+    html.p([], [html.text("Enter your name to join:")]),
+    html.div([html.class("login-form")], [
+      html.input([
+        html.type_("text"),
+        html.placeholder("Your name..."),
+        html.value(model.username_input),
+        beacon.on_input(UpdateUsername),
+      ]),
+      html.button([beacon.on_click(SetUsername)], [
+        html.text("Join Chat"),
+      ]),
     ]),
   ])
 }
 
-fn view_chat(model: Model) -> element.Node(Msg) {
-  element.el("div", [element.attr("class", "chat-app")], [
+fn view_chat(model: Model) -> beacon.Node(Msg) {
+  html.div([html.class("chat-app")], [
     // Sidebar
-    element.el("div", [element.attr("class", "chat-sidebar")], [
-      element.el("h2", [], [element.text("Rooms")]),
-      element.el(
-        "ul",
+    html.div([html.class("chat-sidebar")], [
+      html.h2([], [html.text("Rooms")]),
+      html.ul(
         [],
         list.map(model.available_rooms, fn(room) {
-          let class = case room == model.current_room {
+          let cls = case room == model.current_room {
             True -> "room active"
             False -> "room"
           }
-          element.el("li", [element.attr("class", class)], [
-            element.el(
-              "button",
-              [element.on("click", "room_" <> room)],
-              [element.text("#" <> room)],
-            ),
+          html.li([html.class(cls)], [
+            html.button([beacon.on_click(SwitchRoom(room))], [
+              html.text("#" <> room),
+            ]),
           ])
         }),
       ),
-      element.el("p", [element.attr("class", "username-display")], [
-        element.text("You: " <> model.username),
+      html.p([html.class("username-display")], [
+        html.text("You: " <> model.username),
       ]),
     ]),
     // Main
-    element.el("div", [element.attr("class", "chat-main")], [
-      element.el("h2", [], [
-        element.text("#" <> model.current_room),
-      ]),
-      element.el(
-        "div",
-        [element.attr("class", "chat-messages")],
+    html.div([html.class("chat-main")], [
+      html.h2([], [html.text("#" <> model.current_room)]),
+      html.div(
+        [html.class("chat-messages")],
         case model.visible_messages {
           [] -> [
-            element.el("p", [element.attr("class", "empty")], [
-              element.text("No messages yet. Say something!"),
+            html.p([html.class("empty")], [
+              html.text("No messages yet. Say something!"),
             ]),
           ]
           msgs ->
-            list.map(msgs, fn(msg) {
-              element.el("div", [element.attr("class", "chat-message")], [
-                element.el("strong", [], [
-                  element.text(msg.sender <> ": "),
-                ]),
-                element.text(msg.text),
+            list.map(msgs, fn(m) {
+              html.div([html.class("chat-message")], [
+                html.strong([], [html.text(m.sender <> ": ")]),
+                html.text(m.text),
               ])
             })
         },
       ),
-      element.el("div", [element.attr("class", "chat-input")], [
-        element.el(
-          "input",
-          [
-            element.attr("type", "text"),
-            element.attr("placeholder", "Type a message..."),
-            element.attr("value", model.input_text),
-            element.on("input", "update_input"),
-          ],
-          [],
-        ),
-        element.el(
-          "button",
-          [element.on("click", "send_message")],
-          [element.text("Send")],
-        ),
+      html.div([html.class("chat-input")], [
+        html.input([
+          html.type_("text"),
+          html.placeholder("Type a message..."),
+          html.value(model.input_text),
+          beacon.on_input(UpdateInput),
+        ]),
+        html.button([beacon.on_click(SendMessage)], [
+          html.text("Send"),
+        ]),
       ]),
     ]),
   ])
 }
 
-/// Decode client events.
-pub fn decode_event(
-  _name: String,
-  handler_id: String,
-  data: String,
-  _path: String,
-) -> Result(Msg, error.BeaconError) {
-  case handler_id {
-    "update_input" -> Ok(UpdateInput(text: extract_value(data)))
-    "update_username" -> Ok(UpdateUsername(text: extract_value(data)))
-    "set_username" -> Ok(SetUsername)
-    "send_message" -> Ok(SendMessage)
-    _ -> {
-      case string.starts_with(handler_id, "room_") {
-        True -> Ok(SwitchRoom(room: string.drop_start(handler_id, 5)))
-        False ->
-          Error(error.RuntimeError(
-            reason: "Unknown handler: " <> handler_id,
-          ))
-      }
-    }
-  }
+/// Start the chat app.
+pub fn start() {
+  let messages = store.new_list("chat_messages")
+
+  beacon.app(init, make_update(messages), view)
+  |> beacon.title("Beacon Chat")
+  |> beacon.watch_list(messages, fn() { NewMessageBroadcast })
+  |> beacon.start(8080)
 }
-
-fn extract_value(data: String) -> String {
-  case string.split(data, "\"value\":\"") {
-    [_, rest] -> {
-      case string.split(rest, "\"") {
-        [value, ..] -> value
-        _ -> ""
-      }
-    }
-    _ -> ""
-  }
-}
-
-// --- ETS FFI for shared message store ---
-
-@external(erlang, "beacon_chat_ffi", "new_store")
-fn chat_ets_new(name: String) -> ChatStore
-
-@external(erlang, "beacon_chat_ffi", "append_message")
-fn chat_ets_append(store: ChatStore, room: String, msg: ChatMessage) -> Nil
-
-@external(erlang, "beacon_chat_ffi", "get_messages")
-fn chat_ets_get_messages(store: ChatStore, room: String) -> List(ChatMessage)
 
 @external(erlang, "erlang", "unique_integer")
-fn erlang_unique_integer() -> Int
+fn unique_int() -> Int

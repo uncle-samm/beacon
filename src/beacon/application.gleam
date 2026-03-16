@@ -34,8 +34,9 @@ pub type AppConfig(model, msg) {
     /// View function.
     view: fn(model) -> Node(msg),
     /// Decode client events to app messages.
-    decode_event: fn(String, String, String, String) ->
-      Result(msg, error.BeaconError),
+    /// If None, uses the handler registry (automatic via on_click/on_input).
+    decode_event: Option(fn(String, String, String, String) ->
+      Result(msg, error.BeaconError)),
     /// Secret key for session tokens.
     secret_key: String,
     /// Application title (used in SSR HTML).

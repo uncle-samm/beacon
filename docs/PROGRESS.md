@@ -7,8 +7,8 @@
 
 ## Current Status
 
-**Active Milestone:** MILESTONE 24 COMPLETE
-**Last Updated:** iteration 10
+**Active Milestone:** ALL MILESTONES 25-28 COMPLETE
+**Last Updated:** iteration 11
 **Build Status:** GREEN (zero errors, zero warnings from beacon code)
 **Test Status:** GREEN (344 passed, 0 failures)
 **Linter:** PASSING (zero violations)
@@ -1179,6 +1179,113 @@
 - AI chat works correctly because per-connection isolation means each tab has its own conversation.
 - Pong works as single-player-per-tab. True 2-player multiplayer would need a dedicated game actor — documented as enhancement.
 - 354 tests total, all passing. Zero compiler warnings.
+
+---
+
+## Milestone 25: Simplified DX — HTML Helpers & Store
+> Phase 1 of the DX overhaul. No breaking changes, immediately useful.
+
+### 25.1 HTML Helper Module
+- [x] Create `src/beacon/html.gleam` with element shorthand functions
+- [x] Elements: `div`, `span`, `p`, `h1`-`h6`, `a`, `button`, `input`, `textarea`, `form`, `ul`, `ol`, `li`, `table`, `tr`, `td`, `img`, `br`, `hr`, `nav`, `header`, `footer`, `main`, `section`, `strong`, `em`, `pre`, `code`, `label`, `select`
+- [x] Void elements (`input`, `br`, `hr`, `img`) take only attrs, no children
+- [x] Attribute shortcuts: `class`, `id`, `type_`, `value`, `placeholder`, `href`, `src_`
+- [x] `text` re-exports `element.text`
+- [x] Tests: each helper produces same output as `element.el` equivalent
+
+### 25.2 Store Module (Shared State Without FFI)
+- [x] Create `src/beacon/store.gleam` wrapping ETS via `state_manager.EtsManager`
+- [x] `Store(value)`: `new(name)`, `get(key)`, `put(key, value)`, `delete(key)`, `count()`
+- [x] `ListStore(value)` for bag-type ETS: `new_list(name)`, `append(key, value)`, `get_all(key)`
+- [x] Internal FFI for bag-type ETS (in framework, NOT exposed to user)
+- [x] Tests: store CRUD, list store append/get_all
+
+**Milestone 25 Notes:**
+<!-- Add notes here -->
+
+---
+
+## Milestone 26: Handler Registry
+> The core DX innovation. Eliminates `decode_event` entirely.
+
+### 26.1 Handler Registry Module
+- [x] Create `src/beacon/handler.gleam` with `HandlerRegistry(msg)` opaque type
+- [x] `start_render()` — push current registry to stack, create fresh one in process dict
+- [x] `finish_render() -> HandlerRegistry(msg)` — pop and return registry
+- [x] `register_simple(msg) -> String` — stores Msg value, returns sequential ID (`h0`, `h1`, ...)
+- [x] `register_parameterized(fn(String) -> msg) -> String` — for input/change events needing a value
+- [x] `resolve(registry, handler_id, event_data) -> Result(msg, BeaconError)` — lookup + resolve
+- [x] Create `src/beacon_handler_ffi.erl` — process dict get/set (4 lines of Erlang)
+- [x] Tests: register + resolve round-trip, sequential IDs, parameterized with value extraction, nested render safety
+
+### 26.2 Runtime Integration
+- [x] Add `handler_registry: Option(HandlerRegistry(msg))` to `RuntimeState`
+- [x] Make `decode_event` in `RuntimeConfig` an `Option` (backward compatible — existing code wraps in `Some`)
+- [x] In `run_update`: wrap `view(model)` call with `handler.start_render()` / `handler.finish_render()`, store registry
+- [x] In `ClientJoined`: same — wrap view call, store registry
+- [x] In `ClientEventReceived`: try handler registry first, fall back to decode_event if provided
+- [x] Tests: runtime with handler registry resolves events without decode_event; runtime with decode_event still works
+
+**Milestone 26 Notes:**
+<!-- Add notes here -->
+
+---
+
+## Milestone 27: App Builder & Event Helpers
+> The user-facing DX layer. Makes `beacon.app(init, update, view) |> beacon.start(8080)` work.
+
+### 27.1 Event Helpers
+- [x] `beacon.on_click(msg) -> Attr` — registers simple handler, returns EventAttr
+- [x] `beacon.on_input(fn(String) -> msg) -> Attr` — registers parameterized handler
+- [x] `beacon.on_submit(msg) -> Attr` — form submit
+- [x] `beacon.on_change(fn(String) -> msg) -> Attr` — select/input change
+- [x] `beacon.broadcast(topic)` — convenience wrapper around `pubsub.broadcast`
+- [x] Tests: on_click registers and resolves, on_input extracts value and resolves
+
+### 27.2 App Builder
+- [x] `AppBuilder(model, msg)` opaque type with sensible defaults
+- [x] `app(init, update, view)` — simple mode: init returns Model, update returns Model
+- [x] `app_with_effects(init, update, view)` — effect mode: returns `#(Model, Effect)`
+- [x] `|> title(String)` — set page title (default: "Beacon")
+- [x] `|> secret_key(String)` — set secret (default: auto-generated)
+- [x] `|> middleware(Middleware)` — add middleware
+- [x] `|> static_dir(String)` — enable static file serving
+- [x] `|> subscribe(topic, fn() -> msg)` — PubSub subscription
+- [x] `|> with_state_recovery(serialize, deserialize)` — opt-in state recovery
+- [x] `|> start(port)` — start the app and block (calls application.start + wait_forever)
+- [x] Tests: builder with defaults starts, builder with middleware works, simple init/update wrapped correctly
+
+**Milestone 27 Notes:**
+<!-- Add notes here -->
+
+---
+
+## Milestone 28: Rewrite Examples with New DX
+> Prove the DX works by rewriting all examples.
+
+### 28.1 Counter Example
+- [x] Rewrite counter using `beacon.app`, `beacon/html`, `beacon.on_click` — target ~25 lines
+- [x] No `decode_event`, no `effect.none()`, no AppConfig
+- [x] Tests: counter still works end-to-end (real WS connection test)
+
+### 28.2 Chat Example
+- [x] Rewrite chat using `beacon/store.ListStore` instead of raw ETS FFI
+- [x] Use `beacon.on_click`, `beacon.on_input`, `beacon.subscribe`
+- [x] No user-written FFI anywhere
+- [x] Tests: chat works multi-user (two WS connections, independent usernames, shared messages)
+
+### 28.3 AI Chat Example
+- [x] Rewrite using `beacon.app_with_effects` (needs async server_fn)
+- [x] Use `beacon/html` helpers
+- [x] Tests: AI chat works (send prompt, receive response)
+
+### 28.4 Pong Example
+- [x] Rewrite using `beacon.app_with_effects` (needs tick effect)
+- [x] Use `beacon/html` helpers
+- [x] Tests: Pong starts, paddles move
+
+**Milestone 28 Notes:**
+<!-- Add notes here -->
 
 ---
 

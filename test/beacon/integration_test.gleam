@@ -33,12 +33,12 @@ fn test_app_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
         element.text("count:" <> int.to_string(model.count)),
       ])
     },
-    decode_event: fn(_name, handler_id, _data, _path) {
+    decode_event: option.Some(fn(_name, handler_id, _data, _path) {
       case handler_id {
         "inc" -> Ok(TestInc)
         _ -> Error(error.RuntimeError(reason: "unknown"))
       }
-    },
+    }),
     secret_key: "integration-test-secret-key-long-enough!!",
     title: "Integration Test",
     serialize_model: option.None,

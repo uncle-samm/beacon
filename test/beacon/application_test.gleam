@@ -26,12 +26,12 @@ fn test_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
         element.text(int.to_string(model.count)),
       ])
     },
-    decode_event: fn(_name, handler_id, _data, _path) {
+    decode_event: option.Some(fn(_name, handler_id, _data, _path) {
       case handler_id {
         "inc" -> Ok(Inc)
         _ -> Error(error.RuntimeError(reason: "unknown"))
       }
-    },
+    }),
     secret_key: "test-secret-key-must-be-long-enough!!",
     title: "Test App",
     serialize_model: option.None,
