@@ -19,6 +19,7 @@ import gleam/json
 import gleam/option.{type Option, None, Some}
 import gleam/string
 import mist
+import simplifile
 
 /// Unique identifier for a WebSocket connection.
 /// Used for logging and session tracking.
@@ -300,6 +301,7 @@ pub fn create_handler(
     case request.path_segments(req) {
       ["ws"] -> handle_websocket(req, config)
       ["beacon.js"] -> serve_js()
+      ["beacon_client.js"] -> serve_client_js()
       _ -> {
         // Try static files first
         case config.static_config {
@@ -478,6 +480,32 @@ fn serve_js() -> response.Response(mist.ResponseData) {
   response.new(200)
   |> response.set_header("content-type", "application/javascript; charset=utf-8")
   |> response.set_body(mist.Bytes(bytes_tree.from_string(beacon_client_js())))
+}
+
+/// Serve the compiled Gleam-to-JS client runtime bundle.
+/// Falls back to a "not built yet" message if the bundle doesn't exist.
+fn serve_client_js() -> response.Response(mist.ResponseData) {
+  case simplifile.read("priv/static/beacon_client.js") {
+    Ok(contents) -> {
+      response.new(200)
+      |> response.set_header(
+        "content-type",
+        "application/javascript; charset=utf-8",
+      )
+      |> response.set_body(mist.Bytes(bytes_tree.from_string(contents)))
+    }
+    Error(_) -> {
+      response.new(404)
+      |> response.set_header("content-type", "text/plain")
+      |> response.set_body(
+        mist.Bytes(
+          bytes_tree.from_string(
+            "// beacon_client.js not found. Run: gleam run -m beacon/build",
+          ),
+        ),
+      )
+    }
+  }
 }
 
 /// The embedded Beacon client JavaScript runtime.
