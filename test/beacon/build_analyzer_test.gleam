@@ -60,6 +60,24 @@ pub fn view(model: Model) { model }
   let assert True = find_variant(analysis.msg_variants, "Decrement").affects_model
 }
 
+pub fn extracts_model_fields_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Local { Local(input: String, menu_open: Bool) }
+pub type Msg { Increment }
+pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
+  case msg { Increment -> #(Model(count: model.count + 1), local) }
+}
+pub fn view(model: Model, local: Local) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert 1 = list.length(analysis.model_fields)
+  let assert Ok(field) = list.first(analysis.model_fields)
+  let assert "count" = field.name
+  let assert "Int" = field.type_name
+}
+
 pub fn no_msg_type_error_test() {
   let source = "pub fn update(m, msg) { m }\npub fn view(m) { m }\npub type Model { M }\n"
   let assert Error(_) = analyzer.analyze(source)

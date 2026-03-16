@@ -205,10 +205,38 @@ fn generate_entry_point(analysis: analyzer.Analysis) -> String {
   let affects_model_body =
     string.join(affects_model_arms, "\n") <> "\n    _ -> True"
 
+  // Generate JSON decoder for Model (client-side model_sync)
+  let decode_fields =
+    list.map(analysis.model_fields, fn(f) {
+      let decoder = case f.type_name {
+        "Int" -> "decode.int"
+        "Float" -> "decode.float"
+        "Bool" -> "decode.bool"
+        _ -> "decode.string"
+      }
+      "    use "
+      <> f.name
+      <> " <- decode.field(\""
+      <> f.name
+      <> "\", "
+      <> decoder
+      <> ")"
+    })
+  let decode_body = string.join(decode_fields, "\n")
+
+  let model_constructor_args =
+    list.map(analysis.model_fields, fn(f) {
+      f.name <> ": " <> f.name
+    })
+  let constructor_call =
+    "app.Model(" <> string.join(model_constructor_args, ", ") <> ")"
+
   "/// AUTO-GENERATED entry point for client-side execution.
 import app
 import beacon/element
 import beacon_client/handler
+import gleam/dynamic/decode
+import gleam/json
 
 /// Initialize Model.
 pub fn init() -> app.Model {
@@ -249,6 +277,18 @@ pub fn view_to_html(model: app.Model, local: app.Local) -> String {
 pub fn msg_affects_model(msg: app.Msg) -> Bool {
   case msg {
 " <> affects_model_body <> "
+  }
+}
+
+/// Decode a JSON string into the user's Model type (for model_sync).
+pub fn decode_model(json_str: String) -> Result(app.Model, String) {
+  let model_decoder = {
+" <> decode_body <> "
+    decode.success(" <> constructor_call <> ")
+  }
+  case json.parse(json_str, model_decoder) {
+    Ok(model) -> Ok(model)
+    Error(_) -> Error(\"Failed to decode model\")
   }
 }
 "

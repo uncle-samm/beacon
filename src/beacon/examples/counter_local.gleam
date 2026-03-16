@@ -5,6 +5,7 @@
 import beacon
 import beacon/html
 import gleam/int
+import gleam/json
 
 /// Server state — shared across users, synced via server.
 pub type Model {
@@ -75,5 +76,9 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
 pub fn main() {
   beacon.app_with_local(init, init_local, update, view)
   |> beacon.title("Counter with Local State")
+  |> beacon.model_encoder(fn(combined) {
+    let #(model, _local) = combined
+    json.to_string(json.object([#("count", json.int(model.count))]))
+  })
   |> beacon.start(8080)
 }

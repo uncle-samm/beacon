@@ -286,6 +286,8 @@ fn handle_message(
       case resolve_result {
         Ok(msg) -> {
           let new_state = run_update(RuntimeState(..state, event_clock: clock), msg)
+          // Send model_sync to the triggering client
+          send_model_sync(new_state, conn_id)
           actor.continue(new_state)
         }
         Error(err) -> {
@@ -416,6 +418,33 @@ fn broadcast_patch(
     })
   // Also broadcast via PubSub for distributed subscribers
   pubsub.broadcast("beacon:patches", patch_msg)
+}
+
+/// Send authoritative model state to a specific client connection.
+/// Only sends if serialize_model is configured.
+fn send_model_sync(
+  state: RuntimeState(model, msg),
+  conn_id: transport.ConnectionId,
+) -> Nil {
+  case state.serialize_model {
+    Some(serialize) -> {
+      case dict.get(state.connections, conn_id) {
+        Ok(subject) -> {
+          let model_json = serialize(state.model)
+          process.send(
+            subject,
+            transport.SendModelSync(
+              model_json: model_json,
+              version: state.event_clock,
+              ack_clock: state.event_clock,
+            ),
+          )
+        }
+        Error(Nil) -> Nil
+      }
+    }
+    None -> Nil
+  }
 }
 
 /// Execute effects by providing a dispatch function that sends messages

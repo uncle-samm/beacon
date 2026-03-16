@@ -4,6 +4,16 @@
 import glance
 import gleam/list
 
+/// A field in a Model or Local type.
+pub type TypeField {
+  TypeField(
+    /// The field name (e.g., "count").
+    name: String,
+    /// The field type name (e.g., "Int", "String", "Bool").
+    type_name: String,
+  )
+}
+
 /// Result of analyzing a user's app module.
 pub type Analysis {
   Analysis(
@@ -11,6 +21,8 @@ pub type Analysis {
     msg_variants: List(MsgVariant),
     /// Whether the module has a Local type.
     has_local: Bool,
+    /// Fields of the Model type (for JSON codec generation).
+    model_fields: List(TypeField),
   )
 }
 
@@ -39,10 +51,20 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
         Error(_) -> False
       }
 
+      // Extract Model fields for JSON codec generation
+      let model_fields = case find_custom_type(module, "Model") {
+        Ok(model_type) -> extract_fields(model_type)
+        Error(_) -> []
+      }
+
       case msg_type, update_fn {
         Ok(msg), Ok(func) -> {
           let variants = classify_variants(msg, func)
-          Ok(Analysis(msg_variants: variants, has_local: has_local))
+          Ok(Analysis(
+            msg_variants: variants,
+            has_local: has_local,
+            model_fields: model_fields,
+          ))
         }
         Error(r), _ -> Error(r)
         _, Error(r) -> Error(r)
@@ -79,6 +101,26 @@ fn find_function(
   {
     Ok(def) -> Ok(def.definition)
     Error(Nil) -> Error("Public function '" <> name <> "' not found")
+  }
+}
+
+/// Extract labelled fields from a custom type's first variant.
+fn extract_fields(custom_type: glance.CustomType) -> List(TypeField) {
+  case custom_type.variants {
+    [variant, ..] ->
+      list.filter_map(variant.fields, fn(field) {
+        case field {
+          glance.LabelledVariantField(item: field_type, label: name) -> {
+            let type_name = case field_type {
+              glance.NamedType(name: n, ..) -> n
+              _ -> "Unknown"
+            }
+            Ok(TypeField(name: name, type_name: type_name))
+          }
+          _ -> Error(Nil)
+        }
+      })
+    _ -> []
   }
 }
 

@@ -199,6 +199,18 @@ pub fn title(
   AppBuilder(..builder, title: t)
 }
 
+/// Set a model encoder for model_sync.
+/// The encoder serializes the Model to JSON so the server can send
+/// authoritative state to the client after model-affecting events.
+/// For app_with_local, the encoder receives the full #(model, local)
+/// but should only serialize the model part.
+pub fn model_encoder(
+  builder: AppBuilder(model, msg),
+  encoder: fn(model) -> String,
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, serialize_model: option.Some(encoder))
+}
+
 /// Set the secret key for session tokens.
 pub fn secret_key(
   builder: AppBuilder(model, msg),

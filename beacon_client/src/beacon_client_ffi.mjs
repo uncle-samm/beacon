@@ -124,7 +124,7 @@ function handleMessage(raw) {
   switch (msg.type) {
     case "mount": handleMount(msg.payload); break;
     case "patch": handlePatch(msg.payload); break;
-    case "model_sync": break;
+    case "model_sync": handleModelSync(msg.model, msg.version); break;
     case "heartbeat_ack": break;
     case "error": console.error("[beacon] Server error:", msg.reason); break;
   }
@@ -161,6 +161,24 @@ function handlePatch(payload) {
   } catch (e) {}
   morphInnerHTML(appRoot, payload);
   attachEvents();
+}
+
+function handleModelSync(modelJson, version) {
+  if (!clientInitialized || !window.BeaconApp) return;
+  const App = window.BeaconApp;
+  if (!App.decode_model) return;
+
+  try {
+    const result = App.decode_model(modelJson);
+    if (result.isOk()) {
+      clientModel = result[0];
+      // Re-render with authoritative model + our local state
+      clientRender();
+      console.log("[beacon] Model synced v" + version);
+    }
+  } catch (e) {
+    console.error("[beacon] Model sync decode failed:", e);
+  }
 }
 
 // === Rendered Format ===

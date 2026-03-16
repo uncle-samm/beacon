@@ -7,12 +7,11 @@
 
 ## Current Status
 
-**Active Milestone:** 38 — Build Tool Bundles User Code → Client Executes Locally
-**Last Updated:** iteration 16 start
-**Build Status:** GREEN (zero errors, zero warnings from beacon code)
+**Active Milestone:** 39 — Model Sync (server → client)
+**Last Completed:** 38 — Client-side local execution (LOCAL events = zero WS traffic)
+**Build Status:** GREEN (zero errors, zero warnings)
 **Test Status:** GREEN (380 passed, 0 failures)
 **Linter:** PASSING (zero violations)
-**Docs:** BUILDING (`gleam docs build` succeeds, 20 module pages)
 
 ---
 
@@ -1498,10 +1497,96 @@
 
 ---
 
+## Remaining Work — Priority Order
+
+### P0: Core Architecture Gaps (must fix for the framework to be usable)
+
+#### Milestone 39: Model Sync (server → client)
+> When client sends a model-affecting event, server must send back authoritative Model.
+> Without this, client/server state silently diverges after any model event.
+
+- [x] Server sends `model_sync` message after processing a model-affecting event
+- [x] Generate JSON encoder for user's Model type in build tool (analyzer extracts Model fields)
+- [x] Generate JSON decoder for Model type in client bundle (decode_model in entry point)
+- [x] Client receives `model_sync`, replaces its Model, keeps Local, re-renders
+- [x] Model versioning to handle out-of-order messages (event_clock based)
+- [x] `beacon.model_encoder()` API for providing server-side encoder
+- [ ] Test: increment on client → server confirms → client has authoritative count
+- [ ] Test: two tabs, both increment → both converge to same count
+
+#### Milestone 40: Error Recovery & State Resync
+> If client/server diverge (network glitch, bug, reconnect), need a way to recover.
+
+- [ ] Server can send full model_sync on reconnect (not just a patch)
+- [ ] Client detects stale state (version mismatch) and requests full resync
+- [ ] WebSocket reconnection triggers full model resync from server
+- [ ] Client falls back to server-only mode if local execution fails
+- [ ] Test: disconnect → reconnect → client has correct state
+- [ ] Test: client throws during local update → falls back to server
+
+#### Milestone 41: Routing
+> Single page only right now. Need URL-based navigation for real apps.
+
+- [ ] `beacon.route("/path", handler)` API for declaring routes
+- [ ] Server-side route matching on initial HTTP request
+- [ ] Client-side route transitions without full page reload
+- [ ] URL parameters and query string parsing
+- [ ] Route-specific init/update/view functions
+- [ ] Browser back/forward navigation support
+- [ ] Test: navigate between routes, each has own state
+- [ ] Test: direct URL access renders correct route (SSR)
+
+#### Milestone 42: Server Functions
+> Let users call server-side logic from the client (like tRPC/server actions).
+> For things that can't run client-side: DB queries, API calls, auth checks.
+
+- [ ] `beacon.server_fn(name, handler)` API for registering server functions
+- [ ] Client can call server functions and await results
+- [ ] Server function results delivered via WebSocket (no HTTP round-trip)
+- [ ] Type-safe: function signature checked at compile time
+- [ ] Error handling: server function failures reported to client
+- [ ] Test: client calls server function, gets result, updates view
+
+### P1: Production Readiness (needed before deploying real apps)
+
+#### Milestone 43: Middleware & Auth
+> TODO: Design middleware/plug system, session management, auth helpers, CSRF protection.
+
+#### Milestone 44: Form Handling
+> TODO: Form validation, multi-field forms, file uploads, form state management.
+
+#### Milestone 45: CSS & Asset Pipeline
+> TODO: CSS modules or scoped styles, static asset serving, asset fingerprinting/cache busting.
+
+#### Milestone 46: Production Deployment
+> TODO: Release builds, Docker support, health checks, graceful shutdown, environment config.
+
+#### Milestone 47: Documentation
+> TODO: Getting started guide, API reference, example walkthrough, architecture docs.
+
+### P2: Nice-to-Have (framework polish)
+
+#### Milestone 48: Hot Reload
+> TODO: Watch mode for dev, automatic recompile + browser refresh on file change.
+
+#### Milestone 49: Context System
+> TODO: Replace make_init/make_update factory pattern with framework-provided Context that gives update/init access to stores without closures.
+
+#### Milestone 50: Build Tool Improvements
+> TODO: Multi-module support, handle apps with server dependencies (stores), watch mode, source maps, tree shaking.
+
+#### Milestone 51: Streaming & Progressive Loading
+> TODO: Streaming HTML responses, progressive hydration, lazy loading of routes/components.
+
+#### Milestone 52: Rate Limiting & Security
+> TODO: WebSocket rate limiting, input sanitization, CSP headers, secure defaults.
+
+---
+
 ## Blockers & Deferred Items
 <!-- Add blocked items here -->
 
 ---
 
 ## Decisions Log
-<!-- Add decisions here -->
+- Factory pattern (make_init/make_update) chosen over Context system for now — idiomatic Gleam, works, can revisit later (see Milestone 49)
