@@ -23,6 +23,10 @@ pub type Analysis {
     has_local: Bool,
     /// Fields of the Model type (for JSON codec generation).
     model_fields: List(TypeField),
+    /// Whether the module has a direct `pub fn init` (vs make_init factory).
+    has_direct_init: Bool,
+    /// Whether the module has a direct `pub fn update` (vs make_update factory).
+    has_direct_update: Bool,
   )
 }
 
@@ -43,8 +47,19 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
     Ok(module) -> {
       // Find Msg type
       let msg_type = find_custom_type(module, "Msg")
-      // Find update function
-      let update_fn = find_function(module, "update")
+      // Find update function (try "update" first, then "make_update")
+      let has_direct_init = case find_function(module, "init") {
+        Ok(_) -> True
+        Error(_) -> False
+      }
+      let has_direct_update = case find_function(module, "update") {
+        Ok(_) -> True
+        Error(_) -> False
+      }
+      let update_fn = case find_function(module, "update") {
+        Ok(f) -> Ok(f)
+        Error(_) -> find_function(module, "make_update")
+      }
       // Check for Local type
       let has_local = case find_custom_type(module, "Local") {
         Ok(_) -> True
@@ -64,6 +79,8 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
             msg_variants: variants,
             has_local: has_local,
             model_fields: model_fields,
+            has_direct_init: has_direct_init,
+            has_direct_update: has_direct_update,
           ))
         }
         Error(r), _ -> Error(r)

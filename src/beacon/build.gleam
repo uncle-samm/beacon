@@ -176,12 +176,49 @@ pub fn on_change(callback: fn(String) -> msg) -> Attr {
 "
 }
 
-/// Rewrite user module: strip the main() function (server-only).
+/// Rewrite user module: strip server-only code for JS compilation.
+/// Removes main/start functions and server-only imports.
 fn rewrite_user_module(source: String) -> String {
-  // Remove pub fn main() and everything after it
-  // The main function calls beacon.start() which is server-only
-  case string.split(source, "pub fn main()") {
+  // Strip pub fn main() or pub fn start() and everything after
+  let stripped = case string.split(source, "pub fn main()") {
     [before, _] -> before
+    _ -> source
+  }
+  let stripped = case string.split(stripped, "pub fn start()") {
+    [before, _] -> before
+    _ -> stripped
+  }
+  // Strip make_init and make_update factory functions (they reference server-only deps)
+  let stripped = strip_function(stripped, "pub fn make_init(")
+  let stripped = strip_function(stripped, "pub fn make_update(")
+  // Strip server-only imports
+  let lines = string.split(stripped, "\n")
+  let filtered =
+    list.filter(lines, fn(line) {
+      let trimmed = string.trim(line)
+      // Keep non-import lines and client-safe imports
+      case string.starts_with(trimmed, "import beacon/store") {
+        True -> False
+        False ->
+          case string.starts_with(trimmed, "import gleam/json") {
+            True -> False
+            False -> True
+          }
+      }
+    })
+  string.join(filtered, "\n")
+}
+
+/// Strip a function definition from source (from signature to the next pub fn or end).
+fn strip_function(source: String, signature: String) -> String {
+  case string.split(source, signature) {
+    [before, after] -> {
+      // Find the next "pub fn" after the stripped function
+      case string.split(after, "\npub fn ") {
+        [_, ..rest] -> before <> "\npub fn " <> string.join(rest, "\npub fn ")
+        _ -> before
+      }
+    }
     _ -> source
   }
 }
@@ -212,6 +249,9 @@ fn generate_entry_point(analysis: analyzer.Analysis) -> String {
         "Int" -> "decode.int"
         "Float" -> "decode.float"
         "Bool" -> "decode.bool"
+        "String" -> "decode.string"
+        "List" -> "decode.list(decode.string)"
+        "Option" -> "decode.optional(decode.string)"
         _ -> "decode.string"
       }
       "    use "
@@ -231,6 +271,36 @@ fn generate_entry_point(analysis: analyzer.Analysis) -> String {
   let constructor_call =
     "app.Model(" <> string.join(model_constructor_args, ", ") <> ")"
 
+  // Generate init/update based on whether module has direct functions
+  let init_fn = case analysis.has_direct_init {
+    True -> "pub fn init() -> app.Model {\n  app.init()\n}"
+    False -> {
+      // Generate default init from Model fields
+      let default_fields =
+        list.map(analysis.model_fields, fn(f) {
+          let default = case f.type_name {
+            "Int" -> "0"
+            "Float" -> "0.0"
+            "Bool" -> "False"
+            "String" -> "\"\""
+            _ -> "\"\""
+          }
+          f.name <> ": " <> default
+        })
+      "pub fn init() -> app.Model {\n  app.Model("
+      <> string.join(default_fields, ", ")
+      <> ")\n}"
+    }
+  }
+
+  let update_fn_code = case analysis.has_direct_update {
+    True ->
+      "pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {\n  app.update(model, local, msg)\n}"
+    False ->
+      // Passthrough — model-affecting events go to server anyway
+      "pub fn update(model: app.Model, local: app.Local, _msg: app.Msg) -> #(app.Model, app.Local) {\n  #(model, local)\n}"
+  }
+
   "/// AUTO-GENERATED entry point for client-side execution.
 import app
 import beacon/element
@@ -239,9 +309,7 @@ import gleam/dynamic/decode
 import gleam/json
 
 /// Initialize Model.
-pub fn init() -> app.Model {
-  app.init()
-}
+" <> init_fn <> "
 
 /// Initialize Local from Model.
 pub fn init_local(model: app.Model) -> app.Local {
@@ -249,9 +317,7 @@ pub fn init_local(model: app.Model) -> app.Local {
 }
 
 /// Run update locally.
-pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {
-  app.update(model, local, msg)
-}
+" <> update_fn_code <> "
 
 /// Start a render cycle (resets handler registry).
 pub fn start_render() {
@@ -299,7 +365,15 @@ fn compile_js() -> Result(Nil, String) {
   let result = run_command("cd build/beacon_client_app && gleam build 2>&1")
   case string.contains(result, "Compiled in") {
     True -> Ok(Nil)
-    False -> Error(result)
+    False -> {
+      log.error(
+        "beacon.build",
+        "JS compilation failed. This usually means the user module "
+          <> "references server-only code (stores, ETS, etc.) that can't "
+          <> "compile to JavaScript. Check the error output below.",
+      )
+      Error("JS compilation failed:\n" <> result)
+    }
   }
 }
 
@@ -362,12 +436,19 @@ fn find_app_module(dir: String) -> Result(#(String, String), String) {
                 True -> {
                   case simplifile.read(path) {
                     Ok(source) -> {
-                      case
+                      let has_update =
                         string.contains(source, "pub fn update")
-                        && string.contains(source, "pub fn view")
-                        && string.contains(source, "pub type Model")
-                        && string.contains(source, "pub type Msg")
-                        && string.contains(source, "pub type Local")
+                        || string.contains(source, "pub fn make_update")
+                      let has_view = string.contains(source, "pub fn view")
+                      let has_model = string.contains(source, "pub type Model")
+                      let has_msg = string.contains(source, "pub type Msg")
+                      let has_local = string.contains(source, "pub type Local")
+                      case
+                        has_update
+                        && has_view
+                        && has_model
+                        && has_msg
+                        && has_local
                       {
                         True -> Ok(#(path, source))
                         False -> Error(Nil)

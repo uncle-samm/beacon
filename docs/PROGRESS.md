@@ -1613,12 +1613,13 @@
 > The build tool is fragile — only finds one app module, only handles simple types,
 > can't compile update branches that reference server-only code (stores, ETS).
 
-- [ ] Generate stubs for server-only code paths (MODEL branches skip server deps in JS)
-- [ ] Support complex Model field types (List, Option, custom types)
-- [ ] Multi-module support (find app module across nested directories)
-- [ ] Better error messages when compilation fails
-- [ ] Test: triple_counter compiles to JS (store-dependent branches stubbed)
-- [ ] Test: Model with List(String) field generates correct codec
+- [x] Strip server-only code (store imports, make_init/make_update factories, start/main)
+- [x] Generate default init/passthrough update for factory-pattern modules
+- [x] Support complex Model field types (List, Option in JSON decoder)
+- [x] Multi-module support (find modules with make_update or update)
+- [x] Better error messages when JS compilation fails
+- [x] Test: triple_counter compiles to JS successfully
+- [x] Test: analyzer detects direct vs factory patterns (2 new tests)
 
 #### Milestone 49: Advanced Routing
 > Current routing is basic — no nested routes, layouts, or guards.

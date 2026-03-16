@@ -78,6 +78,43 @@ pub fn view(model: Model, local: Local) { model }
   let assert "Int" = field.type_name
 }
 
+pub fn detects_direct_init_update_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Local { Local(input: String) }
+pub type Msg { Increment }
+pub fn init() -> Model { Model(count: 0) }
+pub fn init_local(_m: Model) -> Local { Local(input: \"\") }
+pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
+  case msg { Increment -> #(Model(count: model.count + 1), local) }
+}
+pub fn view(model: Model, local: Local) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = analysis.has_direct_init
+  let assert True = analysis.has_direct_update
+}
+
+pub fn detects_factory_pattern_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Local { Local(input: String) }
+pub type Msg { Increment }
+pub fn init_local(_m: Model) -> Local { Local(input: \"\") }
+pub fn make_update(store) -> fn(Model, Local, Msg) -> #(Model, Local) {
+  fn(model, local, msg) {
+    case msg { Increment -> #(Model(count: model.count + 1), local) }
+  }
+}
+pub fn view(model: Model, local: Local) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert False = analysis.has_direct_init
+  let assert False = analysis.has_direct_update
+}
+
 pub fn no_msg_type_error_test() {
   let source = "pub fn update(m, msg) { m }\npub fn view(m) { m }\npub type Model { M }\n"
   let assert Error(_) = analyzer.analyze(source)
