@@ -415,7 +415,7 @@ fn bundle_js() -> Result(Nil, String) {
   }
   // Create a tiny entry that imports both the FFI and user entry
   let entry_js =
-    "import { initClient } from './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\ninitClient();\n"
+    "import { initClientAfterBoot } from './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\ninitClientAfterBoot();\n"
   case simplifile.write("build/beacon_client_app/bundle_entry.mjs", entry_js) {
     Ok(Nil) -> Nil
     Error(_) -> Nil

@@ -43,6 +43,17 @@ export function initClient() {
     const clientHtml = App.view_to_html(clientModel, clientLocal);
     clientRegistry = App.finish_render();
 
+    // Verify client render matches server SSR before enabling local execution
+    const serverText = (appRoot?.textContent || "").substring(0, 30).trim();
+    const tpl = document.createElement("template");
+    tpl.innerHTML = clientHtml;
+    const clientText = tpl.content.textContent.substring(0, 30).trim();
+    console.log("[beacon] Mismatch check: client='" + clientText + "' server='" + serverText + "'");
+    if (serverText && clientText && clientText !== serverText) {
+      console.log("[beacon] Server-only mode — compiled JS is for different app");
+      return;
+    }
+
     clientInitialized = true;
     console.log("[beacon] Client-side execution ready");
   } catch (e) {
@@ -244,7 +255,42 @@ function createNode(j) {
 export function morph_html(container, html) { morphInnerHTML(container, html); return undefined; }
 
 function morphInnerHTML(container, html) {
+  // Save focused element state before morphing
+  const focused = document.activeElement;
+  const focusedTag = focused?.tagName;
+  const focusedName = focused?.getAttribute("name") || focused?.getAttribute("data-beacon-event-input");
+  const selStart = focused?.selectionStart;
+  const selEnd = focused?.selectionEnd;
+  const focusedValue = focused?.value;
+
   const t = document.createElement("template"); t.innerHTML = html; morphChildren(container, t.content);
+
+  // Restore focus after morph — find the same element by name/handler
+  if (focusedTag === "INPUT" || focusedTag === "TEXTAREA" || focusedTag === "SELECT") {
+    let restored = null;
+    if (focusedName) {
+      restored = container.querySelector(`[name="${focusedName}"]`) ||
+                 container.querySelector(`[data-beacon-event-input="${focusedName}"]`);
+    }
+    if (!restored && focused.type) {
+      // Fallback: find by type and placeholder
+      const placeholder = focused.getAttribute("placeholder");
+      if (placeholder) {
+        restored = container.querySelector(`${focusedTag}[placeholder="${placeholder}"]`);
+      }
+    }
+    if (restored && restored !== document.activeElement) {
+      restored.focus();
+      // Restore cursor position
+      if (typeof selStart === "number" && restored.setSelectionRange) {
+        try { restored.setSelectionRange(selStart, selEnd); } catch(e) {}
+      }
+      // Restore value if morph overwrote it (server might be behind client)
+      if (focusedValue !== undefined && restored.value !== focusedValue) {
+        restored.value = focusedValue;
+      }
+    }
+  }
 }
 
 function morphChildren(op, np) {
@@ -396,4 +442,15 @@ export function log(msg) { console.log("[beacon]", msg); return undefined; }
 if (typeof document !== "undefined") {
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { boot("#beacon-app"); setupNavigation(); });
   else { boot("#beacon-app"); setupNavigation(); }
+}
+
+// Called from bundle entry AFTER window.BeaconApp is set
+export function initClientAfterBoot() {
+  // If boot hasn't run yet (script loaded before DOMContentLoaded),
+  // defer initClient to after boot
+  if (!appRoot) {
+    document.addEventListener("DOMContentLoaded", () => initClient());
+  } else {
+    initClient();
+  }
 }
