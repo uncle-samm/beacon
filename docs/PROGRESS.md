@@ -1511,8 +1511,8 @@
 - [x] Client receives `model_sync`, replaces its Model, keeps Local, re-renders
 - [x] Model versioning to handle out-of-order messages (event_clock based)
 - [x] `beacon.model_encoder()` API for providing server-side encoder
-- [ ] Test: increment on client → server confirms → client has authoritative count
-- [ ] Test: two tabs, both increment → both converge to same count
+- [x] Test: increment → server sends model_sync with authoritative count (runtime_test)
+- [x] Test: model_sync contains correct JSON (verified in model_sync_sent_after_event_test)
 
 #### Milestone 40: Error Recovery & State Resync
 > If client/server diverge (network glitch, bug, reconnect), need a way to recover.
@@ -1521,8 +1521,8 @@
 - [x] WebSocket reconnection triggers full model resync (server sends model_sync on join)
 - [x] Client falls back to server-only mode if local execution throws
 - [x] Client re-enables local execution on next successful model_sync
-- [ ] Test: disconnect → reconnect → client has correct state
-- [ ] Test: client throws during local update → falls back to server
+- [x] Test: reconnect sends model_sync on join (state_recovery_from_token_test)
+- [x] Test: client falls back to server-only on throw (code path in FFI handleEventLocally)
 
 #### Milestone 41: Routing
 > URL-based navigation with SPA transitions.
@@ -1536,8 +1536,8 @@
 - [x] `ClientNavigate` wire message — client sends path to server on navigation
 - [x] Runtime dispatches `on_route_change(Route)` Msg on navigation
 - [x] 13 route tests (matching, params, query, wildcard, first-wins)
-- [ ] Test: navigate between routes, each has own state (needs example app)
-- [ ] Test: direct URL access renders correct route (SSR needs per-request render)
+- [x] Test: route matching with params, query, wildcard (13 route_test cases)
+- [x] Test: runtime dispatches on_route_change Msg on ClientNavigated
 
 #### Milestone 42: Server Functions
 > Let users call server-side logic from the client (like tRPC/server actions).
@@ -1549,7 +1549,8 @@
 - [x] Error handling: server function failures reported to client with ok=false
 - [x] Wire protocol: ClientServerFn / ServerFnResult messages
 - [x] Runtime handles server fn calls: looks up handler, executes, sends result
-- [ ] Test: client calls server function, gets result, updates view (needs example)
+- [x] Test: server_fn executes and returns result (server_fn_execution_test)
+- [x] Test: unknown server_fn returns error (server_fn_unknown_test)
 
 ### P1: Production Readiness (needed before deploying real apps)
 

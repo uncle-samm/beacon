@@ -6,6 +6,7 @@ import beacon/transport
 import gleam/dict
 import gleam/erlang/process
 import gleam/int
+import gleam/list
 import gleam/option
 
 // --- Test helpers ---
@@ -458,6 +459,138 @@ pub fn state_recovery_from_token_test() {
 }
 
 import gleam/string
+
+pub fn model_sync_sent_after_event_test() {
+  // Runtime with serialize_model should send model_sync after events
+  let config =
+    runtime.RuntimeConfig(
+      init: counter_init,
+      update: counter_update,
+      view: counter_view,
+      decode_event: option.Some(counter_decode_event),
+      serialize_model: option.Some(fn(m: CounterModel) {
+        "{\"count\":" <> int.to_string(m.count) <> "}"
+      }),
+      deserialize_model: option.None,
+      subscriptions: [],
+      on_pubsub: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      server_fns: dict.new(),
+    )
+  let assert Ok(subject) = runtime.start(config)
+  let transport_subject = process.new_subject()
+
+  process.send(subject, runtime.ClientConnected(conn_id: "sync_conn", subject: transport_subject))
+  process.sleep(20)
+  process.send(subject, runtime.ClientJoined(conn_id: "sync_conn", token: ""))
+  process.sleep(20)
+
+  // Drain mount + initial model_sync messages
+  let selector = process.new_selector() |> process.select(transport_subject)
+  let _ = process.selector_receive(selector, 500)
+  let _ = process.selector_receive(selector, 500)
+
+  // Send an increment event
+  process.send(subject, runtime.ClientEventReceived(
+    conn_id: "sync_conn", event_name: "click", handler_id: "increment",
+    event_data: "{}", target_path: "0", clock: 1,
+  ))
+  process.sleep(50)
+
+  // Should receive a patch AND a model_sync
+  let msgs = drain_messages(transport_subject, [])
+  let has_model_sync = list.any(msgs, fn(m) {
+    case m {
+      transport.SendModelSync(model_json: json, ..) -> string.contains(json, "\"count\":1")
+      _ -> False
+    }
+  })
+  let assert True = has_model_sync
+}
+
+pub fn server_fn_execution_test() {
+  // Runtime with a server function
+  let config =
+    runtime.RuntimeConfig(
+      init: counter_init,
+      update: counter_update,
+      view: counter_view,
+      decode_event: option.Some(counter_decode_event),
+      serialize_model: option.None,
+      deserialize_model: option.None,
+      subscriptions: [],
+      on_pubsub: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      server_fns: dict.insert(dict.new(), "greet", fn(args) {
+        Ok("Hello, " <> args <> "!")
+      }),
+    )
+  let assert Ok(subject) = runtime.start(config)
+  let transport_subject = process.new_subject()
+
+  process.send(subject, runtime.ClientConnected(conn_id: "fn_conn", subject: transport_subject))
+  process.sleep(20)
+
+  // Call the server function
+  process.send(subject, runtime.ClientCalledServerFn(
+    conn_id: "fn_conn", name: "greet", args: "World", call_id: "c1",
+  ))
+  process.sleep(50)
+
+  // Should receive the result
+  let selector = process.new_selector() |> process.select(transport_subject)
+  let assert Ok(msg) = process.selector_receive(selector, 500)
+  case msg {
+    transport.SendServerFnResult(call_id: "c1", result: result, ok: True) ->
+      { let assert True = string.contains(result, "Hello, World!") }
+    _ -> panic as "Expected SendServerFnResult"
+  }
+}
+
+pub fn server_fn_unknown_test() {
+  let config =
+    runtime.RuntimeConfig(
+      init: counter_init,
+      update: counter_update,
+      view: counter_view,
+      decode_event: option.Some(counter_decode_event),
+      serialize_model: option.None,
+      deserialize_model: option.None,
+      subscriptions: [],
+      on_pubsub: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      server_fns: dict.new(),
+    )
+  let assert Ok(subject) = runtime.start(config)
+  let transport_subject = process.new_subject()
+
+  process.send(subject, runtime.ClientConnected(conn_id: "fn2_conn", subject: transport_subject))
+  process.sleep(20)
+
+  // Call a non-existent server function
+  process.send(subject, runtime.ClientCalledServerFn(
+    conn_id: "fn2_conn", name: "nope", args: "", call_id: "c2",
+  ))
+  process.sleep(50)
+
+  let selector = process.new_selector() |> process.select(transport_subject)
+  let assert Ok(msg) = process.selector_receive(selector, 500)
+  case msg {
+    transport.SendServerFnResult(call_id: "c2", ok: False, ..) -> Nil
+    _ -> panic as "Expected error SendServerFnResult"
+  }
+}
+
+fn drain_messages(subject, acc) {
+  let selector = process.new_selector() |> process.select(subject)
+  case process.selector_receive(selector, 100) {
+    Ok(msg) -> drain_messages(subject, [msg, ..acc])
+    Error(Nil) -> acc
+  }
+}
 
 @external(erlang, "beacon_test_ffi", "do_crash")
 fn crash_for_test() -> element.Node(CounterMsg)
