@@ -1729,6 +1729,32 @@
 - [x] Rejected upgrades get 401 response (no WebSocket connection)
 - [x] handle_websocket split into auth check + handle_websocket_upgrade
 
+#### Testing & Bug Fixes (Post-P4)
+
+**Framework bugs found & fixed during CDP testing:**
+
+1. **Build tool factory pattern bug** (commit 33d985b)
+   - Analyzer couldn't find case arms inside nested anonymous functions (make_update)
+   - LocalIncrement/LocalDecrement were misclassified as MODEL (sent WS traffic)
+   - Fix: Enhanced extract_case_arms + classify_variants for nested fn bodies
+   - Fix: Added client-side store stub so make_update works on JS target
+   - Fix: Entry point calls app.make_update(store.new("client_stub"))
+
+2. **Missing client JS fallback** (commit fb8db15)
+   - Transport returned 404 when no compiled beacon_client.js existed
+   - Apps completely broken without running `gleam run -m beacon/build`
+   - Fix: Added standalone beacon.js (server-only runtime)
+   - Fix: Embedded minified JS as last-resort fallback in transport
+   - Server-only mode now works out of the box without build step
+
+**Example testing results (CDP + MutationObserver + WS interceptor):**
+- [x] counter — click +/-, SSR rendering, WS event flow
+- [x] counter_local — MODEL events → WS, LOCAL events → zero WS traffic
+- [x] chat — join, typing preserves focus, cross-tab messaging, no duplicate messages
+- [x] triple_counter — shared syncs across tabs, server per-tab, local zero traffic
+- [x] canvas — color picker, clear button, event delegation, SSR
+- [x] HMR — modify .gleam → rebuild → browser shows change
+
 #### Milestone 61: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
 
