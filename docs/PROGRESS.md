@@ -1699,14 +1699,41 @@
 - [x] SendNavigate internal message wired in transport connection handler
 - [x] Transport encodes ServerNavigate as JSON
 
-#### Milestone 57: Context System
+#### Milestone 57: Targeted Redirect
+> Redirect effect broadcasts to ALL connections. Must target only the triggering connection.
+
+- [ ] Redirect effect sends to specific connection (not PubSub broadcast)
+- [ ] Pass connection ID through effect dispatch context
+- [ ] Test: redirect only reaches the triggering client
+
+#### Milestone 58: Binary-Safe Multipart Parsing
+> Multipart parser converts to string, breaks on binary files (images, PDFs).
+
+- [ ] Binary boundary scanning (no string conversion)
+- [ ] Handle binary file content (images, PDFs, etc.)
+- [ ] Test: binary file (PNG bytes) parsed correctly
+
+#### Milestone 59: Graceful Shutdown
+> Server doesn't drain connections on SIGTERM.
+
+- [ ] Trap SIGTERM in application supervisor
+- [ ] Drain in-flight WebSocket connections before exit
+- [ ] Configurable shutdown timeout
+- [ ] Test: shutdown completes pending requests
+
+#### Milestone 60: WebSocket Authentication
+> Anyone can connect to /ws. Should verify session on upgrade.
+
+- [ ] Verify session token on WebSocket upgrade request
+- [ ] Reject unauthenticated upgrades with 401
+- [ ] Pass authenticated session to runtime
+- [ ] Test: unauthenticated WS upgrade rejected
+
+#### Milestone 61: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
 
-#### Milestone 58: Streaming & Progressive Loading
+#### Milestone 62: Streaming & Progressive Loading
 > TODO: Streaming HTML responses, progressive hydration, lazy loading.
-
-#### Milestone 59: Security Hardening
-> TODO: WebSocket rate limiting, input sanitization, CSP headers, secure defaults.
 
 ---
 
