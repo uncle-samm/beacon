@@ -7,8 +7,8 @@
 
 ## Current Status
 
-**Active Milestone:** ALL MILESTONES COMPLETE (29-36)
-**Last Updated:** iteration 14
+**Active Milestone:** MILESTONE 37 COMPLETE
+**Last Updated:** iteration 15
 **Build Status:** GREEN (zero errors, zero warnings from beacon code)
 **Test Status:** GREEN (380 passed, 0 failures)
 **Linter:** PASSING (zero violations)
@@ -1411,6 +1411,44 @@
 - [x] Tests: real WS test proving local events produce zero server messages
 
 **Milestone 36 Notes:**
+<!-- Add notes here -->
+
+---
+
+## Milestone 37: One JS — Kill beacon.js, Wire Compiled Client
+> Remove the hand-written beacon.js. The compiled Gleam-to-JS client is the only runtime.
+
+### 37.1 Wire Event Delegation in Client FFI
+- [x] `beacon_client_ffi.mjs`: implement `attach_events(app_root)` that adds click/input/submit delegation
+- [x] Click handler: walk up DOM for `data-beacon-event-click`, get handler_id, call into Gleam `handle_event`
+- [x] Input handler: walk up DOM for `data-beacon-event-input`, extract value, call into Gleam `handle_event`
+- [x] Submit handler: walk up DOM for `data-beacon-event-submit`, call into Gleam `handle_event`
+- [x] Tests: compiled client handles click events in real browser via gen_tcp WS test
+
+### 37.2 Wire WebSocket in Client FFI
+- [x] `beacon_client_ffi.mjs`: `ws_connect` calls onmessage callback with parsed JSON
+- [x] Client handles mount message: store statics/dynamics, render initial HTML, morph DOM
+- [x] Client handles patch message: merge dynamics, re-render, morph DOM
+- [x] Client handles model_sync message: update model, re-render
+- [x] Client sends join message on connect with session token
+- [x] Client sends heartbeat every 30 seconds
+- [x] Tests: WS connection receives mount response
+
+### 37.3 Remove beacon.js
+- [x] Delete `priv/static/beacon.js` (the hand-written runtime)
+- [x] Remove `beacon_client_js()` embedded string from `transport.gleam`
+- [x] Transport serves `beacon_client.js` at `/beacon.js` path (so SSR HTML doesn't need to change)
+- [x] Remove `serve_js()` function, replace with `serve_client_js()` for both paths
+- [x] Tests: server serves compiled JS at /beacon.js, existing tests pass
+
+### 37.4 End-to-End Verification
+- [x] Start counter example, open real WS connection, send join, receive mount
+- [x] Send click event, receive patch/model_sync response
+- [x] Start chat example, verify multi-user works
+- [x] All existing 380 tests pass
+- [x] Commit and push
+
+**Milestone 37 Notes:**
 <!-- Add notes here -->
 
 ---
