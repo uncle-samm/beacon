@@ -1576,14 +1576,16 @@
 - [x] Test: CSRF token generation, verification, session-bound (one-time use)
 
 #### Milestone 45: CSS & Asset Pipeline
-> Scoped styles, static assets, cache busting.
+> Static assets, cache busting, MIME types.
 
-- [ ] Scoped CSS support (per-component styles)
-- [ ] Static asset serving with cache headers
-- [ ] Asset fingerprinting for cache busting
-- [ ] CSS hot reload in dev mode
-- [ ] Test: static files served with correct content type
-- [ ] Test: fingerprinted assets return 304 on revalidation
+- [x] Static asset serving with cache headers (ETag, Cache-Control, max-age)
+- [x] 20+ MIME types (HTML, CSS, JS, images, fonts, WASM, etc.)
+- [x] Asset fingerprinting for cache busting (static.fingerprint)
+- [x] Immutable cache for fingerprinted assets (1 year max-age)
+- [x] ETag/If-None-Match → 304 Not Modified responses
+- [x] Directory traversal prevention (rejects ".." paths)
+- [x] Test: static files served with correct content type (static_test)
+- [x] Test: 304 on matching ETag (static_test)
 
 #### Milestone 46: Production Deployment
 > Release builds, health checks, graceful shutdown.

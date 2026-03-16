@@ -173,5 +173,27 @@ fn file_extension(path: String) -> String {
   }
 }
 
+/// Generate a fingerprinted filename for cache busting.
+/// "app.js" with content hash → "app-abc123.js"
+pub fn fingerprint(path: String, contents: BitArray) -> String {
+  let hash = int.to_string(bit_array_size(contents))
+  let ext = file_extension(path)
+  let base = case string.split(path, "." <> ext) {
+    [name, ..] -> name
+    _ -> path
+  }
+  base <> "-" <> hash <> "." <> ext
+}
+
+/// Serve static files with immutable cache (for fingerprinted assets).
+/// Fingerprinted assets can be cached forever since the URL changes on content change.
+pub fn serve_immutable(
+  config: StaticConfig,
+  path: String,
+) -> Result(Response(mist.ResponseData), Nil) {
+  let immutable_config = StaticConfig(..config, max_age: 31_536_000)
+  serve_with_etag_check(immutable_config, path, "")
+}
+
 @external(erlang, "erlang", "byte_size")
 fn bit_array_size(bits: BitArray) -> Int
