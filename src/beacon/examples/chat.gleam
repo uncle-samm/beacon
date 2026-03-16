@@ -87,12 +87,9 @@ pub fn make_update(
                 id: unique_int(),
               )
             store.append(messages, model.current_room, message)
-            // No manual broadcast needed — store.append auto-notifies watchers
-            Model(
-              ..model,
-              input_text: "",
-              visible_messages: store.get_all(messages, model.current_room),
-            )
+            // Don't update visible_messages here — let NewMessageBroadcast
+            // handle it for ALL users (including the sender) to avoid duplicates.
+            Model(..model, input_text: "")
           }
         }
       }
