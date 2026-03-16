@@ -7,7 +7,7 @@
 
 ## Current Status
 
-**Active Milestone:** P3 — Future
+**Active Milestone:** 52 — Native File Watching (P3 Polish)
 **Last Completed:** 51 — Hot Reload (P2 complete)
 **Build Status:** GREEN (zero errors, zero warnings)
 **Test Status:** GREEN (436 passed, 0 failures)
@@ -1657,13 +1657,53 @@
 - [x] Test: find_gleam_files finds source files
 - [x] Test: check_for_changes returns false with no changes
 
-#### Milestone 52: Context System
+#### Milestone 52: Native File Watching
+> Replace polling with inotify/fswatch for instant change detection.
+
+- [ ] Use `fs` Erlang library or `inotify` for native file watching
+- [ ] Fall back to polling if native watching unavailable
+- [ ] Test: file change detected within 100ms (vs 1s polling)
+
+#### Milestone 53: Browser Refresh on Hot Reload
+> Hot reload recompiles but browser doesn't know. Need live reload notification.
+
+- [ ] Dev WebSocket channel that pushes reload notifications to browser
+- [ ] Client JS listens for reload message and triggers `location.reload()`
+- [ ] Dev mode injects reload script into SSR HTML automatically
+- [ ] Test: reload message sent after successful recompile
+
+#### Milestone 54: Multipart Upload Parsing
+> Upload module validates files but transport doesn't parse multipart bodies.
+
+- [ ] Parse multipart/form-data request bodies in transport
+- [ ] Extract files into UploadedFile structs
+- [ ] Wire into form submission flow
+- [ ] Test: multipart POST with file creates UploadedFile
+
+#### Milestone 55: Route-Aware SSR
+> SSR always renders the same page regardless of URL path.
+
+- [ ] Pass request path to SSR render
+- [ ] Run init + on_route_change(matched_route) before rendering
+- [ ] Each URL path gets route-specific SSR HTML
+- [ ] Test: GET /about renders different HTML than GET /
+
+#### Milestone 56: Working Redirect Effect
+> beacon.redirect() is a placeholder — doesn't actually navigate.
+
+- [ ] Add ServerNavigate message type (server → client)
+- [ ] Client FFI handles ServerNavigate: pushState + trigger navigation
+- [ ] beacon.redirect() returns an effect that sends ServerNavigate
+- [ ] Runtime executes redirect effect and sends to client
+- [ ] Test: redirect effect sends navigate message to client
+
+#### Milestone 57: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
 
-#### Milestone 53: Streaming & Progressive Loading
+#### Milestone 58: Streaming & Progressive Loading
 > TODO: Streaming HTML responses, progressive hydration, lazy loading.
 
-#### Milestone 54: Security Hardening
+#### Milestone 59: Security Hardening
 > TODO: WebSocket rate limiting, input sanitization, CSP headers, secure defaults.
 
 ---
