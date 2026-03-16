@@ -1557,13 +1557,13 @@
 #### Milestone 43: Middleware & Auth
 > Middleware pipeline, session management, auth helpers.
 
-- [ ] Request/response middleware pipeline (before/after hooks)
-- [ ] Session middleware (cookie-based sessions)
-- [ ] Auth helpers (login/logout, session-bound user)
-- [ ] CSRF protection middleware
-- [ ] Rate limiting middleware
-- [ ] Test: middleware chain executes in order
-- [ ] Test: auth rejects unauthenticated requests
+- [x] Request/response middleware pipeline (before/after hooks) — already existed
+- [x] Session middleware (cookie-based sessions) — beacon/session.gleam with ETS store
+- [x] Auth helpers (login/logout, session-bound user) — beacon/auth.gleam
+- [x] CSRF protection middleware — auth.csrf_protection() validates on POST/PUT/DELETE
+- [x] Rate limiting middleware — already existed
+- [x] Test: middleware chain executes in order — middleware_test.gleam
+- [x] Test: auth rejects unauthenticated requests — auth.require_auth middleware + auth_test.gleam
 
 #### Milestone 44: Form Handling
 > Multi-field forms, validation, file uploads.
