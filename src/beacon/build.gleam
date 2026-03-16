@@ -136,6 +136,13 @@ fn create_temp_project(
     Error(_) -> Nil
   }
 
+  // Write client-side store stub (no-op implementations for JS target)
+  let store_stub = generate_client_store_stub()
+  case simplifile.write(dir <> "/src/beacon/store.gleam", store_stub) {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+  }
+
   // Write the user's module as the app
   case simplifile.write(dir <> "/src/app.gleam", rewrite_user_module(user_source)) {
     Ok(Nil) -> Nil
@@ -187,8 +194,85 @@ pub fn on_change(callback: fn(String) -> msg) -> Attr {
 "
 }
 
+/// Generate a client-side store stub — no-op implementations for JS target.
+/// Provides Store/ListStore types and functions that compile to JS without
+/// ETS, PubSub, or state_manager dependencies.
+fn generate_client_store_stub() -> String {
+  "/// Client-side store stub — no-op implementations for JS target.
+/// Store operations that affect shared state are no-ops on the client;
+/// the server handles actual persistence. This stub exists so that
+/// make_init/make_update factory functions compile to JavaScript.
+
+/// A key-value store (client-side stub).
+pub type Store(value) {
+  Store(topic: String)
+}
+
+/// Create a new store (stub).
+pub fn new(_name: String) -> Store(value) {
+  Store(topic: \"\")
+}
+
+/// Get a value (always returns Error on client).
+pub fn get(_store: Store(value), _key: String) -> Result(value, Nil) {
+  Error(Nil)
+}
+
+/// Set a value (no-op on client — server handles persistence).
+pub fn put(_store: Store(value), _key: String, _value: value) -> Nil {
+  Nil
+}
+
+/// Delete a value (no-op on client).
+pub fn delete(_store: Store(value), _key: String) -> Nil {
+  Nil
+}
+
+/// Count entries (always 0 on client).
+pub fn count(_store: Store(value)) -> Int {
+  0
+}
+
+/// Get the PubSub topic.
+pub fn topic(store: Store(value)) -> String {
+  store.topic
+}
+
+/// A list store (client-side stub).
+pub type ListStore(value) {
+  ListStore(topic: String)
+}
+
+/// Create a new list store (stub).
+pub fn new_list(_name: String) -> ListStore(value) {
+  ListStore(topic: \"\")
+}
+
+/// Append a value (no-op on client).
+pub fn append(_store: ListStore(value), _key: String, _value: value) -> Nil {
+  Nil
+}
+
+/// Get all values (always empty on client).
+pub fn get_all(_store: ListStore(value), _key: String) -> List(value) {
+  []
+}
+
+/// Delete all values for a key (no-op on client).
+pub fn delete_all(_store: ListStore(value), _key: String) -> Nil {
+  Nil
+}
+
+/// Get the PubSub topic for a list store.
+pub fn list_topic(store: ListStore(value)) -> String {
+  store.topic
+}
+"
+}
+
 /// Rewrite user module: strip server-only code for JS compilation.
-/// Removes main/start functions and server-only imports.
+/// Removes main/start functions. Keeps make_init/make_update (client-side
+/// store stub provides compatible types). Keeps import beacon/store.
 fn rewrite_user_module(source: String) -> String {
   // Strip pub fn main() or pub fn start() and everything after
   let stripped = case string.split(source, "pub fn main()") {
@@ -199,19 +283,15 @@ fn rewrite_user_module(source: String) -> String {
     [before, _] -> before
     _ -> stripped
   }
-  // Strip make_init and make_update factory functions (they reference server-only deps)
-  let stripped = strip_function(stripped, "pub fn make_init(")
-  let stripped = strip_function(stripped, "pub fn make_update(")
-  // Strip server-only imports
+  // Strip @external declarations (they're Erlang-only)
   let lines = string.split(stripped, "\n")
   let filtered =
     list.filter(lines, fn(line) {
       let trimmed = string.trim(line)
-      // Keep non-import lines and client-safe imports
-      case string.starts_with(trimmed, "import beacon/store") {
+      case string.starts_with(trimmed, "@external(erlang") {
         True -> False
         False ->
-          case string.starts_with(trimmed, "import gleam/json") {
+          case string.starts_with(trimmed, "fn unique_int") {
             True -> False
             False -> True
           }
@@ -220,19 +300,6 @@ fn rewrite_user_module(source: String) -> String {
   string.join(filtered, "\n")
 }
 
-/// Strip a function definition from source (from signature to the next pub fn or end).
-fn strip_function(source: String, signature: String) -> String {
-  case string.split(source, signature) {
-    [before, after] -> {
-      // Find the next "pub fn" after the stripped function
-      case string.split(after, "\npub fn ") {
-        [_, ..rest] -> before <> "\npub fn " <> string.join(rest, "\npub fn ")
-        _ -> before
-      }
-    }
-    _ -> source
-  }
-}
 
 /// Generate the entry point module that wires user code to client runtime.
 fn generate_entry_point(analysis: analyzer.Analysis) -> String {
@@ -282,25 +349,16 @@ fn generate_entry_point(analysis: analyzer.Analysis) -> String {
   let constructor_call =
     "app.Model(" <> string.join(model_constructor_args, ", ") <> ")"
 
-  // Generate init/update based on whether module has direct functions
+  // Determine if we need the store import for factory pattern
+  let needs_store =
+    !analysis.has_direct_init || !analysis.has_direct_update
+
+  // Generate init function
   let init_fn = case analysis.has_direct_init {
     True -> "pub fn init() -> app.Model {\n  app.init()\n}"
     False -> {
-      // Generate default init from Model fields
-      let default_fields =
-        list.map(analysis.model_fields, fn(f) {
-          let default = case f.type_name {
-            "Int" -> "0"
-            "Float" -> "0.0"
-            "Bool" -> "False"
-            "String" -> "\"\""
-            _ -> "\"\""
-          }
-          f.name <> ": " <> default
-        })
-      "pub fn init() -> app.Model {\n  app.Model("
-      <> string.join(default_fields, ", ")
-      <> ")\n}"
+      // Factory pattern (make_init): call with stub store
+      "pub fn init() -> app.Model {\n  let init_fn = app.make_init(store.new(\"client_stub\"))\n  init_fn()\n}"
     }
   }
 
@@ -311,7 +369,8 @@ fn generate_entry_point(analysis: analyzer.Analysis) -> String {
         True ->
           "pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {\n  app.update(model, local, msg)\n}"
         False ->
-          "pub fn update(model: app.Model, local: app.Local, _msg: app.Msg) -> #(app.Model, app.Local) {\n  #(model, local)\n}"
+          // Factory pattern (make_update): call factory with stub store
+          "pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {\n  let update_fn = app.make_update(store.new(\"client_stub\"))\n  update_fn(model, local, msg)\n}"
       }
       #(
         upd,
@@ -334,13 +393,19 @@ fn generate_entry_point(analysis: analyzer.Analysis) -> String {
     }
   }
 
+  // Add store import if factory pattern is used
+  let store_import = case needs_store {
+    True -> "import beacon/store\n"
+    False -> ""
+  }
+
   "/// AUTO-GENERATED entry point for client-side execution.
 import app
 import beacon/element
 import beacon_client/handler
 import gleam/dynamic/decode
 import gleam/json
-
+" <> store_import <> "
 /// Initialize Model.
 " <> init_fn <> "
 

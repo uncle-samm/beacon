@@ -148,15 +148,27 @@ fn classify_variants(
   msg_type: glance.CustomType,
   update_fn: glance.Function,
 ) -> List(MsgVariant) {
-  // Get the model parameter name (first param of update)
-  let model_param = case update_fn.parameters {
-    [first, ..] -> {
-      case first.name {
-        glance.Named(name) -> name
-        glance.Discarded(_) -> "model"
+  // Get the model parameter name.
+  // For direct update(model, local, msg), it's the first param.
+  // For make_update(shared) -> fn(model, local, msg), it's the first param
+  // of the INNER anonymous function.
+  let model_param = case update_fn.body {
+    // Factory pattern: body is fn(model, local, msg) { ... }
+    [glance.Expression(glance.Fn(arguments: args, ..))] ->
+      case args {
+        [glance.FnParameter(name: glance.Named(name), ..), ..] -> name
+        _ -> "model"
       }
-    }
-    _ -> "model"
+    // Direct function: first param is model
+    _ ->
+      case update_fn.parameters {
+        [first, ..] ->
+          case first.name {
+            glance.Named(name) -> name
+            glance.Discarded(_) -> "model"
+          }
+        _ -> "model"
+      }
   }
 
   // Extract variant names from the Msg type
@@ -177,12 +189,20 @@ fn classify_variants(
 }
 
 /// Extract case arms from the update function body.
-/// Looks for a top-level `case msg { ... }` expression.
+/// Looks for a top-level `case msg { ... }` expression, or inside a nested
+/// anonymous function (for make_update factory pattern).
 fn extract_case_arms(
   func: glance.Function,
 ) -> List(glance.Clause) {
   case func.body {
+    // Direct: pub fn update(...) { case msg { ... } }
     [glance.Expression(glance.Case(clauses: clauses, ..))] -> clauses
+    // Factory: pub fn make_update(...) { fn(...) { case msg { ... } } }
+    [glance.Expression(glance.Fn(body: body, ..))] ->
+      case body {
+        [glance.Expression(glance.Case(clauses: clauses, ..))] -> clauses
+        _ -> []
+      }
     _ -> []
   }
 }
