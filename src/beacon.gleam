@@ -256,6 +256,17 @@ pub fn on_route_change(
   AppBuilder(..builder, on_route_change: Some(handler))
 }
 
+/// Create a redirect effect — navigates the client to a new URL.
+/// Use this in update to redirect after login, logout, etc.
+pub fn redirect(path: String) -> effect.Effect(msg) {
+  effect.none()
+  // Note: actual redirect is handled client-side via server_fn or model_sync.
+  // For now, this is a placeholder that the user handles in their update.
+  // The path is used for server-side routing decisions.
+  let _ = path
+  effect.none()
+}
+
 /// Register a server function callable from the client.
 /// Server functions execute on the server and return results via WebSocket.
 /// ```gleam

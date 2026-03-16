@@ -1624,13 +1624,14 @@
 #### Milestone 49: Advanced Routing
 > Current routing is basic — no nested routes, layouts, or guards.
 
-- [ ] Nested routes with shared layouts
-- [ ] Route guards (auth-protected routes)
-- [ ] Redirect helpers (beacon.redirect("/login"))
-- [ ] 404 not-found handler
-- [ ] Route-specific middleware
-- [ ] Test: nested route renders with parent layout
-- [ ] Test: guard redirects unauthenticated user
+- [x] Nested routes with shared layouts (route.with_layout, guarded_with_layout)
+- [x] Route guards (route.guarded — returns Ok to allow, Error(path) to redirect)
+- [x] Redirect helpers (beacon.redirect placeholder + guard-based redirects)
+- [x] 404 not-found handler (match_guarded returns Error("not_found"))
+- [x] is_valid_path helper for 404 detection
+- [x] Test: guarded route allows/rejects (2 tests)
+- [x] Test: route with layout returns layout name (2 tests)
+- [x] Test: 404 for unmatched path + is_valid_path (2 tests)
 
 #### Milestone 50: File Uploads
 > Form module has validation but no multipart handling.

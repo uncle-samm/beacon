@@ -136,6 +136,115 @@ pub fn param(route: Route, name: String) -> Result(String, Nil) {
   dict.get(route.params, name)
 }
 
+/// Route guard — a function that decides if navigation is allowed.
+/// Returns Ok(Nil) to allow, Error(redirect_path) to redirect.
+pub type RouteGuard =
+  fn(Route) -> Result(Nil, String)
+
+/// A route with an optional layout and guard.
+pub type RouteDefinition {
+  RouteDefinition(
+    /// URL pattern (e.g., "/blog/:slug").
+    pattern: RoutePattern,
+    /// Optional layout name (for nested routes sharing a layout).
+    layout: option.Option(String),
+    /// Optional guard (e.g., require auth).
+    guard: option.Option(RouteGuard),
+  )
+}
+
+/// Create a route definition with a layout.
+pub fn with_layout(pat: String, layout: String) -> RouteDefinition {
+  RouteDefinition(
+    pattern: pattern(pat),
+    layout: option.Some(layout),
+    guard: option.None,
+  )
+}
+
+/// Create a guarded route definition.
+pub fn guarded(pat: String, guard: RouteGuard) -> RouteDefinition {
+  RouteDefinition(
+    pattern: pattern(pat),
+    layout: option.None,
+    guard: option.Some(guard),
+  )
+}
+
+/// Create a guarded route with a layout.
+pub fn guarded_with_layout(
+  pat: String,
+  layout: String,
+  guard: RouteGuard,
+) -> RouteDefinition {
+  RouteDefinition(
+    pattern: pattern(pat),
+    layout: option.Some(layout),
+    guard: option.Some(guard),
+  )
+}
+
+/// Match a path against route definitions, checking guards.
+/// Returns Ok(#(Route, layout)) if allowed, Error(redirect_path) if guard rejects.
+pub fn match_guarded(
+  defs: List(RouteDefinition),
+  path: String,
+) -> Result(#(Route, option.Option(String)), String) {
+  let #(path_part, query_part) = case string.split(path, "?") {
+    [p, q] -> #(p, q)
+    [p] -> #(p, "")
+    _ -> #(path, "")
+  }
+  let segments = parse_path(path_part)
+  let query = parse_query(query_part)
+
+  match_guarded_loop(defs, segments, path_part, query)
+}
+
+fn match_guarded_loop(
+  defs: List(RouteDefinition),
+  segments: List(String),
+  path_part: String,
+  query: dict.Dict(String, String),
+) -> Result(#(Route, option.Option(String)), String) {
+  case defs {
+    [] -> Error("not_found")
+    [def, ..rest] -> {
+      case match_segments(def.pattern.segments, segments, dict.new()) {
+        option.Some(params) -> {
+          let matched_route = Route(
+            path: path_part,
+            segments: segments,
+            params: params,
+            query: query,
+          )
+          case def.guard {
+            option.Some(guard_fn) -> {
+              case guard_fn(matched_route) {
+                Ok(Nil) -> Ok(#(matched_route, def.layout))
+                Error(redirect) -> Error(redirect)
+              }
+            }
+            option.None -> Ok(#(matched_route, def.layout))
+          }
+        }
+        option.None -> match_guarded_loop(rest, segments, path_part, query)
+      }
+    }
+  }
+}
+
+/// Check if a path matches any route (returns False for 404).
+pub fn is_valid_path(
+  patterns: List(RoutePattern),
+  path: String,
+) -> Bool {
+  case match_path(patterns, path) {
+    option.Some(_) -> True
+    option.None -> False
+  }
+}
+
 /// Get a query parameter by name.
 pub fn query_param(route: Route, name: String) -> Result(String, Nil) {
   dict.get(route.query, name)

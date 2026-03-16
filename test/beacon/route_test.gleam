@@ -69,6 +69,48 @@ pub fn match_first_wins_test() {
   let assert 0 = dict.size(r.params)
 }
 
+pub fn guarded_route_allows_test() {
+  let defs = [
+    route.guarded("/admin", fn(_route) { Ok(Nil) }),
+  ]
+  let assert Ok(#(_route, _layout)) = route.match_guarded(defs, "/admin")
+}
+
+pub fn guarded_route_rejects_test() {
+  let defs = [
+    route.guarded("/admin", fn(_route) { Error("/login") }),
+  ]
+  let assert Error("/login") = route.match_guarded(defs, "/admin")
+}
+
+pub fn route_with_layout_test() {
+  let defs = [
+    route.with_layout("/dashboard", "app"),
+    route.with_layout("/settings", "app"),
+  ]
+  let assert Ok(#(_route, Some("app"))) = route.match_guarded(defs, "/dashboard")
+}
+
+pub fn guarded_with_layout_test() {
+  let defs = [
+    route.guarded_with_layout("/profile", "app", fn(_route) { Ok(Nil) }),
+  ]
+  let assert Ok(#(_route, Some("app"))) = route.match_guarded(defs, "/profile")
+}
+
+pub fn not_found_test() {
+  let defs = [
+    route.with_layout("/", "main"),
+  ]
+  let assert Error("not_found") = route.match_guarded(defs, "/nonexistent")
+}
+
+pub fn is_valid_path_test() {
+  let patterns = [route.pattern("/"), route.pattern("/about")]
+  let assert True = route.is_valid_path(patterns, "/about")
+  let assert False = route.is_valid_path(patterns, "/nope")
+}
+
 pub fn from_path_test() {
   let r = route.from_path("/blog/hello?page=2")
   let assert "/blog/hello" = r.path
