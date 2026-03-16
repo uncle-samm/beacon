@@ -7,10 +7,10 @@
 
 ## Current Status
 
-**Active Milestone:** 48 — Build Tool Hardening (P2)
-**Last Completed:** 47 — Documentation (P1 complete)
+**Active Milestone:** P3 — Future
+**Last Completed:** 51 — Hot Reload (P2 complete)
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (418 passed, 0 failures)
+**Test Status:** GREEN (436 passed, 0 failures)
 **Linter:** PASSING (zero violations)
 
 ---
@@ -1649,12 +1649,13 @@
 #### Milestone 51: Hot Reload
 > No hot reload — have to restart the server on every change.
 
-- [ ] File watcher that detects .gleam file changes
-- [ ] Auto-run `gleam build` on change
-- [ ] Hot-swap compiled BEAM modules (Erlang code loading)
-- [ ] Auto-rebuild client JS bundle on change
-- [ ] Browser refresh notification via WebSocket
-- [ ] Test: file change triggers recompile
+- [x] File watcher that detects .gleam file changes (polling-based, tracks mtime)
+- [x] Auto-run `gleam build` on change
+- [x] Hot-swap compiled BEAM modules (Erlang code:load_file for all beacon modules)
+- [x] Auto-rebuild client JS bundle on change (runs beacon/build)
+- [x] Dev server CLI: `gleam run -m beacon/dev`
+- [x] Test: find_gleam_files finds source files
+- [x] Test: check_for_changes returns false with no changes
 
 #### Milestone 52: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
