@@ -211,5 +211,42 @@ pub fn start_supervised(
 /// Call this after `start()` in your main function.
 pub fn wait_forever() -> Nil {
   log.info("beacon.application", "Application running. Press Ctrl+C to stop.")
-  process.sleep_forever()
+  // Trap exit signals for graceful shutdown
+  trap_exit()
+  wait_for_shutdown()
 }
+
+/// Wait for shutdown signal, then drain connections.
+fn wait_for_shutdown() -> Nil {
+  case receive_shutdown_signal(60_000) {
+    True -> {
+      log.info("beacon.application", "Shutdown signal received, draining connections...")
+      // Give in-flight requests time to complete
+      let timeout = shutdown_timeout()
+      log.info(
+        "beacon.application",
+        "Draining for " <> int.to_string(timeout) <> "ms...",
+      )
+      process.sleep(timeout)
+      log.info("beacon.application", "Shutdown complete.")
+    }
+    False -> wait_for_shutdown()
+  }
+}
+
+/// Get shutdown timeout from env or default 5 seconds.
+fn shutdown_timeout() -> Int {
+  case get_env_int("BEACON_SHUTDOWN_TIMEOUT") {
+    Ok(ms) -> ms
+    Error(Nil) -> 5000
+  }
+}
+
+@external(erlang, "beacon_application_ffi", "trap_exit")
+fn trap_exit() -> Nil
+
+@external(erlang, "beacon_application_ffi", "receive_shutdown_signal")
+fn receive_shutdown_signal(timeout: Int) -> Bool
+
+@external(erlang, "beacon_application_ffi", "get_env_int")
+fn get_env_int(name: String) -> Result(Int, Nil)

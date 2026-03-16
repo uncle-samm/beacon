@@ -325,7 +325,7 @@ fn handle_message(
       }
       case resolve_result {
         Ok(msg) -> {
-          let new_state = run_update(RuntimeState(..state, event_clock: clock), msg)
+          let new_state = run_update_for(RuntimeState(..state, event_clock: clock), msg, option.Some(conn_id))
           // Send model_sync to the triggering client
           send_model_sync(new_state, conn_id)
           actor.continue(new_state)
@@ -418,6 +418,15 @@ fn run_update(
   state: RuntimeState(model, msg),
   msg: msg,
 ) -> RuntimeState(model, msg) {
+  run_update_for(state, msg, option.None)
+}
+
+/// Run update with a specific connection context (for targeted effects).
+fn run_update_for(
+  state: RuntimeState(model, msg),
+  msg: msg,
+  conn_id: option.Option(transport.ConnectionId),
+) -> RuntimeState(model, msg) {
   // Run update function
   let #(new_model, effects) = state.update(state.model, msg)
   log.debug("beacon.runtime", "Model updated")
@@ -458,8 +467,8 @@ fn run_update(
     }
   }
 
-  // Execute effects
-  run_effects(effects, state.self)
+  // Execute effects — pass connection context for targeted sends
+  run_effects_with_context(effects, state.self, conn_id, state.connections)
 
   // Return updated state with new Rendered and handler registry cached
   RuntimeState(
@@ -548,10 +557,31 @@ fn run_effects(
   effects: Effect(msg),
   self: Subject(RuntimeMessage(msg)),
 ) -> Nil {
+  run_effects_with_context(effects, self, option.None, dict.new())
+}
+
+/// Execute effects with connection context for targeted sends (redirects).
+fn run_effects_with_context(
+  effects: Effect(msg),
+  self: Subject(RuntimeMessage(msg)),
+  conn_id: option.Option(transport.ConnectionId),
+  connections: Dict(transport.ConnectionId, Subject(transport.InternalMessage)),
+) -> Nil {
   case effect.is_none(effects) {
     True -> Nil
     False -> {
       log.debug("beacon.runtime", "Executing effects")
+      // Store connection context so redirect can target the right client
+      case conn_id {
+        option.Some(cid) -> {
+          case dict.get(connections, cid) {
+            Ok(subject) ->
+              store_redirect_target(subject)
+            Error(Nil) -> Nil
+          }
+        }
+        option.None -> Nil
+      }
       let dispatch = fn(msg) {
         process.send(self, EffectDispatched(message: msg))
       }
@@ -642,6 +672,7 @@ pub fn connect_transport_with_ssr(
     on_disconnect: fn(conn_id) {
       process.send(runtime, ClientDisconnected(conn_id: conn_id))
     },
+    ws_auth: option.None,
   )
 }
 
@@ -738,6 +769,7 @@ pub fn connect_transport_per_connection(
     on_connect: fn(_, _) { Nil },
     on_event: fn(_, _) { Nil },
     on_disconnect: fn(_) { Nil },
+    ws_auth: option.None,
   )
 }
 
@@ -773,6 +805,12 @@ fn pubsub_receive_loop(
 
 @external(erlang, "beacon_pubsub_listener_ffi", "receive_any")
 fn erlang_receive_any(timeout: Int) -> Nil
+
+@external(erlang, "beacon_runtime_ffi", "store_redirect_target")
+fn store_redirect_target(subject: process.Subject(transport.InternalMessage)) -> Nil
+
+@external(erlang, "beacon_runtime_ffi", "get_redirect_target")
+pub fn get_redirect_target() -> option.Option(process.Subject(transport.InternalMessage))
 
 /// Attempt to recover model state from a session token.
 /// Token payload contains serialized model data.

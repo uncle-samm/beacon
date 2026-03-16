@@ -1,5 +1,5 @@
 -module(beacon_runtime_ffi).
--export([rescue/1]).
+-export([rescue/1, store_redirect_target/1, get_redirect_target/0]).
 
 %% Execute a function, catching any exception.
 %% Returns {ok, Result} on success, {error, Reason} on failure.
@@ -13,4 +13,16 @@ rescue(Fun) ->
                 io_lib:format("~p", [Reason])
             ),
             {error, ReasonBin}
+    end.
+
+%% Store redirect target in process dictionary for current effect execution.
+store_redirect_target(Subject) ->
+    erlang:put(beacon_redirect_target, Subject),
+    nil.
+
+%% Get redirect target from process dictionary.
+get_redirect_target() ->
+    case erlang:get(beacon_redirect_target) of
+        undefined -> none;
+        Subject -> {some, Subject}
     end.

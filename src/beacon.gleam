@@ -25,6 +25,9 @@ import beacon/log
 import beacon/middleware
 import beacon/pubsub
 import beacon/route
+import beacon/runtime
+import beacon/transport
+import gleam/erlang/process
 import gleam/dict
 import gleam/list
 import gleam/int
@@ -258,13 +261,19 @@ pub fn on_route_change(
 
 /// Create a redirect effect — navigates the client to a new URL.
 /// Use this in update to redirect after login, logout, etc.
-/// The effect sends a ServerNavigate message to the client, which
-/// updates the URL bar and triggers a route change.
+/// The effect sends a ServerNavigate message to ONLY the triggering client
+/// (not broadcast to all connections).
 pub fn redirect(path: String) -> effect.Effect(msg) {
   effect.from(fn(_dispatch) {
-    // Broadcast redirect to all connections via PubSub
-    // The runtime will pick this up and send ServerNavigate
-    pubsub.broadcast("beacon:redirect", path)
+    // Send redirect to the specific connection that triggered this effect
+    case runtime.get_redirect_target() {
+      option.Some(subject) ->
+        process.send(
+          subject,
+          transport.SendNavigate(path: path),
+        )
+      option.None -> Nil
+    }
   })
 }
 

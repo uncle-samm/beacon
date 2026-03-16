@@ -162,48 +162,51 @@ fn extract_boundary(content_type: String) -> Result(String, Nil) {
   }
 }
 
-/// Parse multipart body parts using the boundary.
+/// Parse multipart body parts using binary boundary scanning.
+/// Does NOT convert to string — preserves binary file data intact.
 fn parse_parts(body: BitArray, boundary: String) -> List(UploadedFile) {
-  // Convert to string for header parsing (binary for file data)
-  case bit_array.to_string(body) {
-    Ok(body_str) -> {
-      let separator = "--" <> boundary
-      let parts = string.split(body_str, separator)
-      list.filter_map(parts, fn(part) {
-        parse_single_part(part)
-      })
-    }
-    Error(Nil) -> []
-  }
+  let separator = <<"--":utf8, boundary:utf8>>
+  let parts = binary_split(body, separator)
+  list.filter_map(parts, fn(part) {
+    parse_single_part_binary(part)
+  })
 }
 
-/// Parse a single multipart part into an UploadedFile.
-fn parse_single_part(part: String) -> Result(UploadedFile, Nil) {
-  // Split headers from body (double newline)
-  case string.split(part, "\r\n\r\n") {
-    [headers, body_str] -> {
-      case
-        string.contains(headers, "filename=")
-        && string.contains(headers, "Content-Disposition")
-      {
-        True -> {
-          let filename = extract_header_value(headers, "filename=\"", "\"")
-          let content_type_val =
-            extract_header_value(headers, "Content-Type: ", "\r\n")
-          // Remove trailing boundary markers
-          let clean_body = string.trim(body_str)
-          let data = <<clean_body:utf8>>
-          Ok(UploadedFile(
-            filename: filename,
-            content_type: content_type_val,
-            data: data,
-            size: string.length(clean_body),
-          ))
+/// Parse a single multipart part from binary data.
+/// Splits headers (text) from body (binary) at the \r\n\r\n boundary.
+fn parse_single_part_binary(part: BitArray) -> Result(UploadedFile, Nil) {
+  let header_separator = <<"\r\n\r\n":utf8>>
+  case binary_split_once(part, header_separator) {
+    Ok(#(header_bytes, body_bytes)) -> {
+      // Headers are always text — safe to convert to string
+      case bit_array.to_string(header_bytes) {
+        Ok(headers) -> {
+          case
+            string.contains(headers, "filename=")
+            && string.contains(headers, "Content-Disposition")
+          {
+            True -> {
+              let filename =
+                extract_header_value(headers, "filename=\"", "\"")
+              let content_type_val =
+                extract_header_value(headers, "Content-Type: ", "\r\n")
+              // Trim trailing \r\n before the next boundary
+              let data = trim_trailing_crlf(body_bytes)
+              let size = bit_array_size(data)
+              Ok(UploadedFile(
+                filename: filename,
+                content_type: content_type_val,
+                data: data,
+                size: size,
+              ))
+            }
+            False -> Error(Nil)
+          }
         }
-        False -> Error(Nil)
+        Error(Nil) -> Error(Nil)
       }
     }
-    _ -> Error(Nil)
+    Error(Nil) -> Error(Nil)
   }
 }
 
@@ -226,3 +229,18 @@ fn extract_header_value(
 
 @external(erlang, "beacon_upload_ffi", "write_file")
 fn write_file(path: String, data: BitArray) -> Result(Nil, Nil)
+
+@external(erlang, "beacon_upload_ffi", "binary_split")
+fn binary_split(data: BitArray, separator: BitArray) -> List(BitArray)
+
+@external(erlang, "beacon_upload_ffi", "binary_split_once")
+fn binary_split_once(
+  data: BitArray,
+  separator: BitArray,
+) -> Result(#(BitArray, BitArray), Nil)
+
+@external(erlang, "beacon_upload_ffi", "trim_trailing_crlf")
+fn trim_trailing_crlf(data: BitArray) -> BitArray
+
+@external(erlang, "erlang", "byte_size")
+fn bit_array_size(data: BitArray) -> Int

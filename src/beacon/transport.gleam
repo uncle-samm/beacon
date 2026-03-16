@@ -141,6 +141,9 @@ pub type TransportConfig {
           fn(ConnectionId) -> Nil,
         ),
     ),
+    /// Optional: WebSocket authentication function.
+    /// If set, runs before upgrade — returns Ok to allow, Error to reject with 401.
+    ws_auth: Option(fn(Request(mist.Connection)) -> Result(Nil, String)),
   )
 }
 
@@ -383,6 +386,27 @@ pub fn create_handler(
 
 /// Handle a WebSocket upgrade request.
 fn handle_websocket(
+  req: Request(mist.Connection),
+  config: TransportConfig,
+) -> response.Response(mist.ResponseData) {
+  // Check WebSocket auth if configured
+  let auth_ok = case config.ws_auth {
+    Some(auth_fn) -> auth_fn(req)
+    None -> Ok(Nil)
+  }
+  case auth_ok {
+    Error(reason) -> {
+      log.warning("beacon.transport", "WS auth rejected: " <> reason)
+      response.new(401)
+      |> response.set_body(
+        mist.Bytes(bytes_tree.from_string("Unauthorized: " <> reason)),
+      )
+    }
+    Ok(Nil) -> handle_websocket_upgrade(req, config)
+  }
+}
+
+fn handle_websocket_upgrade(
   req: Request(mist.Connection),
   config: TransportConfig,
 ) -> response.Response(mist.ResponseData) {

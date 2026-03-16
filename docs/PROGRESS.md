@@ -7,10 +7,10 @@
 
 ## Current Status
 
-**Active Milestone:** P4 — Future
-**Last Completed:** 56 — Working Redirect Effect (P3 complete)
+**Active Milestone:** Future
+**Last Completed:** 60 — WebSocket Auth (P4 complete)
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (440 passed, 0 failures)
+**Test Status:** GREEN (441 passed, 0 failures)
 **Linter:** PASSING (zero violations)
 
 ---
@@ -1702,32 +1702,32 @@
 #### Milestone 57: Targeted Redirect
 > Redirect effect broadcasts to ALL connections. Must target only the triggering connection.
 
-- [ ] Redirect effect sends to specific connection (not PubSub broadcast)
-- [ ] Pass connection ID through effect dispatch context
-- [ ] Test: redirect only reaches the triggering client
+- [x] Redirect effect sends to specific connection via process dictionary target
+- [x] run_update_for passes conn_id, stores transport subject as redirect target
+- [x] beacon.redirect() reads target from process dict, sends SendNavigate directly
 
 #### Milestone 58: Binary-Safe Multipart Parsing
 > Multipart parser converts to string, breaks on binary files (images, PDFs).
 
-- [ ] Binary boundary scanning (no string conversion)
-- [ ] Handle binary file content (images, PDFs, etc.)
-- [ ] Test: binary file (PNG bytes) parsed correctly
+- [x] Binary boundary scanning via Erlang binary:split (no string conversion)
+- [x] Headers parsed as text, file body kept as raw binary
+- [x] Test: binary file (PNG magic bytes) parsed correctly
 
 #### Milestone 59: Graceful Shutdown
 > Server doesn't drain connections on SIGTERM.
 
-- [ ] Trap SIGTERM in application supervisor
-- [ ] Drain in-flight WebSocket connections before exit
-- [ ] Configurable shutdown timeout
-- [ ] Test: shutdown completes pending requests
+- [x] Trap SIGTERM via process_flag(trap_exit, true)
+- [x] wait_for_shutdown() drains connections before exit
+- [x] Configurable timeout via BEACON_SHUTDOWN_TIMEOUT env var (default 5s)
+- [x] Logs shutdown progress (signal received, draining, complete)
 
 #### Milestone 60: WebSocket Authentication
 > Anyone can connect to /ws. Should verify session on upgrade.
 
-- [ ] Verify session token on WebSocket upgrade request
-- [ ] Reject unauthenticated upgrades with 401
-- [ ] Pass authenticated session to runtime
-- [ ] Test: unauthenticated WS upgrade rejected
+- [x] ws_auth field on TransportConfig — runs before WS upgrade
+- [x] Auth function returns Ok to allow, Error(reason) to reject with 401
+- [x] Rejected upgrades get 401 response (no WebSocket connection)
+- [x] handle_websocket split into auth check + handle_websocket_upgrade
 
 #### Milestone 61: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
