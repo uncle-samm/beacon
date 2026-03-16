@@ -304,12 +304,34 @@ fn generate_entry_point(analysis: analyzer.Analysis) -> String {
     }
   }
 
-  let update_fn_code = case analysis.has_direct_update {
-    True ->
-      "pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {\n  app.update(model, local, msg)\n}"
-    False ->
-      // Passthrough — model-affecting events go to server anyway
-      "pub fn update(model: app.Model, local: app.Local, _msg: app.Msg) -> #(app.Model, app.Local) {\n  #(model, local)\n}"
+  // Generate different code for apps with vs without Local type
+  let #(update_fn_code, init_local_code, view_to_html_code) = case analysis.has_local {
+    True -> {
+      let upd = case analysis.has_direct_update {
+        True ->
+          "pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {\n  app.update(model, local, msg)\n}"
+        False ->
+          "pub fn update(model: app.Model, local: app.Local, _msg: app.Msg) -> #(app.Model, app.Local) {\n  #(model, local)\n}"
+      }
+      #(
+        upd,
+        "pub fn init_local(model: app.Model) -> app.Local {\n  app.init_local(model)\n}",
+        "pub fn view_to_html(model: app.Model, local: app.Local) -> String {\n  element.to_string(app.view(model, local))\n}",
+      )
+    }
+    False -> {
+      let upd = case analysis.has_direct_update {
+        True ->
+          "pub fn update(model: app.Model, local: Nil, msg: app.Msg) -> #(app.Model, Nil) {\n  #(app.update(model, msg), Nil)\n}"
+        False ->
+          "pub fn update(model: app.Model, local: Nil, _msg: app.Msg) -> #(app.Model, Nil) {\n  #(model, local)\n}"
+      }
+      #(
+        upd,
+        "pub fn init_local(_model: app.Model) -> Nil {\n  Nil\n}",
+        "pub fn view_to_html(model: app.Model, _local: Nil) -> String {\n  element.to_string(app.view(model))\n}",
+      )
+    }
   }
 
   "/// AUTO-GENERATED entry point for client-side execution.
@@ -323,9 +345,7 @@ import gleam/json
 " <> init_fn <> "
 
 /// Initialize Local from Model.
-pub fn init_local(model: app.Model) -> app.Local {
-  app.init_local(model)
-}
+" <> init_local_code <> "
 
 /// Run update locally.
 " <> update_fn_code <> "
@@ -346,9 +366,7 @@ pub fn resolve_handler(registry, handler_id: String, data: String) {
 }
 
 /// Render view to HTML string.
-pub fn view_to_html(model: app.Model, local: app.Local) -> String {
-  element.to_string(app.view(model, local))
-}
+" <> view_to_html_code <> "
 
 /// Check if a Msg variant affects the Model (needs server sync).
 pub fn msg_affects_model(msg: app.Msg) -> Bool {
@@ -402,12 +420,26 @@ fn bundle_js() -> Result(Nil, String) {
     Ok(Nil) -> Nil
     Error(_) -> Nil
   }
+  // Generate unique hash for cache busting
+  let hash = run_command("date +%s | shasum | head -c 8")
+  let filename = "beacon_client_" <> string.trim(hash) <> ".js"
+
+  // Clean old beacon_client_*.js files
+  let _ = run_command("rm -f priv/static/beacon_client_*.js 2>/dev/null")
+
   let result =
     run_command(
-      "cd build/beacon_client_app && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/beacon_client.js --minify 2>&1",
+      "cd build/beacon_client_app && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/" <> filename <> " --minify 2>&1",
     )
   case string.contains(result, "Done") || string.contains(result, ".js") {
-    True -> Ok(Nil)
+    True -> {
+      // Write manifest so server knows the current filename
+      case simplifile.write("priv/static/beacon_client.manifest", filename) {
+        Ok(Nil) -> Nil
+        Error(_) -> Nil
+      }
+      Ok(Nil)
+    }
     False -> Error(result)
   }
 }

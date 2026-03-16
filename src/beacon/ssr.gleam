@@ -18,6 +18,7 @@ import gleam/http/response.{type Response}
 import gleam/json
 import gleam/string
 import mist
+import simplifile
 
 /// Configuration for server-side rendering.
 pub type SsrConfig(model, msg) {
@@ -210,9 +211,20 @@ fn build_html_document(
     "\">",
     view_html,
     "</div>",
-    "<script src=\"/beacon_client.js\" data-beacon-auto></script>",
+    "<script src=\"/",
+    client_js_filename(),
+    "\" data-beacon-auto></script>",
     "</body></html>",
   ])
+}
+
+/// Get the current client JS filename from the build manifest.
+/// Falls back to "beacon_client.js" if no manifest exists.
+fn client_js_filename() -> String {
+  case simplifile.read("priv/static/beacon_client.manifest") {
+    Ok(name) -> string.trim(name)
+    Error(_) -> "beacon_client.js"
+  }
 }
 
 /// Escape HTML special characters in text content.

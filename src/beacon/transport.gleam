@@ -353,26 +353,39 @@ pub fn create_handler(
         )
       }
       _ -> {
-        // Try static files first
-        case config.static_config {
-          Some(static_cfg) -> {
-            let if_none_match =
-              case request.get_header(req, "if-none-match") {
-                Ok(val) -> val
-                Error(Nil) -> ""
+        // Check for hashed client JS file (beacon_client_HASH.js)
+        let path = req.path
+        case
+          string.starts_with(path, "/beacon_client_")
+          && string.ends_with(path, ".js")
+        {
+          True -> {
+            let name = string.drop_start(path, 1)
+            serve_hashed_client_js(name)
+          }
+          False -> {
+            // Try static files first
+            case config.static_config {
+              Some(static_cfg) -> {
+                let if_none_match =
+                  case request.get_header(req, "if-none-match") {
+                    Ok(val) -> val
+                    Error(Nil) -> ""
+                  }
+                case
+                  static.serve_with_etag_check(
+                    static_cfg,
+                    req.path,
+                    if_none_match,
+                  )
+                {
+                  Ok(resp) -> resp
+                  Error(Nil) -> serve_page(config.page_html)
+                }
               }
-            case
-              static.serve_with_etag_check(
-                static_cfg,
-                req.path,
-                if_none_match,
-              )
-            {
-              Ok(resp) -> resp
-              Error(Nil) -> serve_page(config.page_html)
+              None -> serve_page(config.page_html)
             }
           }
-          None -> serve_page(config.page_html)
         }
       }
     }
@@ -562,19 +575,47 @@ fn default_page_html() -> String {
   <> "</style>"
   <> "</head><body>"
   <> "<div id=\"beacon-app\"></div>"
-  <> "<script src=\"/beacon_client.js\" data-beacon-auto></script>"
+  <> "<script src=\"/"
+  <> get_client_js_filename()
+  <> "\" data-beacon-auto></script>"
   <> "</body></html>"
+}
+
+fn get_client_js_filename() -> String {
+  case simplifile.read("priv/static/beacon_client.manifest") {
+    Ok(name) -> string.trim(name)
+    Error(_) -> "beacon_client.js"
+  }
 }
 
 /// Serve the compiled Gleam-to-JS client runtime bundle.
 /// Falls back to a "not built yet" message if the bundle doesn't exist.
 fn serve_client_js() -> response.Response(mist.ResponseData) {
-  case simplifile.read("priv/static/beacon_client.js") {
+  // Try hashed filename from manifest first, fallback to plain name
+  let filename = case simplifile.read("priv/static/beacon_client.manifest") {
+    Ok(name) -> string.trim(name)
+    Error(_) -> "beacon_client.js"
+  }
+  serve_js_file("priv/static/" <> filename)
+}
+
+fn serve_hashed_client_js(
+  name: String,
+) -> response.Response(mist.ResponseData) {
+  serve_js_file("priv/static/" <> name)
+}
+
+fn serve_js_file(path: String) -> response.Response(mist.ResponseData) {
+  case simplifile.read(path) {
     Ok(contents) -> {
       response.new(200)
       |> response.set_header(
         "content-type",
         "application/javascript; charset=utf-8",
+      )
+      |> response.set_header(
+        "cache-control",
+        "public, max-age=31536000, immutable",
       )
       |> response.set_body(mist.Bytes(bytes_tree.from_string(contents)))
     }

@@ -38,10 +38,11 @@ export function initClient() {
     clientModel = App.init();
     clientLocal = App.init_local(clientModel);
 
-    // Build handler registry via phantom render (SSR already rendered DOM)
+    // Build handler registry via phantom render
     App.start_render();
-    App.view_to_html(clientModel, clientLocal);
+    const clientHtml = App.view_to_html(clientModel, clientLocal);
     clientRegistry = App.finish_render();
+
     clientInitialized = true;
     console.log("[beacon] Client-side execution ready");
   } catch (e) {
