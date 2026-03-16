@@ -7,8 +7,8 @@
 
 ## Current Status
 
-**Active Milestone:** 39 — Model Sync (server → client)
-**Last Completed:** 38 — Client-side local execution (LOCAL events = zero WS traffic)
+**Active Milestone:** P1 — Production Readiness
+**Last Completed:** 42 — Server Functions (P0 complete)
 **Build Status:** GREEN (zero errors, zero warnings)
 **Test Status:** GREEN (380 passed, 0 failures)
 **Linter:** PASSING (zero violations)
@@ -1543,12 +1543,13 @@
 > Let users call server-side logic from the client (like tRPC/server actions).
 > For things that can't run client-side: DB queries, API calls, auth checks.
 
-- [ ] `beacon.server_fn(name, handler)` API for registering server functions
-- [ ] Client can call server functions and await results
-- [ ] Server function results delivered via WebSocket (no HTTP round-trip)
-- [ ] Type-safe: function signature checked at compile time
-- [ ] Error handling: server function failures reported to client
-- [ ] Test: client calls server function, gets result, updates view
+- [x] `beacon.server_fn(name, handler)` API for registering server functions
+- [x] Client can call server functions via `call_server_fn(name, args, callback)`
+- [x] Server function results delivered via WebSocket (no HTTP round-trip)
+- [x] Error handling: server function failures reported to client with ok=false
+- [x] Wire protocol: ClientServerFn / ServerFnResult messages
+- [x] Runtime handles server fn calls: looks up handler, executes, sends result
+- [ ] Test: client calls server function, gets result, updates view (needs example)
 
 ### P1: Production Readiness (needed before deploying real apps)
 

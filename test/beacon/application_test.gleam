@@ -3,6 +3,7 @@ import beacon/effect
 import beacon/element
 import beacon/error
 import beacon/middleware as beacon_middleware
+import gleam/dict
 import gleam/erlang/process
 import gleam/int
 
@@ -42,6 +43,7 @@ fn test_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     static_dir: option.None,
     route_patterns: [],
     on_route_change: option.None,
+    server_fns: dict.new(),
   )
 }
 

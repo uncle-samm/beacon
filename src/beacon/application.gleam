@@ -12,6 +12,7 @@ import beacon/middleware
 import beacon/pubsub
 import beacon/route
 import beacon/runtime
+import gleam/dict
 import beacon/ssr
 import beacon/state_manager
 import beacon/static
@@ -58,6 +59,8 @@ pub type AppConfig(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when URL changes — produces a Msg for the update loop.
     on_route_change: Option(fn(route.Route) -> msg),
+    /// Registered server functions.
+    server_fns: dict.Dict(String, fn(String) -> Result(String, String)),
   )
 }
 
@@ -111,6 +114,7 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       on_pubsub: config.on_pubsub,
       route_patterns: config.route_patterns,
       on_route_change: config.on_route_change,
+      server_fns: config.server_fns,
     )
 
   // Create transport with per-connection runtime factory

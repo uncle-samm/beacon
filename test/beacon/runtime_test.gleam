@@ -3,6 +3,7 @@ import beacon/element
 import beacon/error
 import beacon/runtime
 import beacon/transport
+import gleam/dict
 import gleam/erlang/process
 import gleam/int
 import gleam/option
@@ -68,6 +69,7 @@ fn counter_config() -> runtime.RuntimeConfig(CounterModel, CounterMsg) {
       on_pubsub: option.None,
       route_patterns: [],
       on_route_change: option.None,
+      server_fns: dict.new(),
   )
 }
 
@@ -234,6 +236,7 @@ pub fn runtime_effect_dispatches_message_test() {
       on_pubsub: option.None,
       route_patterns: [],
       on_route_change: option.None,
+      server_fns: dict.new(),
     )
 
   let assert Ok(subject) = runtime.start(config)
@@ -285,6 +288,7 @@ pub fn runtime_survives_view_crash_test() {
       on_pubsub: option.None,
       route_patterns: [],
       on_route_change: option.None,
+      server_fns: dict.new(),
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -359,6 +363,7 @@ pub fn state_recovery_from_token_test() {
       on_pubsub: option.None,
       route_patterns: [],
       on_route_change: option.None,
+      server_fns: dict.new(),
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()

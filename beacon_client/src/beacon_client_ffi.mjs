@@ -126,6 +126,7 @@ function handleMessage(raw) {
     case "mount": handleMount(msg.payload); break;
     case "patch": handlePatch(msg.payload); break;
     case "model_sync": handleModelSync(msg.model, msg.version); break;
+    case "server_fn_result": handleServerFnResult(msg.call_id, msg.result, msg.ok); break;
     case "heartbeat_ack": break;
     case "error": console.error("[beacon] Server error:", msg.reason); break;
   }
@@ -330,6 +331,25 @@ function getPath(node) {
   const parts = []; let c = node;
   while (c && c !== appRoot) { const p = c.parentNode; if (p) { const ch = p.childNodes; for (let i = 0; i < ch.length; i++) if (ch[i] === c) { parts.unshift(i); break; } } c = c.parentNode; }
   return parts.join(".");
+}
+
+// === Server Functions ===
+const pendingServerFns = {};
+let serverFnCounter = 0;
+
+export function call_server_fn(name, args, callback) {
+  const callId = "sf" + (serverFnCounter++);
+  pendingServerFns[callId] = callback;
+  send({ type: "server_fn", name: name, args: args, call_id: callId });
+  return undefined;
+}
+
+function handleServerFnResult(callId, result, ok) {
+  const cb = pendingServerFns[callId];
+  if (cb) {
+    delete pendingServerFns[callId];
+    cb(result, ok);
+  }
 }
 
 // === SPA Navigation ===

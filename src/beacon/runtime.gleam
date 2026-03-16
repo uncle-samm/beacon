@@ -45,6 +45,13 @@ pub type RuntimeMessage(msg) {
   )
   /// A client navigated to a new URL path.
   ClientNavigated(conn_id: transport.ConnectionId, path: String)
+  /// A client called a server function.
+  ClientCalledServerFn(
+    conn_id: transport.ConnectionId,
+    name: String,
+    args: String,
+    call_id: String,
+  )
   /// An effect dispatched a message back to the runtime.
   EffectDispatched(message: msg)
   /// Shutdown the runtime.
@@ -86,6 +93,8 @@ pub type RuntimeState(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when URL changes — produces a Msg for the update loop.
     on_route_change: option.Option(fn(route.Route) -> msg),
+    /// Registered server functions.
+    server_fns: Dict(String, fn(String) -> Result(String, String)),
   )
 }
 
@@ -117,6 +126,8 @@ pub type RuntimeConfig(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when URL changes — produces a Msg for the update loop.
     on_route_change: option.Option(fn(route.Route) -> msg),
+    /// Registered server functions: name → handler(args) → Result(result, error).
+    server_fns: Dict(String, fn(String) -> Result(String, String)),
   )
 }
 
@@ -144,6 +155,7 @@ pub fn start(
           secret_key: "",
           route_patterns: config.route_patterns,
           on_route_change: config.on_route_change,
+          server_fns: config.server_fns,
         )
       log.info("beacon.runtime", "Runtime initialising")
       // Execute initial effects
@@ -345,6 +357,45 @@ fn handle_message(
         }
         option.None -> actor.continue(state)
       }
+    }
+
+    ClientCalledServerFn(conn_id, name, args, call_id) -> {
+      log.info("beacon.runtime", "Server fn: " <> name <> " [" <> call_id <> "]")
+      case dict.get(state.server_fns, name) {
+        Ok(handler) -> {
+          let #(result, ok) = case handler(args) {
+            Ok(r) -> #(r, True)
+            Error(e) -> #(e, False)
+          }
+          case dict.get(state.connections, conn_id) {
+            Ok(subject) ->
+              process.send(
+                subject,
+                transport.SendServerFnResult(
+                  call_id: call_id,
+                  result: result,
+                  ok: ok,
+                ),
+              )
+            Error(Nil) -> Nil
+          }
+        }
+        Error(Nil) -> {
+          case dict.get(state.connections, conn_id) {
+            Ok(subject) ->
+              process.send(
+                subject,
+                transport.SendServerFnResult(
+                  call_id: call_id,
+                  result: "Unknown server function: " <> name,
+                  ok: False,
+                ),
+              )
+            Error(Nil) -> Nil
+          }
+        }
+      }
+      actor.continue(state)
     }
 
     EffectDispatched(msg) -> {
@@ -571,6 +622,17 @@ pub fn connect_transport_with_ssr(
             ClientNavigated(conn_id: conn_id, path: path),
           )
         }
+        transport.ClientServerFn(name, args, call_id) -> {
+          process.send(
+            runtime,
+            ClientCalledServerFn(
+              conn_id: conn_id,
+              name: name,
+              args: args,
+              call_id: call_id,
+            ),
+          )
+        }
         transport.ClientHeartbeat -> {
           // Heartbeat is handled directly by transport, no runtime action needed.
           Nil
@@ -641,6 +703,16 @@ pub fn connect_transport_per_connection(
                 process.send(
                   runtime_subject,
                   ClientNavigated(conn_id: conn_id, path: path),
+                )
+              transport.ClientServerFn(name, args, call_id) ->
+                process.send(
+                  runtime_subject,
+                  ClientCalledServerFn(
+                    conn_id: conn_id,
+                    name: name,
+                    args: args,
+                    call_id: call_id,
+                  ),
                 )
               transport.ClientHeartbeat -> Nil
             }

@@ -25,6 +25,7 @@ import beacon/log
 import beacon/middleware
 import beacon/pubsub
 import beacon/route
+import gleam/dict
 import gleam/list
 import gleam/int
 import gleam/option.{type Option, None, Some}
@@ -95,6 +96,8 @@ pub opaque type AppBuilder(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when the URL changes — produces a Msg for the update loop.
     on_route_change: Option(fn(route.Route) -> msg),
+    /// Registered server functions: name → handler(args) → Result(result, error).
+    server_fns: dict.Dict(String, fn(String) -> Result(String, String)),
   )
 }
 
@@ -125,6 +128,7 @@ pub fn app(
     has_local: False,
     route_patterns: [],
     on_route_change: None,
+    server_fns: dict.new(),
   )
 }
 
@@ -152,6 +156,7 @@ pub fn app_with_effects(
     has_local: False,
     route_patterns: [],
     on_route_change: None,
+    server_fns: dict.new(),
   )
 }
 
@@ -200,6 +205,7 @@ pub fn app_with_local(
     has_local: True,
     route_patterns: [],
     on_route_change: None,
+    server_fns: dict.new(),
   )
 }
 
@@ -248,6 +254,25 @@ pub fn on_route_change(
   handler: fn(route.Route) -> msg,
 ) -> AppBuilder(model, msg) {
   AppBuilder(..builder, on_route_change: Some(handler))
+}
+
+/// Register a server function callable from the client.
+/// Server functions execute on the server and return results via WebSocket.
+/// ```gleam
+/// beacon.app(init, update, view)
+/// |> beacon.server_fn("get_posts", fn(args) {
+///   Ok(json.to_string(encode_posts(db.get_posts())))
+/// })
+/// ```
+pub fn server_fn(
+  builder: AppBuilder(model, msg),
+  name: String,
+  handler: fn(String) -> Result(String, String),
+) -> AppBuilder(model, msg) {
+  AppBuilder(
+    ..builder,
+    server_fns: dict.insert(builder.server_fns, name, handler),
+  )
 }
 
 /// Set the secret key for session tokens.
@@ -367,6 +392,7 @@ pub fn start(
       static_dir: builder.static_dir,
       route_patterns: builder.route_patterns,
       on_route_change: builder.on_route_change,
+      server_fns: builder.server_fns,
     )
   case application.start(config) {
     Ok(_app) -> {

@@ -51,6 +51,8 @@ pub type ClientMessage {
   ClientJoin(token: String)
   /// Client navigated to a new URL path (SPA navigation).
   ClientNavigate(path: String)
+  /// Client calls a server function by name.
+  ClientServerFn(name: String, args: String, call_id: String)
 }
 
 /// Messages sent from the server to the client (browser).
@@ -68,6 +70,8 @@ pub type ServerMessage {
   /// Authoritative Model state from server.
   /// Client takes this as ground truth, keeps its Local state.
   ServerModelSync(model_json: String, version: Int, ack_clock: Int)
+  /// Server function result.
+  ServerFnResult(call_id: String, result: String, ok: Bool)
 }
 
 /// Internal messages that the connection actor can receive.
@@ -83,6 +87,8 @@ pub type InternalMessage {
   SendError(reason: String)
   /// Send authoritative Model state to the client.
   SendModelSync(model_json: String, version: Int, ack_clock: Int)
+  /// Send server function result to the client.
+  SendServerFnResult(call_id: String, result: String, ok: Bool)
 }
 
 /// State held by each WebSocket connection actor.
@@ -179,6 +185,14 @@ pub fn encode_server_message(msg: ServerMessage) -> String {
         #("ack_clock", json.int(ack_clock)),
       ])
       |> json.to_string
+    ServerFnResult(call_id, result, ok) ->
+      json.object([
+        #("type", json.string("server_fn_result")),
+        #("call_id", json.string(call_id)),
+        #("result", json.string(result)),
+        #("ok", json.bool(ok)),
+      ])
+      |> json.to_string
   }
 }
 
@@ -210,6 +224,12 @@ fn client_message_decoder() -> decode.Decoder(ClientMessage) {
     "navigate" -> {
       use path <- decode.field("path", decode.string)
       decode.success(ClientNavigate(path: path))
+    }
+    "server_fn" -> {
+      use name <- decode.field("name", decode.string)
+      use args <- decode.optional_field("args", "{}", decode.string)
+      use call_id <- decode.field("call_id", decode.string)
+      decode.success(ClientServerFn(name: name, args: args, call_id: call_id))
     }
     _unknown -> decode.failure(ClientHeartbeat, "ClientMessage type")
   }
@@ -402,6 +422,18 @@ fn handle_websocket(
                   model_json: model_json,
                   version: version,
                   ack_clock: ack_clock,
+                ),
+              )
+              mist.continue(state)
+            }
+            SendServerFnResult(call_id, result, ok) -> {
+              send_message(
+                state.connection,
+                state.id,
+                ServerFnResult(
+                  call_id: call_id,
+                  result: result,
+                  ok: ok,
                 ),
               )
               mist.continue(state)
