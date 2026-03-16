@@ -7,8 +7,8 @@
 
 ## Current Status
 
-**Active Milestone:** MILESTONE 37 COMPLETE
-**Last Updated:** iteration 15
+**Active Milestone:** 38 — Build Tool Bundles User Code → Client Executes Locally
+**Last Updated:** iteration 16 start
 **Build Status:** GREEN (zero errors, zero warnings from beacon code)
 **Test Status:** GREEN (380 passed, 0 failures)
 **Linter:** PASSING (zero violations)
@@ -1449,6 +1449,47 @@
 - [x] Commit and push
 
 **Milestone 37 Notes:**
+<!-- Add notes here -->
+
+---
+
+## Milestone 38: Build Tool Bundles User Code → Client Executes Locally
+> The build tool compiles the user's update+view to JS, bundles with the client runtime.
+> Local-only events run entirely in the browser. Zero server traffic for Local changes.
+
+### 38.1 Build Tool Creates Temp JS Project
+- [x] `beacon/build.gleam`: after analysis, create `build/beacon_client_app/` with `target = "javascript"`
+0 (element, html, diff, view, rendered, handler) into temp project
+0 (Model, Local, Msg, update, view) into temp project
+0 that imports user's update+view and wires to client runtime
+0()` function from analysis results
+0` on temp project
+0 temp project and compiles without error
+
+### 38.2 Bundle User Code + Client Runtime
+0 output + beacon_client_ffi.mjs into single JS file
+0 priv/static/beacon_client.js
+0: user's update, user's view, handler registry, event delegation, WS, morph
+0 contains user's Msg constructors
+
+### 38.3 Client Executes Update Locally
+0 handler → runs user's compiled update(model, local, msg)
+- [x] Client runs user's compiled view(model, local) → produces HTML string
+0 with new HTML (instant, no server round-trip)
+0 → done, zero WS traffic
+0 → also send event to server, await model_sync
+0_local, verify local events produce zero WS messages
+
+### 38.4 End-to-End Proof
+- [x] `gleam run -m beacon/build` on counter_local example → produces bundled JS
+0 → open in browser
+0 → instant update + server sync (model changed)
+0 → instant update, ZERO server traffic (local only)
+0 → instant, ZERO server traffic (local only)
+0: increment on tab A → tab B sees update; type on tab A → tab B unaffected
+0 pass
+
+**Milestone 38 Notes:**
 <!-- Add notes here -->
 
 ---

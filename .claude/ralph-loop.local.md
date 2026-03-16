@@ -4,7 +4,7 @@ iteration: 1
 session_id: 
 max_iterations: 200
 completion_promise: "BEACON_COMPLETE"
-started_at: "2026-03-16T10:07:19Z"
+started_at: "2026-03-16T10:17:39Z"
 ---
 
-You are building Beacon, a full-stack Gleam web framework. Read docs/PROGRESS.md — milestone 37 kills the hand-written beacon.js and makes the compiled Gleam-to-JS client the ONLY runtime. Tasks: (1) Wire event delegation in beacon_client_ffi.mjs — click/input/submit handlers that find data-beacon-event-* attrs, resolve handler IDs, call Gleam handle_event. (2) Wire WebSocket — mount/patch/model_sync/heartbeat handling in the compiled client. (3) Remove beacon.js entirely — delete the file, remove the embedded string from transport.gleam, serve beacon_client.js at /beacon.js path. (4) End-to-end verification — counter works, chat works multi-user, all 380 tests pass. ONE JS file. No fallbacks. gleam build zero warnings, gleam test all pass. Output BEACON_COMPLETE when all 4 tasks done.
+You are building Beacon, a full-stack Gleam web framework. Read docs/PROGRESS.md — milestone 38 is the FINAL piece: the build tool compiles the users update+view to JavaScript, bundles it with the client runtime, and the browser executes updates LOCALLY. Tasks: (1) Build tool creates temp JS project with user code + pure beacon modules, compiles to JS. (2) esbuild bundles everything into one file that replaces beacon_client.js. (3) Client runs users compiled update locally — local-only events produce ZERO WebSocket traffic. (4) End-to-end proof: gleam run -m beacon/build produces bundle, counter_local works in browser, typing produces zero WS messages, incrementing syncs with server. gleam build zero warnings, gleam test all pass. Output BEACON_COMPLETE when all 4 tasks done.
