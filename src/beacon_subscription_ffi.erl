@@ -3,23 +3,24 @@
 
 %% Receive either a command from a Gleam Subject or a tagged PubSub notification.
 %%
-%% Returns:
-%%   {command, Msg}           — a ListenerCommand sent via the Subject
-%%   {notification, Topic}    — a PubSub broadcast with topic identification
-%%   {timeout, nil}           — no message within the timeout period
-%%
-%% The SubjectTag is the internal reference Gleam uses for Subject(ListenerCommand).
+%% Subject is a Gleam record: {subject, Pid, Tag}
+%% Messages sent via process.send(subject, msg) arrive as {Tag, Msg}.
 %% PubSub broadcasts arrive as {beacon_pubsub, Topic, _Message}.
-receive_with_commands(SubjectTag, Timeout) ->
+%%
+%% Returns Gleam-compatible tuples matching ListenerReceiveResult variants:
+%%   {command_received, Msg}       — CommandReceived
+%%   {notification_received, Topic} — NotificationReceived
+%%   receive_timeout                — ReceiveTimeout
+receive_with_commands(Subject, Timeout) ->
+    {subject, _Pid, Tag} = Subject,
     receive
-        {SubjectTag, Msg} ->
-            {command, Msg};
+        {Tag, Msg} ->
+            {command_received, Msg};
         {beacon_pubsub, Topic, _Msg} ->
-            {notification, Topic};
+            {notification_received, Topic};
         _Other ->
-            %% Ignore unexpected messages (e.g., old-format broadcasts)
-            {timeout, nil}
+            receive_with_commands(Subject, Timeout)
     after
         Timeout ->
-            {timeout, nil}
+            receive_timeout
     end.

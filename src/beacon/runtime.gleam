@@ -200,6 +200,19 @@ pub fn start(
       log.info("beacon.runtime", "Runtime actor started successfully")
       let subject = started.data
       // Start dynamic PubSub listener if subscriptions are configured
+      log.info(
+        "beacon.runtime",
+        "Dynamic subs: "
+          <> case config.dynamic_subscriptions {
+          Some(_) -> "YES"
+          None -> "NO"
+        }
+          <> ", on_notify: "
+          <> case config.on_notify {
+          Some(_) -> "YES"
+          None -> "NO"
+        },
+      )
       case config.dynamic_subscriptions, config.on_notify {
         Some(compute), Some(notify) -> {
           let initial_topics = compute(initial_model)
@@ -1047,8 +1060,12 @@ fn start_pubsub_listener(
   let command_subject = process.new_subject()
   let _ =
     process.spawn(fn() {
-      list.each(topics, pubsub.subscribe)
-      log.debug(
+      log.info("beacon.subscription", "Listener process spawned")
+      list.each(topics, fn(t) {
+        log.info("beacon.subscription", "Subscribing to: " <> t)
+        pubsub.subscribe(t)
+      })
+      log.info(
         "beacon.subscription",
         "Listener started with "
           <> int.to_string(list.length(topics))
