@@ -516,7 +516,7 @@ fn handle_message(
     }
 
     EffectDispatched(msg) -> {
-      log.debug("beacon.runtime", "Effect dispatched message")
+      log.info("beacon.runtime", "Effect dispatched (PubSub notification received)")
       let new_state = run_update(state, msg)
       // Send model_sync to ALL connected clients so their client-side
       // models stay in sync (e.g., PubSub watcher updates like StrokesUpdated)
@@ -1057,9 +1057,16 @@ fn start_pubsub_listener(
   on_notify: fn(String) -> msg,
   topics: List(String),
 ) -> Subject(ListenerCommand) {
-  let command_subject = process.new_subject()
+  // Use a subject on the CALLER to receive the listener's command subject
+  let reply_subject = process.new_subject()
   let _ =
     process.spawn(fn() {
+      // Create the command subject HERE — inside the spawned process —
+      // so it's owned by this process and receives messages correctly.
+      let command_subject = process.new_subject()
+      // Send it back to the caller
+      process.send(reply_subject, command_subject)
+
       log.info("beacon.subscription", "Listener process spawned")
       list.each(topics, fn(t) {
         log.info("beacon.subscription", "Subscribing to: " <> t)
@@ -1073,6 +1080,9 @@ fn start_pubsub_listener(
       )
       listener_loop(runtime_subject, command_subject, on_notify)
     })
+  // Wait for the listener to send us its command subject
+  let assert Ok(command_subject) =
+    process.receive(reply_subject, 5000)
   command_subject
 }
 
