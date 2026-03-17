@@ -67,11 +67,8 @@ pub fn make_update(
   fn(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
     case msg {
       FinishDrawing -> {
-        // Commit pending strokes to shared store
-        // (pending_strokes built up by replayed LOCAL events in the batch)
-        list.each(local.pending_strokes, fn(s) {
-          store.append(stroke_store, "canvas", s)
-        })
+        // Commit all pending strokes at once — single broadcast, not per-stroke
+        store.append_many(stroke_store, "canvas", local.pending_strokes)
         let all = list.append(model.strokes, local.pending_strokes)
         #(Model(..model, strokes: all), Local(..local, drawing: False, pending_strokes: []))
       }
@@ -146,7 +143,9 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
         html.text("Clear"),
       ]),
     ]),
-    // Canvas area — SVG
+    // Canvas area — SVG with separate groups for committed and pending strokes.
+    // The morph algorithm only diffs children that changed — committed strokes
+    // are stable (same elements), so only pending strokes cause DOM mutations.
     html.element("svg", [
       html.attribute("viewBox", "0 0 760 500"),
       html.attribute("width", "760"),
@@ -155,17 +154,12 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
       beacon.on_mousedown(StartDrawing),
       beacon.on_mouseup(FinishDrawing),
       beacon.on_mousemove(MoveCursor),
-    ], list.map(all_strokes, fn(s) {
-      html.element("line", [
-        html.attribute("x1", int.to_string(s.x1)),
-        html.attribute("y1", int.to_string(s.y1)),
-        html.attribute("x2", int.to_string(s.x2)),
-        html.attribute("y2", int.to_string(s.y2)),
-        html.attribute("stroke", s.color),
-        html.attribute("stroke-width", "3"),
-        html.attribute("stroke-linecap", "round"),
-      ], [])
-    })),
+    ], [
+      // Committed strokes (stable — morph skips unchanged children)
+      html.element("g", [html.id("committed")], list.map(model.strokes, stroke_to_line)),
+      // Pending strokes (changes every mousemove — only this group re-diffs)
+      html.element("g", [html.id("pending")], list.map(local.pending_strokes, stroke_to_line)),
+    ]),
     // Status
     html.div([html.style("margin-top:1rem;font-size:0.9rem;color:#888")], [
       html.text("Color: "),
@@ -176,6 +170,18 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
       }),
     ]),
   ])
+}
+
+fn stroke_to_line(s: Stroke) -> beacon.Node(Msg) {
+  html.element("line", [
+    html.attribute("x1", int.to_string(s.x1)),
+    html.attribute("y1", int.to_string(s.y1)),
+    html.attribute("x2", int.to_string(s.x2)),
+    html.attribute("y2", int.to_string(s.y2)),
+    html.attribute("stroke", s.color),
+    html.attribute("stroke-width", "3"),
+    html.attribute("stroke-linecap", "round"),
+  ], [])
 }
 
 fn color_button(color: String, selected: String) -> beacon.Node(Msg) {

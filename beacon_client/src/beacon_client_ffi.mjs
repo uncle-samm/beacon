@@ -66,12 +66,21 @@ export function initClient() {
 function clientRenderNow() {
   if (!clientInitialized || !appRoot) return;
   const App = window.BeaconApp;
+  const t0 = performance.now();
   App.start_render();
   const html = App.view_to_html(clientModel, clientLocal);
   clientRegistry = App.finish_render();
+  const t1 = performance.now();
   morphInnerHTML(appRoot, html);
+  const t2 = performance.now();
   attachEvents();
   renderPending = false;
+  // Log slow renders (>5ms)
+  const total = t2 - t0;
+  if (total > 5) {
+    console.log("[beacon] Slow render: view=" + (t1-t0).toFixed(1) + "ms morph=" + (t2-t1).toFixed(1) + "ms total=" + total.toFixed(1) + "ms");
+  }
+  window._lastRenderMs = total;
 }
 
 // Throttled render — batches multiple LOCAL events into one render per frame.

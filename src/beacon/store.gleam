@@ -8,6 +8,7 @@
 import beacon/log
 import beacon/pubsub
 import beacon/state_manager
+import gleam/list
 
 /// A key-value store backed by ETS.
 /// Auto-broadcasts on put/delete.
@@ -66,6 +67,17 @@ pub fn new_list(name: String) -> ListStore(value) {
 /// Append a value. Auto-broadcasts to store-level watchers.
 pub fn append(store: ListStore(value), key: String, value: value) -> Nil {
   list_store_append_ffi(store.table, key, value)
+  pubsub.broadcast(store.topic, Nil)
+}
+
+/// Append multiple values at once. Only broadcasts ONCE after all inserts.
+/// Use this instead of calling append() in a loop.
+pub fn append_many(
+  store: ListStore(value),
+  key: String,
+  values: List(value),
+) -> Nil {
+  list.each(values, fn(v) { list_store_append_ffi(store.table, key, v) })
   pubsub.broadcast(store.topic, Nil)
 }
 
