@@ -194,7 +194,8 @@ pub fn main() {
 
   beacon.app_with_local(make_init(stroke_store), init_local, make_update(stroke_store), view)
   |> beacon.title("Collaborative Canvas")
-  |> beacon.watch_list(stroke_store, fn() { StrokesUpdated })
+  |> beacon.subscriptions(fn(_model) { ["store:canvas_strokes"] })
+  |> beacon.on_notify(fn(_topic) { StrokesUpdated })
   |> beacon.start(8080)
 }
 

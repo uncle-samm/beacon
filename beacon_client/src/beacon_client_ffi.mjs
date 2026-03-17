@@ -22,6 +22,7 @@ let clientLocal = null;
 let clientRegistry = null;
 let clientInitialized = false;
 let localEventBuffer = [];  // Buffered LOCAL events — replayed atomically on server before MODEL events
+let renderPending = false;  // RAF throttle: true when a render is scheduled
 
 // === Process Dictionary (handler registry storage) ===
 export function pd_set(key, value) { _pd[key] = value; return undefined; }
@@ -62,7 +63,7 @@ export function initClient() {
   }
 }
 
-function clientRender() {
+function clientRenderNow() {
   if (!clientInitialized || !appRoot) return;
   const App = window.BeaconApp;
   App.start_render();
@@ -70,6 +71,25 @@ function clientRender() {
   clientRegistry = App.finish_render();
   morphInnerHTML(appRoot, html);
   attachEvents();
+  renderPending = false;
+}
+
+// Throttled render — batches multiple LOCAL events into one render per frame.
+// State is updated immediately (clientModel/clientLocal always current),
+// but DOM rendering is deferred to the next animation frame.
+function clientRender() {
+  if (renderPending) return;  // Already scheduled
+  renderPending = true;
+  requestAnimationFrame(clientRenderNow);
+}
+
+// Synchronous render — used when we need the DOM up-to-date immediately
+// (e.g., before sending a MODEL event to the server).
+function clientRenderFlush() {
+  if (renderPending) {
+    renderPending = false;
+    clientRenderNow();
+  }
 }
 
 // Handles an event locally. Returns:
@@ -91,8 +111,9 @@ function handleEventLocally(handlerId, eventData, eventName, targetPath, clock) 
     clientRender();
 
     if (App.msg_affects_model(msg)) {
-      // MODEL event — send buffered LOCAL events + this event as atomic batch.
-      // Server replays them all, renders ONCE. Morph handles the rest (no diff = no flicker).
+      // MODEL event — flush any pending render before sending to server
+      clientRenderFlush();
+      // Send buffered LOCAL events + this event as atomic batch.
       if (localEventBuffer.length > 0) {
         const batch = localEventBuffer.slice();
         batch.push({ name: eventName, handler_id: handlerId, data: eventData, target_path: targetPath, clock: clock });
