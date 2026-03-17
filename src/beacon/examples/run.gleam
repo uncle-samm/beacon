@@ -11,6 +11,7 @@ import beacon/examples/ai_chat
 import beacon/examples/chat
 import beacon/examples/counter
 import beacon/examples/counter_local
+import beacon/examples/dashboard
 import beacon/examples/pong
 import beacon/examples/snake
 import beacon/examples/triple_counter
@@ -26,6 +27,7 @@ pub fn main() {
     ["ai", ..] -> start_ai_chat()
     ["pong", ..] -> start_pong()
     ["snake", ..] -> snake.start()
+    ["dashboard", ..] -> dashboard.start()
     _ -> {
       io.println("Beacon Examples — run with: gleam run -m beacon/examples/run -- [chat|counter|ai|pong]")
       io.println("Starting chat by default...")
