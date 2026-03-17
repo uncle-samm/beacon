@@ -84,6 +84,12 @@ pub fn on_mousemove(callback: fn(String) -> msg) -> Attr {
   element.EventAttr(event_name: "mousemove", handler_id: id)
 }
 
+/// Attach a keydown handler that receives the key name (e.g., "ArrowUp", "Enter", "a").
+pub fn on_keydown(callback: fn(String) -> msg) -> Attr {
+  let id = handler.register_parameterized(callback)
+  element.EventAttr(event_name: "keydown", handler_id: id)
+}
+
 /// Broadcast a PubSub notification to a topic.
 /// All runtimes subscribed to this topic will receive their `on_pubsub` message.
 pub fn broadcast(topic: String) -> Nil {

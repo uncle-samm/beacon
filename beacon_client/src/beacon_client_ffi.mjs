@@ -495,6 +495,25 @@ function attachEvents() {
       t = t.parentNode;
     }
   };
+  appRoot.onkeydown = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-keydown")) {
+        eventClock++;
+        const hid = t.getAttribute("data-beacon-event-keydown");
+        const data = JSON.stringify({ value: e.key });
+        const tp = getPath(t);
+        if (clientInitialized) {
+          const r = handleEventLocally(hid, data, "keydown", tp, eventClock);
+          if (r === "send") send({ type: "event", name: "keydown", handler_id: hid, data: data, target_path: tp, clock: eventClock });
+        } else {
+          send({ type: "event", name: "keydown", handler_id: hid, data: data, target_path: tp, clock: eventClock });
+        }
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
 }
 
 function getPath(node) {
