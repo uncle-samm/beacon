@@ -8,6 +8,7 @@
 import beacon/build/analyzer
 import beacon/log
 import gleam/list
+import gleam/result
 import gleam/string
 import simplifile
 
@@ -55,6 +56,11 @@ fn compile_module(path: String, source: String) -> Nil {
         }
         log.info("beacon.build", "  " <> v.name <> " → " <> label)
       })
+
+      // Generate beacon_codec.gleam — auto-discovered by the runtime at startup
+      let module_name = extract_module_name(path)
+      generate_codec_module(path, module_name, analysis)
+
       log.info("beacon.build", "Creating temp JS project...")
       case create_temp_project(path, source, analysis) {
         Ok(Nil) -> {
@@ -107,11 +113,22 @@ fn create_temp_project(
     Error(_) -> Nil
   }
 
+  // Find the beacon package root — works whether we're in the beacon project
+  // itself or in a downstream project that depends on beacon.
+  let beacon_root = find_beacon_root()
+  log.info("beacon.build", "Beacon root: " <> beacon_root)
+
   // Copy pure beacon modules
-  copy_if_exists("src/beacon/element.gleam", dir <> "/src/beacon/element.gleam")
-  copy_if_exists("src/beacon/html.gleam", dir <> "/src/beacon/html.gleam")
   copy_if_exists(
-    "src/beacon/template/rendered.gleam",
+    beacon_root <> "/src/beacon/element.gleam",
+    dir <> "/src/beacon/element.gleam",
+  )
+  copy_if_exists(
+    beacon_root <> "/src/beacon/html.gleam",
+    dir <> "/src/beacon/html.gleam",
+  )
+  copy_if_exists(
+    beacon_root <> "/src/beacon/template/rendered.gleam",
     dir <> "/src/beacon/template/rendered.gleam",
   )
 
@@ -121,11 +138,11 @@ fn create_temp_project(
     Error(_) -> Nil
   }
   copy_if_exists(
-    "beacon_client/src/beacon_client/handler.gleam",
+    beacon_root <> "/beacon_client/src/beacon_client/handler.gleam",
     dir <> "/src/beacon_client/handler.gleam",
   )
   copy_if_exists(
-    "beacon_client/src/beacon_client_ffi.mjs",
+    beacon_root <> "/beacon_client/src/beacon_client_ffi.mjs",
     dir <> "/src/beacon_client_ffi.mjs",
   )
 
@@ -150,7 +167,7 @@ fn create_temp_project(
   }
 
   // Generate the entry point that wires update+view to the client runtime
-  let entry = generate_entry_point(analysis)
+  let entry = generate_entry_point(analysis, user_source)
   case simplifile.write(dir <> "/src/beacon_app_entry.gleam", entry) {
     Ok(Nil) -> Nil
     Error(_) -> Nil
@@ -190,6 +207,24 @@ pub fn on_submit(msg: msg) -> Attr {
 pub fn on_change(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
   element.EventAttr(event_name: \"change\", handler_id: id)
+}
+
+/// Attach a mousedown handler with coordinates.
+pub fn on_mousedown(callback: fn(String) -> msg) -> Attr {
+  let id = handler.register_parameterized(callback)
+  element.EventAttr(event_name: \"mousedown\", handler_id: id)
+}
+
+/// Attach a mouseup handler.
+pub fn on_mouseup(msg: msg) -> Attr {
+  let id = handler.register_simple(msg)
+  element.EventAttr(event_name: \"mouseup\", handler_id: id)
+}
+
+/// Attach a mousemove handler with coordinates.
+pub fn on_mousemove(callback: fn(String) -> msg) -> Attr {
+  let id = handler.register_parameterized(callback)
+  element.EventAttr(event_name: \"mousemove\", handler_id: id)
 }
 "
 }
@@ -302,7 +337,10 @@ fn rewrite_user_module(source: String) -> String {
 
 
 /// Generate the entry point module that wires user code to client runtime.
-fn generate_entry_point(analysis: analyzer.Analysis) -> String {
+fn generate_entry_point(
+  analysis: analyzer.Analysis,
+  user_source: String,
+) -> String {
   let affects_model_arms =
     list.map(analysis.msg_variants, fn(v) {
       let pattern = case v.affects_model {
@@ -321,17 +359,28 @@ fn generate_entry_point(analysis: analyzer.Analysis) -> String {
     string.join(affects_model_arms, "\n") <> "\n    _ -> True"
 
   // Generate JSON decoder for Model (client-side model_sync)
+  // Generate decoders for custom types referenced by Model fields
+  let custom_decoder_fns =
+    list.filter_map(analysis.model_fields, fn(f) {
+      case f.type_name {
+        "List" ->
+          // Find the custom type definition for the inner type
+          case
+            list.find(analysis.custom_types, fn(ct) {
+              ct.name == f.inner_type
+            })
+          {
+            Ok(ct) -> Ok(generate_custom_decoder(ct))
+            Error(_) -> Error(Nil)
+          }
+        _ -> Error(Nil)
+      }
+    })
+  let custom_decoders_code = string.join(custom_decoder_fns, "\n\n")
+
   let decode_fields =
     list.map(analysis.model_fields, fn(f) {
-      let decoder = case f.type_name {
-        "Int" -> "decode.int"
-        "Float" -> "decode.float"
-        "Bool" -> "decode.bool"
-        "String" -> "decode.string"
-        "List" -> "decode.list(decode.string)"
-        "Option" -> "decode.optional(decode.string)"
-        _ -> "decode.string"
-      }
+      let decoder = decoder_for_field(f, analysis.custom_types)
       "    use "
       <> f.name
       <> " <- decode.field(\""
@@ -353,12 +402,20 @@ fn generate_entry_point(analysis: analyzer.Analysis) -> String {
   let needs_store =
     !analysis.has_direct_init || !analysis.has_direct_update
 
+  // Detect whether factory takes Store or ListStore by scanning source
+  let store_constructor = case string.contains(user_source, "ListStore") {
+    True -> "store.new_list(\"client_stub\")"
+    False -> "store.new(\"client_stub\")"
+  }
+
   // Generate init function
   let init_fn = case analysis.has_direct_init {
     True -> "pub fn init() -> app.Model {\n  app.init()\n}"
     False -> {
       // Factory pattern (make_init): call with stub store
-      "pub fn init() -> app.Model {\n  let init_fn = app.make_init(store.new(\"client_stub\"))\n  init_fn()\n}"
+      "pub fn init() -> app.Model {\n  let init_fn = app.make_init("
+      <> store_constructor
+      <> ")\n  init_fn()\n}"
     }
   }
 
@@ -370,7 +427,9 @@ fn generate_entry_point(analysis: analyzer.Analysis) -> String {
           "pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {\n  app.update(model, local, msg)\n}"
         False ->
           // Factory pattern (make_update): call factory with stub store
-          "pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {\n  let update_fn = app.make_update(store.new(\"client_stub\"))\n  update_fn(model, local, msg)\n}"
+          "pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {\n  let update_fn = app.make_update("
+          <> store_constructor
+          <> ")\n  update_fn(model, local, msg)\n}"
       }
       #(
         upd,
@@ -441,6 +500,8 @@ pub fn msg_affects_model(msg: app.Msg) -> Bool {
 }
 
 /// Decode a JSON string into the user's Model type (for model_sync).
+" <> custom_decoders_code <> "
+
 pub fn decode_model(json_str: String) -> Result(app.Model, String) {
   let model_decoder = {
 " <> decode_body <> "
@@ -509,6 +570,190 @@ fn bundle_js() -> Result(Nil, String) {
   }
 }
 
+/// Generate the decoder expression for a field type.
+fn decoder_for_field(
+  field: analyzer.TypeField,
+  custom_types: List(analyzer.CustomTypeInfo),
+) -> String {
+  case field.type_name {
+    "Int" -> "decode.int"
+    "Float" -> "decode.float"
+    "Bool" -> "decode.bool"
+    "String" -> "decode.string"
+    "List" ->
+      case field.inner_type {
+        "Int" -> "decode.list(decode.int)"
+        "Float" -> "decode.list(decode.float)"
+        "Bool" -> "decode.list(decode.bool)"
+        "String" -> "decode.list(decode.string)"
+        inner ->
+          // Check if inner type is a known custom type
+          case list.find(custom_types, fn(ct) { ct.name == inner }) {
+            Ok(_) -> "decode.list(decode_" <> string.lowercase(inner) <> "())"
+            Error(_) -> "decode.list(decode.dynamic)"
+          }
+      }
+    _ -> "decode.dynamic"
+  }
+}
+
+/// Generate a decoder function for a custom type (e.g., Stroke).
+fn generate_custom_decoder(ct: analyzer.CustomTypeInfo) -> String {
+  let fields =
+    list.map(ct.fields, fn(f) {
+      let decoder = case f.type_name {
+        "Int" -> "decode.int"
+        "Float" -> "decode.float"
+        "Bool" -> "decode.bool"
+        _ -> "decode.string"
+      }
+      "  use "
+      <> f.name
+      <> " <- decode.field(\""
+      <> f.name
+      <> "\", "
+      <> decoder
+      <> ")"
+    })
+  let constructor_args =
+    list.map(ct.fields, fn(f) { f.name <> ": " <> f.name })
+  "fn decode_"
+  <> string.lowercase(ct.name)
+  <> "() -> decode.Decoder(app."
+  <> ct.name
+  <> ") {\n"
+  <> string.join(fields, "\n")
+  <> "\n  decode.success(app."
+  <> ct.name
+  <> "("
+  <> string.join(constructor_args, ", ")
+  <> "))\n}"
+}
+
+/// Extract the module name from a file path (e.g., "src/canvas.gleam" → "canvas").
+fn extract_module_name(path: String) -> String {
+  path
+  |> string.replace(".gleam", "")
+  |> string.split("/")
+  |> list.last
+  |> result.unwrap("app")
+}
+
+/// Generate beacon_codec.gleam — fixed name, auto-discovered by the runtime.
+/// No user imports needed. The runtime finds it via Erlang dynamic dispatch.
+fn generate_codec_module(
+  _path: String,
+  module_name: String,
+  analysis: analyzer.Analysis,
+) -> Nil {
+  let codec_path = "src/beacon_codec.gleam"
+
+  // Generate encoder for each custom type used in Model fields
+  let custom_encoders =
+    list.filter_map(analysis.model_fields, fn(f) {
+      case f.type_name {
+        "List" ->
+          case
+            list.find(analysis.custom_types, fn(ct) {
+              ct.name == f.inner_type
+            })
+          {
+            Ok(ct) -> Ok(generate_type_encoder(module_name, ct))
+            Error(_) -> Error(Nil)
+          }
+        _ -> Error(Nil)
+      }
+    })
+
+  // Model field encoders
+  let model_field_encoders =
+    list.map(analysis.model_fields, fn(f) {
+      let encoder = case f.type_name {
+        "Int" -> "json.int(model." <> f.name <> ")"
+        "Float" -> "json.float(model." <> f.name <> ")"
+        "Bool" -> "json.bool(model." <> f.name <> ")"
+        "String" -> "json.string(model." <> f.name <> ")"
+        "List" ->
+          case
+            list.find(analysis.custom_types, fn(ct) {
+              ct.name == f.inner_type
+            })
+          {
+            Ok(_) ->
+              "json.array(model."
+              <> f.name
+              <> ", encode_"
+              <> string.lowercase(f.inner_type)
+              <> ")"
+            Error(_) -> "json.array(model." <> f.name <> ", json.string)"
+          }
+        _ -> "json.string(model." <> f.name <> ")"
+      }
+      "    #(\"" <> f.name <> "\", " <> encoder <> ")"
+    })
+
+  let #(param_type, model_extract) = case analysis.has_local {
+    True -> #(
+      "#(" <> module_name <> ".Model, " <> module_name <> ".Local)",
+      "  let model = state.0\n",
+    )
+    False -> #(module_name <> ".Model", "  let model = state\n")
+  }
+
+  let source =
+    "/// AUTO-GENERATED by beacon/build — do not edit manually.
+/// Re-run `gleam run -m beacon/build` to regenerate.
+
+import "
+    <> module_name
+    <> "
+import gleam/json
+
+"
+    <> string.join(custom_encoders, "\n\n")
+    <> "\n\n/// Encode the Model to JSON for model_sync.
+pub fn encode_model(state: "
+    <> param_type
+    <> ") -> String {\n"
+    <> model_extract
+    <> "  json.object([\n"
+    <> string.join(model_field_encoders, ",\n")
+    <> ",\n  ])\n  |> json.to_string\n}\n"
+
+  case simplifile.write(codec_path, source) {
+    Ok(Nil) ->
+      log.info("beacon.build", "Generated codec: " <> codec_path)
+    Error(_) ->
+      log.warning("beacon.build", "Could not write: " <> codec_path)
+  }
+}
+
+/// Generate an encoder function for a custom type.
+fn generate_type_encoder(
+  module_name: String,
+  ct: analyzer.CustomTypeInfo,
+) -> String {
+  let field_encoders =
+    list.map(ct.fields, fn(f) {
+      let encoder = case f.type_name {
+        "Int" -> "json.int(s." <> f.name <> ")"
+        "Float" -> "json.float(s." <> f.name <> ")"
+        "Bool" -> "json.bool(s." <> f.name <> ")"
+        _ -> "json.string(s." <> f.name <> ")"
+      }
+      "    #(\"" <> f.name <> "\", " <> encoder <> ")"
+    })
+  "fn encode_"
+  <> string.lowercase(ct.name)
+  <> "(s: "
+  <> module_name
+  <> "."
+  <> ct.name
+  <> ") -> json.Json {\n  json.object([\n"
+  <> string.join(field_encoders, ",\n")
+  <> ",\n  ])\n}"
+}
+
 fn copy_if_exists(from: String, to: String) -> Nil {
   case simplifile.read(from) {
     Ok(contents) -> {
@@ -517,7 +762,67 @@ fn copy_if_exists(from: String, to: String) -> Nil {
         Error(_) -> Nil
       }
     }
-    Error(_) -> Nil
+    Error(_) -> {
+      log.warning("beacon.build", "Could not copy: " <> from)
+      Nil
+    }
+  }
+}
+
+/// Find the beacon package root directory.
+/// Checks (in order):
+///   1. CWD (we ARE the beacon project)
+///   2. Path dependency via gleam.toml
+///   3. Hex package in build/packages/beacon/
+fn find_beacon_root() -> String {
+  // 1. Are we in the beacon project itself?
+  case simplifile.is_file("src/beacon/element.gleam") {
+    Ok(True) -> "."
+    _ ->
+      // 2. Check gleam.toml for a path dependency
+      case read_beacon_path_from_toml() {
+        Ok(path) -> path
+        Error(_) ->
+          // 3. Hex dependency
+          case simplifile.is_directory("build/packages/beacon") {
+            Ok(True) -> "build/packages/beacon"
+            _ -> {
+              log.error(
+                "beacon.build",
+                "Cannot find beacon package source. "
+                  <> "Ensure beacon is a dependency in gleam.toml.",
+              )
+              "."
+            }
+          }
+      }
+  }
+}
+
+/// Parse gleam.toml to find beacon path dependency.
+/// Looks for: beacon = { path = "..." }
+fn read_beacon_path_from_toml() -> Result(String, Nil) {
+  case simplifile.read("gleam.toml") {
+    Ok(contents) -> {
+      // Simple parser: find line containing 'beacon' and 'path'
+      let lines = string.split(contents, "\n")
+      list.find_map(lines, fn(line) {
+        case
+          string.contains(line, "beacon")
+          && string.contains(line, "path")
+        {
+          True -> {
+            // Extract path value from: beacon = { path = ".." }
+            case string.split(line, "\"") {
+              [_, path, ..] -> Ok(path)
+              _ -> Error(Nil)
+            }
+          }
+          False -> Error(Nil)
+        }
+      })
+    }
+    Error(_) -> Error(Nil)
   }
 }
 

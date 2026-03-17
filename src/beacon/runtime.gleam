@@ -43,6 +43,12 @@ pub type RuntimeMessage(msg) {
     target_path: String,
     clock: Int,
   )
+  /// A batch of events to process atomically (all updates, one render).
+  /// Used when LOCAL events are replayed before a MODEL event.
+  ClientEventBatchReceived(
+    conn_id: transport.ConnectionId,
+    events: List(#(String, String, String, String, Int)),
+  )
   /// A client navigated to a new URL path.
   ClientNavigated(conn_id: transport.ConnectionId, path: String)
   /// A client called a server function.
@@ -150,7 +156,10 @@ pub fn start(
           self: subject,
           previous_rendered: None,
           event_clock: 0,
-          serialize_model: config.serialize_model,
+          serialize_model: case config.serialize_model {
+            Some(f) -> Some(f)
+            None -> discover_model_encoder()
+          },
           deserialize_model: config.deserialize_model,
           secret_key: "",
           route_patterns: config.route_patterns,
@@ -343,6 +352,64 @@ fn handle_message(
       }
     }
 
+    ClientEventBatchReceived(conn_id, events) -> {
+      let count = list.length(events)
+      log.info(
+        "beacon.runtime",
+        "Atomic batch from "
+          <> conn_id
+          <> ": "
+          <> int.to_string(count)
+          <> " events",
+      )
+      // Process events atomically: update-only for all, render once at the end.
+      let #(final_state, processed) =
+        list.fold(events, #(state, 0), fn(acc, evt) {
+          let #(acc_state, idx) = acc
+          let #(event_name, handler_id, event_data, _target_path, clock) = evt
+          let resolve_result = case acc_state.handler_registry {
+            Some(registry) ->
+              handler.resolve(registry, handler_id, event_data)
+            None ->
+              Error(error.RuntimeError(reason: "No handler registry"))
+          }
+          let resolve_result = case resolve_result {
+            Ok(msg) -> Ok(msg)
+            Error(_) ->
+              case acc_state.decode_event {
+                Some(decode_fn) ->
+                  decode_fn(event_name, handler_id, event_data, "")
+                None ->
+                  Error(error.RuntimeError(
+                    reason: "Unknown handler: " <> handler_id,
+                  ))
+              }
+          }
+          case resolve_result {
+            Ok(msg) -> {
+              let new_state =
+                RuntimeState(..acc_state, event_clock: clock)
+              case idx == count - 1 {
+                // Last event: full update + render + broadcast patch
+                True -> #(
+                  run_update_for(new_state, msg, option.Some(conn_id)),
+                  idx + 1,
+                )
+                // Intermediate: update only, no render
+                False -> #(
+                  run_update_only(new_state, msg, option.Some(conn_id)),
+                  idx + 1,
+                )
+              }
+            }
+            Error(_) -> #(acc_state, idx + 1)
+          }
+        })
+      let _ = processed
+      send_model_sync(final_state, conn_id)
+      actor.continue(final_state)
+    }
+
     ClientNavigated(conn_id, path) -> {
       log.info("beacon.runtime", "Navigation: " <> conn_id <> " → " <> path)
       case state.on_route_change {
@@ -401,6 +468,9 @@ fn handle_message(
     EffectDispatched(msg) -> {
       log.debug("beacon.runtime", "Effect dispatched message")
       let new_state = run_update(state, msg)
+      // Send model_sync to ALL connected clients so their client-side
+      // models stay in sync (e.g., PubSub watcher updates like StrokesUpdated)
+      broadcast_model_sync(new_state)
       actor.continue(new_state)
     }
 
@@ -479,6 +549,18 @@ fn run_update_for(
   )
 }
 
+/// Run update WITHOUT rendering — for atomic batch processing.
+/// Only updates the model and executes effects. Rendering happens once after the batch.
+fn run_update_only(
+  state: RuntimeState(model, msg),
+  msg: msg,
+  conn_id: option.Option(transport.ConnectionId),
+) -> RuntimeState(model, msg) {
+  let #(new_model, effects) = state.update(state.model, msg)
+  run_effects_with_context(effects, state.self, conn_id, state.connections)
+  RuntimeState(..state, model: new_model)
+}
+
 /// Safely execute the view function, catching any crashes.
 /// Returns Ok(Node) on success, Error(reason) on failure.
 /// This is the error boundary — a view crash doesn't kill the runtime.
@@ -546,6 +628,46 @@ fn send_model_sync(
         }
         Error(Nil) -> Nil
       }
+    }
+    None -> Nil
+  }
+}
+
+/// Auto-discover a model encoder from the beacon_codec module.
+/// The build tool generates beacon_codec.gleam with encode_model/1.
+/// If the module exists, returns Some(encoder). Otherwise None.
+fn discover_model_encoder() -> Option(fn(model) -> String) {
+  case try_load_codec_encoder() {
+    Ok(encoder) -> {
+      log.info(
+        "beacon.runtime",
+        "Auto-discovered model encoder from beacon_codec",
+      )
+      Some(encoder)
+    }
+    Error(_) -> None
+  }
+}
+
+@external(erlang, "beacon_runtime_ffi", "try_load_codec_encoder")
+fn try_load_codec_encoder() -> Result(fn(model) -> String, Nil)
+
+/// Send authoritative model state to ALL connected clients.
+/// Used after PubSub/watcher updates where no specific conn_id triggered the change.
+fn broadcast_model_sync(state: RuntimeState(model, msg)) -> Nil {
+  case state.serialize_model {
+    Some(serialize) -> {
+      let model_json = serialize(state.model)
+      dict.each(state.connections, fn(_conn_id, subject) {
+        process.send(
+          subject,
+          transport.SendModelSync(
+            model_json: model_json,
+            version: state.event_clock,
+            ack_clock: state.event_clock,
+          ),
+        )
+      })
     }
     None -> Nil
   }
@@ -663,6 +785,24 @@ pub fn connect_transport_with_ssr(
             ),
           )
         }
+        transport.ClientEventBatch(events) -> {
+          // Atomic batch: all events processed, single render at end.
+          let event_tuples =
+            list.filter_map(events, fn(evt) {
+              case evt {
+                transport.ClientEvent(name, handler_id, data, target_path, clock) ->
+                  Ok(#(name, handler_id, data, target_path, clock))
+                _ -> Error(Nil)
+              }
+            })
+          process.send(
+            runtime,
+            ClientEventBatchReceived(
+              conn_id: conn_id,
+              events: event_tuples,
+            ),
+          )
+        }
         transport.ClientHeartbeat -> {
           // Heartbeat is handled directly by transport, no runtime action needed.
           Nil
@@ -745,6 +885,29 @@ pub fn connect_transport_per_connection(
                     call_id: call_id,
                   ),
                 )
+              transport.ClientEventBatch(events) -> {
+                let event_tuples =
+                  list.filter_map(events, fn(evt) {
+                    case evt {
+                      transport.ClientEvent(
+                        name,
+                        handler_id,
+                        data,
+                        target_path,
+                        clock,
+                      ) ->
+                        Ok(#(name, handler_id, data, target_path, clock))
+                      _ -> Error(Nil)
+                    }
+                  })
+                process.send(
+                  runtime_subject,
+                  ClientEventBatchReceived(
+                    conn_id: conn_id,
+                    events: event_tuples,
+                  ),
+                )
+              }
               transport.ClientHeartbeat -> Nil
             }
           }

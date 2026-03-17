@@ -21,6 +21,7 @@ let clientModel = null;
 let clientLocal = null;
 let clientRegistry = null;
 let clientInitialized = false;
+let localEventBuffer = [];  // Buffered LOCAL events — replayed atomically on server before MODEL events
 
 // === Process Dictionary (handler registry storage) ===
 export function pd_set(key, value) { _pd[key] = value; return undefined; }
@@ -71,13 +72,16 @@ function clientRender() {
   attachEvents();
 }
 
-// Returns true if the event needs to be sent to the server.
-function handleEventLocally(handlerId, eventData) {
-  if (!clientInitialized) return true;
+// Handles an event locally. Returns:
+// "local" — handled client-only, don't send
+// "send" — send this single event to server
+// "batched" — already sent as part of a batch
+function handleEventLocally(handlerId, eventData, eventName, targetPath, clock) {
+  if (!clientInitialized) return "send";
   const App = window.BeaconApp;
 
   const result = App.resolve_handler(clientRegistry, handlerId, eventData);
-  if (!result.isOk()) return true;
+  if (!result.isOk()) return "send";
 
   try {
     const msg = result[0];
@@ -85,11 +89,27 @@ function handleEventLocally(handlerId, eventData) {
     clientModel = updateResult[0];
     clientLocal = updateResult[1];
     clientRender();
-    return App.msg_affects_model(msg);
+
+    if (App.msg_affects_model(msg)) {
+      // MODEL event — send buffered LOCAL events + this event as atomic batch.
+      // Server replays them all, renders ONCE. Morph handles the rest (no diff = no flicker).
+      if (localEventBuffer.length > 0) {
+        const batch = localEventBuffer.slice();
+        batch.push({ name: eventName, handler_id: handlerId, data: eventData, target_path: targetPath, clock: clock });
+        send({ type: "event_batch", events: batch });
+        localEventBuffer = [];
+        return "batched";
+      }
+      return "send";  // no buffer, send single event
+    } else {
+      // LOCAL event — buffer for potential replay, don't send
+      localEventBuffer.push({ name: eventName, handler_id: handlerId, data: eventData, target_path: targetPath, clock: clock });
+      return "local";
+    }
   } catch (e) {
     console.error("[beacon] Local update failed, falling back to server-only:", e);
-    clientInitialized = false; // disable local execution
-    return true;
+    clientInitialized = false;
+    return "send";
   }
 }
 
@@ -330,13 +350,12 @@ function attachEvents() {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-click")) {
         e.preventDefault(); eventClock++;
         const hid = t.getAttribute("data-beacon-event-click");
+        const tp = getPath(t);
         if (clientInitialized) {
-          const needsServer = handleEventLocally(hid, "{}");
-          if (needsServer) {
-            send({ type: "event", name: "click", handler_id: hid, data: "{}", target_path: getPath(t), clock: eventClock });
-          }
+          const r = handleEventLocally(hid, "{}", "click", tp, eventClock);
+          if (r === "send") send({ type: "event", name: "click", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
         } else {
-          send({ type: "event", name: "click", handler_id: hid, data: "{}", target_path: getPath(t), clock: eventClock });
+          send({ type: "event", name: "click", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
         }
         return;
       }
@@ -350,13 +369,12 @@ function attachEvents() {
         eventClock++;
         const hid = t.getAttribute("data-beacon-event-input");
         const data = JSON.stringify({ value: t.value || "" });
+        const tp = getPath(t);
         if (clientInitialized) {
-          const needsServer = handleEventLocally(hid, data);
-          if (needsServer) {
-            send({ type: "event", name: "input", handler_id: hid, data: data, target_path: getPath(t), clock: eventClock });
-          }
+          const r = handleEventLocally(hid, data, "input", tp, eventClock);
+          if (r === "send") send({ type: "event", name: "input", handler_id: hid, data: data, target_path: tp, clock: eventClock });
         } else {
-          send({ type: "event", name: "input", handler_id: hid, data: data, target_path: getPath(t), clock: eventClock });
+          send({ type: "event", name: "input", handler_id: hid, data: data, target_path: tp, clock: eventClock });
         }
         return;
       }
@@ -369,13 +387,74 @@ function attachEvents() {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-submit")) {
         e.preventDefault(); eventClock++;
         const hid = t.getAttribute("data-beacon-event-submit");
+        const tp = getPath(t);
         if (clientInitialized) {
-          const needsServer = handleEventLocally(hid, "{}");
-          if (needsServer) {
-            send({ type: "event", name: "submit", handler_id: hid, data: "{}", target_path: getPath(t), clock: eventClock });
-          }
+          const r = handleEventLocally(hid, "{}", "submit", tp, eventClock);
+          if (r === "send") send({ type: "event", name: "submit", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
         } else {
-          send({ type: "event", name: "submit", handler_id: hid, data: "{}", target_path: getPath(t), clock: eventClock });
+          send({ type: "event", name: "submit", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
+        }
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.onmousedown = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-mousedown")) {
+        eventClock++;
+        const hid = t.getAttribute("data-beacon-event-mousedown");
+        const rect = t.getBoundingClientRect();
+        const x = Math.round(e.clientX - rect.left);
+        const y = Math.round(e.clientY - rect.top);
+        const data = JSON.stringify({ value: x + "," + y });
+        const tp = getPath(t);
+        if (clientInitialized) {
+          const r = handleEventLocally(hid, data, "mousedown", tp, eventClock);
+          if (r === "send") send({ type: "event", name: "mousedown", handler_id: hid, data: data, target_path: tp, clock: eventClock });
+        } else {
+          send({ type: "event", name: "mousedown", handler_id: hid, data: data, target_path: tp, clock: eventClock });
+        }
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.onmouseup = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-mouseup")) {
+        eventClock++;
+        const hid = t.getAttribute("data-beacon-event-mouseup");
+        const tp = getPath(t);
+        if (clientInitialized) {
+          const r = handleEventLocally(hid, "{}", "mouseup", tp, eventClock);
+          if (r === "send") send({ type: "event", name: "mouseup", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
+        } else {
+          send({ type: "event", name: "mouseup", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
+        }
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.onmousemove = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-mousemove")) {
+        eventClock++;
+        const hid = t.getAttribute("data-beacon-event-mousemove");
+        const rect = t.getBoundingClientRect();
+        const x = Math.round(e.clientX - rect.left);
+        const y = Math.round(e.clientY - rect.top);
+        const data = JSON.stringify({ value: x + "," + y });
+        const tp = getPath(t);
+        if (clientInitialized) {
+          const r = handleEventLocally(hid, data, "mousemove", tp, eventClock);
+          if (r === "send") send({ type: "event", name: "mousemove", handler_id: hid, data: data, target_path: tp, clock: eventClock });
+        } else {
+          send({ type: "event", name: "mousemove", handler_id: hid, data: data, target_path: tp, clock: eventClock });
         }
         return;
       }

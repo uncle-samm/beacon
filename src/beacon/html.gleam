@@ -230,3 +230,17 @@ pub fn disabled() -> Attr {
 pub fn checked() -> Attr {
   element.attr("checked", "true")
 }
+
+/// Create an element with a custom tag name (e.g., "svg", "line", "canvas").
+pub fn element(
+  tag: String,
+  attrs: List(Attr),
+  children: List(Node(msg)),
+) -> Node(msg) {
+  element.el(tag, attrs, children)
+}
+
+/// Create a custom HTML attribute.
+pub fn attribute(name: String, value: String) -> Attr {
+  element.attr(name, value)
+}

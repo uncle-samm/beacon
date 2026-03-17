@@ -9,8 +9,20 @@ pub type TypeField {
   TypeField(
     /// The field name (e.g., "count").
     name: String,
-    /// The field type name (e.g., "Int", "String", "Bool").
+    /// The field type name (e.g., "Int", "String", "Bool", "List").
     type_name: String,
+    /// For generic types like List(Stroke), the inner type name.
+    inner_type: String,
+  )
+}
+
+/// A custom type with its fields (for JSON codec generation).
+pub type CustomTypeInfo {
+  CustomTypeInfo(
+    /// The type name (e.g., "Stroke").
+    name: String,
+    /// The type's fields.
+    fields: List(TypeField),
   )
 }
 
@@ -27,6 +39,8 @@ pub type Analysis {
     has_direct_init: Bool,
     /// Whether the module has a direct `pub fn update` (vs make_update factory).
     has_direct_update: Bool,
+    /// All custom types found in the module (for nested decoder generation).
+    custom_types: List(CustomTypeInfo),
   )
 }
 
@@ -72,6 +86,23 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
         Error(_) -> []
       }
 
+      // Extract ALL custom types for nested decoder generation
+      let custom_types =
+        list.filter_map(module.custom_types, fn(def) {
+          let name = def.definition.name
+          // Skip Model, Local, Msg — we handle those specially
+          case name == "Model" || name == "Local" || name == "Msg" {
+            True -> Error(Nil)
+            False -> {
+              let fields = extract_fields(def.definition)
+              case fields {
+                [] -> Error(Nil)
+                _ -> Ok(CustomTypeInfo(name: name, fields: fields))
+              }
+            }
+          }
+        })
+
       case msg_type, update_fn {
         Ok(msg), Ok(func) -> {
           let variants = classify_variants(msg, func)
@@ -81,6 +112,7 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
             model_fields: model_fields,
             has_direct_init: has_direct_init,
             has_direct_update: has_direct_update,
+            custom_types: custom_types,
           ))
         }
         Error(r), _ -> Error(r)
@@ -128,11 +160,16 @@ fn extract_fields(custom_type: glance.CustomType) -> List(TypeField) {
       list.filter_map(variant.fields, fn(field) {
         case field {
           glance.LabelledVariantField(item: field_type, label: name) -> {
-            let type_name = case field_type {
-              glance.NamedType(name: n, ..) -> n
-              _ -> "Unknown"
+            let #(type_name, inner) = case field_type {
+              glance.NamedType(name: n, parameters: params, ..) ->
+                case params {
+                  [glance.NamedType(name: inner_name, ..)] ->
+                    #(n, inner_name)
+                  _ -> #(n, "")
+                }
+              _ -> #("Unknown", "")
             }
-            Ok(TypeField(name: name, type_name: type_name))
+            Ok(TypeField(name: name, type_name: type_name, inner_type: inner))
           }
           _ -> Error(Nil)
         }
@@ -256,8 +293,27 @@ fn body_modifies_model(
     -> True
     // Just returning the model variable unchanged
     glance.Variable(name: name, ..) if name == model_param -> False
+    // Block { let x = ...; #(model, local) } — check last statement
+    glance.Block(statements: stmts, ..) ->
+      case last_expression(stmts) {
+        Ok(last) -> body_modifies_model(last, model_param)
+        Error(Nil) -> True
+      }
+    // case x { ... } — check if ALL arms don't modify model
+    glance.Case(clauses: clauses, ..) ->
+      list.any(clauses, fn(clause) {
+        body_modifies_model(clause.body, model_param)
+      })
     // Anything else — assume it modifies (conservative)
     _ -> True
+  }
+}
+
+/// Get the last Expression from a list of Statements.
+fn last_expression(stmts: List(glance.Statement)) -> Result(glance.Expression, Nil) {
+  case list.last(stmts) {
+    Ok(glance.Expression(expr)) -> Ok(expr)
+    _ -> Error(Nil)
   }
 }
 

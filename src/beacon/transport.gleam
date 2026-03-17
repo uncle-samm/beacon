@@ -53,6 +53,9 @@ pub type ClientMessage {
   ClientNavigate(path: String)
   /// Client calls a server function by name.
   ClientServerFn(name: String, args: String, call_id: String)
+  /// Batch of events: LOCAL events replayed + MODEL event at the end.
+  /// Sent when a MODEL event fires after LOCAL events accumulated state.
+  ClientEventBatch(events: List(ClientMessage))
 }
 
 /// Messages sent from the server to the client (browser).
@@ -248,6 +251,25 @@ fn client_message_decoder() -> decode.Decoder(ClientMessage) {
       use args <- decode.optional_field("args", "{}", decode.string)
       use call_id <- decode.field("call_id", decode.string)
       decode.success(ClientServerFn(name: name, args: args, call_id: call_id))
+    }
+    "event_batch" -> {
+      // Decode array of events — each follows the "event" format
+      let event_decoder = {
+        use name <- decode.field("name", decode.string)
+        use handler_id <- decode.optional_field("handler_id", "", decode.string)
+        use data <- decode.field("data", decode.string)
+        use target_path <- decode.optional_field("target_path", "", decode.string)
+        use clock <- decode.optional_field("clock", 0, decode.int)
+        decode.success(ClientEvent(
+          name: name,
+          handler_id: handler_id,
+          data: data,
+          target_path: target_path,
+          clock: clock,
+        ))
+      }
+      use events <- decode.field("events", decode.list(event_decoder))
+      decode.success(ClientEventBatch(events: events))
     }
     _unknown -> decode.failure(ClientHeartbeat, "ClientMessage type")
   }
