@@ -108,17 +108,20 @@ pub fn make_update(
       }
 
       RestartGame -> {
-        let new_food = random_food(model.snake)
+        let new_snake = [Point(x: 10, y: 7)]
+        let new_food = random_food(new_snake)
+        // Don't start a new timer — the existing one from SetName still runs.
+        // Just reset the game state. The Tick handler checks game_state.
         #(
           Model(
             ..model,
-            snake: [Point(x: 10, y: 7)],
+            snake: new_snake,
             direction: Right,
             food: new_food,
             score: 0,
             game_state: Playing,
           ),
-          effect.every(150, fn() { Tick }),
+          effect.none(),
         )
       }
 
