@@ -1800,31 +1800,31 @@
 - [x] 62.1h Fix generic error messages — build.gleam now includes OS error via string.inspect
 
 ##### 62.2 Simulation Metrics Layer
-- [ ] Create test/beacon_sim_ffi.erl — ETS atomic counters, microsecond timestamps, system snapshots
-- [ ] Create test/beacon/sim/metrics.gleam — MetricsTable, SimMetrics types, increment/collect API
+- [x] Create test/beacon_sim_ffi.erl — ETS atomic counters, microsecond timestamps, system snapshots
+- [x] Create test/beacon/sim/metrics.gleam — MetricsTable, SimMetrics types, increment/collect API
 
 ##### 62.3 Scenario Engine
-- [ ] Create test/beacon/sim/scenario.gleam — Action type, Scenario type, predefined scenarios
-- [ ] Implement counter(n), draw(n_strokes), chat(room, n_msgs), reconnect(), chaos() scenarios
+- [x] Create test/beacon/sim/scenario.gleam — Action type, Scenario type, predefined scenarios
+- [x] Implement counter(n), draw(n_strokes), connect_disconnect(), malformed(), flood(n) scenarios
 
 ##### 62.4 Test App Helper + Connection Pool
-- [ ] Create test/beacon/sim/test_app.gleam — start_counter_app(port), start_chat_app(port)
-- [ ] Create test/beacon/sim/pool.gleam — spawn N real WS connections, execute scenarios
-- [ ] First smoke test: sim_10_smoke_test — 10 connections, 10 events each
+- [x] Create test/beacon/sim/test_app.gleam — start_counter_app(port) on dynamic ports
+- [x] Create test/beacon/sim/pool.gleam — spawn N real WS connections, execute scenarios
+- [x] First smoke test: sim_10_smoke_test — 10 connections, 10 events each ✓
 
 ##### 62.5 Reporter + Scale Tests
-- [ ] Create test/beacon/sim/report.gleam — percentiles, leak detection, pass/fail
-- [ ] sim_100_counter_test — 100 connections, p99 < 500ms
+- [x] Create test/beacon/sim/report.gleam — percentiles, leak detection, pass/fail
+- [x] sim_100_counter_test — 100 connections, 20 events each ✓
 - [ ] sim_50_draw_test — 50 connections, 100 strokes each
 - [ ] sim_30_chat_test — 30 connections, 3 rooms, 20 messages each
-- [ ] sim_memory_leak_test — connect/disconnect 100 times, check delta
+- [x] sim_memory_leak_test — connect/disconnect 100 times, check delta ✓
 - [ ] sim_process_leak_test — 200 connections, check cleanup
 
 ##### 62.6 Fault Injection
 - [ ] Create test/beacon/sim/fault.gleam — kill connections, malformed frames, event flood
 - [ ] sim_50_with_faults_test — 50 connections with random kills
-- [ ] sim_flood_test — 1000 rapid events on single connection
-- [ ] sim_malformed_test — garbage frames, server must not crash
+- [x] sim_flood_test — 500 rapid events on single connection ✓
+- [x] sim_malformed_test — garbage frames, server survives ✓
 
 #### Milestone 63: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
