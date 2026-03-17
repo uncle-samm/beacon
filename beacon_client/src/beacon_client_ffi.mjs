@@ -524,12 +524,12 @@ function attachEvents() {
     appRoot.querySelectorAll("[draggable]").forEach(el => { el.style.opacity = "1"; });
   };
   appRoot.ondragover = (e) => {
+    // Walk up from target to find a drop zone (has data-beacon-event-drop)
     let t = e.target;
     while (t && t !== appRoot) {
-      if (t.hasAttribute && t.hasAttribute("data-beacon-event-dragover")) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-drop")) {
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
-        // Add drop target highlight
         t.style.outline = "2px dashed #2196F3";
         return;
       }
@@ -539,8 +539,12 @@ function attachEvents() {
   appRoot.ondragleave = (e) => {
     let t = e.target;
     while (t && t !== appRoot) {
-      if (t.hasAttribute && t.hasAttribute("data-beacon-event-dragover")) {
-        t.style.outline = "";
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-drop")) {
+        // Only remove highlight if we're leaving the drop zone itself,
+        // not when entering a child element
+        if (!t.contains(e.relatedTarget)) {
+          t.style.outline = "";
+        }
         return;
       }
       t = t.parentNode;
