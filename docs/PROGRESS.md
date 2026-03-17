@@ -7,8 +7,8 @@
 
 ## Current Status
 
-**Active Milestone:** Future
-**Last Completed:** 60 — WebSocket Auth (P4 complete)
+**Active Milestone:** 61 — Rendering Performance
+**Last Completed:** Dynamic PubSub Subscriptions + Canvas Example
 **Build Status:** GREEN (zero errors, zero warnings)
 **Test Status:** GREEN (441 passed, 0 failures)
 **Linter:** PASSING (zero violations)
@@ -1755,10 +1755,40 @@
 - [x] canvas — color picker, clear button, event delegation, SSR
 - [x] HMR — modify .gleam → rebuild → browser shows change
 
-#### Milestone 61: Context System
+#### Milestone 61: Rendering Performance
+> Drawing canvas slows down with many strokes. Root cause: every LOCAL event
+> re-renders ALL strokes client-side (500 strokes × 60fps = 30K element renders/sec).
+> The BEAM handles the server side fine — this is a client-side rendering problem.
+
+##### 61.1 Client-Side Render Throttling
+- [ ] Add requestAnimationFrame throttling to clientRender() — batch multiple LOCAL events into one render per frame
+- [ ] Benchmark: measure render time per frame with 100, 500, 1000 strokes
+- [ ] Target: consistent 60fps with 500+ strokes
+
+##### 61.2 Incremental DOM Updates
+- [ ] Skip full view_to_html + morphInnerHTML for LOCAL events that only add children
+- [ ] For canvas: append new `<line>` directly to SVG instead of re-rendering all lines
+- [ ] Add `element.keyed()` support for efficient list diffing (like React keys)
+
+##### 61.3 Server Patch Optimization
+- [ ] SVG attributes (x1, y1, etc.) should be dynamic, not static — avoids FullRender on structural change
+- [ ] Incremental child patches: "insert child at index N" instead of full SVG re-send
+- [ ] Benchmark: measure patch payload size with 100, 500, 1000 strokes
+
+##### 61.4 Event Batching & Coalescing
+- [ ] Coalesce consecutive same-handler LOCAL events (keep only the latest MoveCursor per frame)
+- [ ] Limit localEventBuffer size — sample/thin events for very long drags
+- [ ] Benchmark: measure WS payload size for event_batch with 100, 500, 1000 events
+
+##### 61.5 Canvas-Specific Optimizations
+- [ ] Use Canvas 2D API instead of SVG for high-stroke-count scenarios
+- [ ] Or: render committed strokes as a background image, only SVG for pending strokes
+- [ ] Benchmark end-to-end: draw 500 strokes, measure total time and frame drops
+
+#### Milestone 62: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
 
-#### Milestone 62: Streaming & Progressive Loading
+#### Milestone 63: Streaming & Progressive Loading
 > TODO: Streaming HTML responses, progressive hydration, lazy loading.
 
 ---
