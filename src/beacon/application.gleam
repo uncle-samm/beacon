@@ -61,6 +61,10 @@ pub type AppConfig(model, msg) {
     on_route_change: Option(fn(route.Route) -> msg),
     /// Registered server functions.
     server_fns: dict.Dict(String, fn(String) -> Result(String, String)),
+    /// Dynamic subscription function: model → list of topics.
+    dynamic_subscriptions: Option(fn(model) -> List(String)),
+    /// Topic-aware notification handler for dynamic subscriptions.
+    on_notify: Option(fn(String) -> msg),
   )
 }
 
@@ -115,6 +119,8 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       route_patterns: config.route_patterns,
       on_route_change: config.on_route_change,
       server_fns: config.server_fns,
+      dynamic_subscriptions: config.dynamic_subscriptions,
+      on_notify: config.on_notify,
     )
 
   // Create transport with per-connection runtime factory

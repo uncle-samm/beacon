@@ -1,5 +1,5 @@
 -module(beacon_pubsub_ffi).
--export([pg_start/0, pg_join/2, pg_leave/2, pg_get_members/1, erlang_send/2]).
+-export([pg_start/0, pg_join/2, pg_leave/2, pg_get_members/1, send_tagged/3]).
 
 %% Ensure the default pg scope is started.
 pg_start() ->
@@ -22,7 +22,8 @@ pg_leave(Topic, Pid) ->
 pg_get_members(Topic) ->
     pg:get_members(beacon_pg, Topic).
 
-%% Send a message to a process.
-erlang_send(Pid, Message) ->
-    Pid ! Message,
+%% Send a tagged message to a process.
+%% Format: {beacon_pubsub, Topic, Message} so the receiver knows which topic fired.
+send_tagged(Pid, Topic, Message) ->
+    Pid ! {beacon_pubsub, Topic, Message},
     nil.

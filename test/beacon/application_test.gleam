@@ -43,7 +43,7 @@ fn test_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     static_dir: option.None,
     route_patterns: [],
     on_route_change: option.None,
-    server_fns: dict.new(),
+    server_fns: dict.new(), dynamic_subscriptions: option.None, on_notify: option.None,
   )
 }
 

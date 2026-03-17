@@ -70,7 +70,7 @@ fn counter_config() -> runtime.RuntimeConfig(CounterModel, CounterMsg) {
       on_pubsub: option.None,
       route_patterns: [],
       on_route_change: option.None,
-      server_fns: dict.new(),
+      server_fns: dict.new(), dynamic_subscriptions: option.None, on_notify: option.None,
   )
 }
 
@@ -237,7 +237,7 @@ pub fn runtime_effect_dispatches_message_test() {
       on_pubsub: option.None,
       route_patterns: [],
       on_route_change: option.None,
-      server_fns: dict.new(),
+      server_fns: dict.new(), dynamic_subscriptions: option.None, on_notify: option.None,
     )
 
   let assert Ok(subject) = runtime.start(config)
@@ -289,7 +289,7 @@ pub fn runtime_survives_view_crash_test() {
       on_pubsub: option.None,
       route_patterns: [],
       on_route_change: option.None,
-      server_fns: dict.new(),
+      server_fns: dict.new(), dynamic_subscriptions: option.None, on_notify: option.None,
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -364,7 +364,7 @@ pub fn state_recovery_from_token_test() {
       on_pubsub: option.None,
       route_patterns: [],
       on_route_change: option.None,
-      server_fns: dict.new(),
+      server_fns: dict.new(), dynamic_subscriptions: option.None, on_notify: option.None,
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -476,7 +476,7 @@ pub fn model_sync_sent_after_event_test() {
       on_pubsub: option.None,
       route_patterns: [],
       on_route_change: option.None,
-      server_fns: dict.new(),
+      server_fns: dict.new(), dynamic_subscriptions: option.None, on_notify: option.None,
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -526,6 +526,8 @@ pub fn server_fn_execution_test() {
       server_fns: dict.insert(dict.new(), "greet", fn(args) {
         Ok("Hello, " <> args <> "!")
       }),
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -562,7 +564,7 @@ pub fn server_fn_unknown_test() {
       on_pubsub: option.None,
       route_patterns: [],
       on_route_change: option.None,
-      server_fns: dict.new(),
+      server_fns: dict.new(), dynamic_subscriptions: option.None, on_notify: option.None,
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()

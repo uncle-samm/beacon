@@ -26,15 +26,20 @@ pub fn unsubscribe(topic: Topic) -> Nil {
 }
 
 /// Broadcast a message to all processes subscribed to a topic.
-/// The message is sent to every process in the topic's process group.
+/// Wraps the message with the topic name so receivers can identify the source.
+/// Wire format: `#("beacon_pubsub", topic, message)`
 pub fn broadcast(topic: Topic, message: msg) -> Nil {
   let members = pg_get_members(topic)
   log.debug(
     "beacon.pubsub",
-    "Broadcasting to " <> topic <> " (" <> int_to_string(list.length(members)) <> " subscribers)",
+    "Broadcasting to "
+      <> topic
+      <> " ("
+      <> int_to_string(list.length(members))
+      <> " subscribers)",
   )
   list.each(members, fn(pid) {
-    erlang_send(pid, message)
+    send_tagged(pid, topic, message)
   })
 }
 
@@ -63,8 +68,8 @@ fn pg_get_members(topic: String) -> List(Pid)
 @external(erlang, "beacon_pubsub_ffi", "pg_start")
 fn pg_start() -> Nil
 
-@external(erlang, "beacon_pubsub_ffi", "erlang_send")
-fn erlang_send(pid: Pid, message: msg) -> Nil
+@external(erlang, "beacon_pubsub_ffi", "send_tagged")
+fn send_tagged(pid: Pid, topic: String, message: msg) -> Nil
 
 @external(erlang, "erlang", "integer_to_binary")
 fn int_to_string(n: Int) -> String

@@ -119,6 +119,10 @@ pub opaque type AppBuilder(model, msg) {
     on_route_change: Option(fn(route.Route) -> msg),
     /// Registered server functions: name → handler(args) → Result(result, error).
     server_fns: dict.Dict(String, fn(String) -> Result(String, String)),
+    /// Dynamic subscription function: model → list of topics.
+    dynamic_subscriptions: Option(fn(model) -> List(String)),
+    /// Topic-aware notification handler for dynamic subscriptions.
+    on_notify: Option(fn(String) -> msg),
   )
 }
 
@@ -150,6 +154,8 @@ pub fn app(
     route_patterns: [],
     on_route_change: None,
     server_fns: dict.new(),
+    dynamic_subscriptions: None,
+    on_notify: None,
   )
 }
 
@@ -178,6 +184,8 @@ pub fn app_with_effects(
     route_patterns: [],
     on_route_change: None,
     server_fns: dict.new(),
+    dynamic_subscriptions: None,
+    on_notify: None,
   )
 }
 
@@ -227,6 +235,8 @@ pub fn app_with_local(
     route_patterns: [],
     on_route_change: None,
     server_fns: dict.new(),
+    dynamic_subscriptions: None,
+    on_notify: None,
   )
 }
 
@@ -293,6 +303,31 @@ pub fn redirect(path: String) -> effect.Effect(msg) {
       option.None -> Nil
     }
   })
+}
+
+/// Set dynamic subscriptions derived from the model.
+/// Called after every update. The framework diffs the result against
+/// the current subscription set and subscribes/unsubscribes as needed.
+/// ```gleam
+/// beacon.app(init, update, view)
+/// |> beacon.subscriptions(fn(model) { ["room:" <> model.current_room] })
+/// |> beacon.on_notify(fn(topic) { RoomUpdated(topic) })
+/// |> beacon.start(8080)
+/// ```
+pub fn subscriptions(
+  builder: AppBuilder(model, msg),
+  compute: fn(model) -> List(String),
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, dynamic_subscriptions: Some(compute))
+}
+
+/// Set the handler for notifications on dynamically subscribed topics.
+/// Receives the topic string so you can distinguish between sources.
+pub fn on_notify(
+  builder: AppBuilder(model, msg),
+  handler: fn(String) -> msg,
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, on_notify: Some(handler))
 }
 
 /// Register a server function callable from the client.
@@ -432,6 +467,8 @@ pub fn start(
       route_patterns: builder.route_patterns,
       on_route_change: builder.on_route_change,
       server_fns: builder.server_fns,
+      dynamic_subscriptions: builder.dynamic_subscriptions,
+      on_notify: builder.on_notify,
     )
   case application.start(config) {
     Ok(_app) -> {
