@@ -7,8 +7,8 @@
 
 ## Current Status
 
-**Active Milestone:** 62 — TigerStyle Compliance + Simulation Testing
-**Last Completed:** 61 — Rendering Performance (RAF throttle, SVG groups)
+**Active Milestone:** 63 — Server-Push & Stress Examples
+**Last Completed:** 62 — TigerStyle Compliance + Simulation Testing (451 tests)
 **Build Status:** GREEN (zero errors, zero warnings)
 **Test Status:** GREEN (441 passed, 0 failures)
 **Linter:** PASSING (zero violations)
@@ -1826,10 +1826,51 @@
 - [x] sim_flood_test — 500 rapid events on single connection ✓
 - [x] sim_malformed_test — garbage frames, server survives ✓
 
-#### Milestone 63: Context System
+#### Milestone 63: Server-Push & Stress Examples
+> Build server-initiated updates (timers/ticks) and four examples that stress test
+> every framework subsystem: state sync, latency, concurrent writes, presence.
+
+##### 63.1 Server-Push Primitive
+- [ ] Add `effect.every(interval_ms, fn() -> msg)` — periodic server-side tick
+- [ ] Runtime handles tick messages via `process.send_after` loop
+- [ ] Ticks produce update + render + broadcast like any other event
+- [ ] Add `effect.after(delay_ms, fn() -> msg)` — single delayed message
+- [ ] Test: timer fires, model updates, patch sent to client
+
+##### 63.2 Multiplayer Snake
+- [ ] Game state: snake positions, food, direction, score (per-player)
+- [ ] Server tick at ~150ms (game loop via effect.every)
+- [ ] Arrow key input → change direction (LOCAL for instant, MODEL for server)
+- [ ] Shared store for game state, all players see same board
+- [ ] Collision detection (wall, self, other snakes)
+- [ ] Dynamic subscriptions per game room
+- [ ] Test: 2+ players in same game, moves sync correctly
+
+##### 63.3 Live Dashboard
+- [ ] Server pushes data every 1-2 seconds (no client events needed)
+- [ ] Display: process count, memory, uptime, request rate, active connections
+- [ ] Uses beacon/debug.stats() for real BEAM metrics
+- [ ] Chart/sparkline rendering (simple ASCII or SVG)
+- [ ] Test: dashboard updates without any client interaction
+
+##### 63.4 Kanban Board
+- [ ] Drag-and-drop cards between columns (Todo/Doing/Done)
+- [ ] on_dragstart, on_dragover, on_drop events
+- [ ] Shared store for board state, multi-user concurrent edits
+- [ ] Optimistic reorder (LOCAL) with server confirmation (MODEL)
+- [ ] Test: two users move cards simultaneously, both see consistent state
+
+##### 63.5 Presence-Aware Chat
+- [ ] "Who's online" list per room (join/leave tracking)
+- [ ] "User is typing" indicator (ephemeral state, not stored)
+- [ ] Presence uses PubSub — join broadcasts to room, leave on disconnect
+- [ ] Runtime cleanup on disconnect notifies presence
+- [ ] Test: user joins room → appears in presence list, disconnects → disappears
+
+#### Milestone 64: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
 
-#### Milestone 63: Streaming & Progressive Loading
+#### Milestone 65: Streaming & Progressive Loading
 > TODO: Streaming HTML responses, progressive hydration, lazy loading.
 
 ---
