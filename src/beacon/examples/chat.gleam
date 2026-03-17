@@ -1,7 +1,7 @@
 /// Multi-room chat — demonstrates:
 /// - Per-connection runtimes (each tab = own username/room)
 /// - Shared state via beacon/store (no FFI needed)
-/// - PubSub for broadcasting to other users
+/// - Dynamic PubSub subscriptions (only notified for your current room)
 /// - beacon.on_click, beacon.on_input — no decode_event
 
 import beacon
@@ -35,7 +35,7 @@ pub type Msg {
   SetUsername
   SendMessage
   SwitchRoom(String)
-  NewMessageBroadcast
+  RoomUpdated(String)
 }
 
 /// Initialize per-session model.
@@ -86,22 +86,24 @@ pub fn make_update(
                 room: model.current_room,
                 id: unique_int(),
               )
-            store.append(messages, model.current_room, message)
-            // Don't update visible_messages here — let NewMessageBroadcast
-            // handle it for ALL users (including the sender) to avoid duplicates.
+            // Per-key broadcast: only users in this room get notified
+            store.append_notify(messages, model.current_room, message, "room:")
             Model(..model, input_text: "")
           }
         }
       }
 
       SwitchRoom(room) ->
+        // Just update the model — beacon.subscriptions() automatically
+        // unsubscribes from the old room and subscribes to the new one
         Model(
           ..model,
           current_room: room,
           visible_messages: store.get_all(messages, room),
         )
 
-      NewMessageBroadcast ->
+      RoomUpdated(_topic) ->
+        // Only fired when YOUR current room has new messages
         Model(
           ..model,
           visible_messages: store.get_all(messages, model.current_room),
@@ -200,7 +202,13 @@ pub fn start() {
 
   beacon.app(init, make_update(messages), view)
   |> beacon.title("Beacon Chat")
-  |> beacon.watch_list(messages, fn() { NewMessageBroadcast })
+  |> beacon.subscriptions(fn(model: Model) {
+    // Only subscribe to the current room's topic.
+    // When user switches rooms, framework auto-unsubscribes from old,
+    // subscribes to new. Zero wasted notifications.
+    ["room:" <> model.current_room]
+  })
+  |> beacon.on_notify(fn(topic) { RoomUpdated(topic) })
   |> beacon.start(8080)
 }
 

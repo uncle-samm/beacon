@@ -63,10 +63,24 @@ pub fn new_list(name: String) -> ListStore(value) {
   ListStore(table: list_store_new_table(name), topic: "store:" <> name)
 }
 
-/// Append a value. Auto-broadcasts to watchers.
+/// Append a value. Auto-broadcasts to store-level watchers.
 pub fn append(store: ListStore(value), key: String, value: value) -> Nil {
   list_store_append_ffi(store.table, key, value)
   pubsub.broadcast(store.topic, Nil)
+}
+
+/// Append a value and broadcast to both the store topic AND a per-key topic.
+/// The per-key topic is `prefix <> key` (e.g., "room:" <> "general" = "room:general").
+/// Use with `beacon.subscriptions()` for dynamic per-key subscriptions.
+pub fn append_notify(
+  store: ListStore(value),
+  key: String,
+  value: value,
+  topic_prefix: String,
+) -> Nil {
+  list_store_append_ffi(store.table, key, value)
+  pubsub.broadcast(store.topic, Nil)
+  pubsub.broadcast(topic_prefix <> key, Nil)
 }
 
 /// Get all values for a key.
@@ -74,10 +88,21 @@ pub fn get_all(store: ListStore(value), key: String) -> List(value) {
   list_store_get_all_ffi(store.table, key)
 }
 
-/// Delete all values for a key. Auto-broadcasts to watchers.
+/// Delete all values for a key. Auto-broadcasts to store-level watchers.
 pub fn delete_all(store: ListStore(value), key: String) -> Nil {
   list_store_delete_ffi(store.table, key)
   pubsub.broadcast(store.topic, Nil)
+}
+
+/// Delete all values for a key and broadcast to a per-key topic.
+pub fn delete_all_notify(
+  store: ListStore(value),
+  key: String,
+  topic_prefix: String,
+) -> Nil {
+  list_store_delete_ffi(store.table, key)
+  pubsub.broadcast(store.topic, Nil)
+  pubsub.broadcast(topic_prefix <> key, Nil)
 }
 
 /// Get the PubSub topic for this list store (used by `beacon.watch`).

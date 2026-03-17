@@ -48,9 +48,6 @@ pub type AppConfig(model, msg) {
     /// Deserialize model from string (None = disabled).
     deserialize_model: Option(fn(String) -> Result(model, String)),
     /// PubSub topics each per-connection runtime subscribes to.
-    subscriptions: List(String),
-    /// Called when a PubSub notification arrives. Returns a Msg to dispatch.
-    on_pubsub: Option(fn() -> msg),
     /// Middleware pipeline (applied to all HTTP requests).
     middlewares: List(middleware.Middleware),
     /// Static file serving directory (e.g., "priv/static").
@@ -114,8 +111,6 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       decode_event: config.decode_event,
       serialize_model: config.serialize_model,
       deserialize_model: config.deserialize_model,
-      subscriptions: config.subscriptions,
-      on_pubsub: config.on_pubsub,
       route_patterns: config.route_patterns,
       on_route_change: config.on_route_change,
       server_fns: config.server_fns,

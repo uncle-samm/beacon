@@ -165,6 +165,7 @@ pub fn start() {
 
   beacon.app_with_local(make_init(shared), init_local, make_update(shared), view)
   |> beacon.title("Triple Counter")
-  |> beacon.watch(shared, fn() { SharedUpdated })
+  |> beacon.subscriptions(fn(_model) { ["store:shared_counter"] })
+  |> beacon.on_notify(fn(_topic) { SharedUpdated })
   |> beacon.start(8080)
 }

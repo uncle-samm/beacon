@@ -37,8 +37,6 @@ fn test_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     title: "Test App",
     serialize_model: option.None,
     deserialize_model: option.None,
-      subscriptions: [],
-      on_pubsub: option.None,
     middlewares: [],
     static_dir: option.None,
     route_patterns: [],

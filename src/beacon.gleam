@@ -16,7 +16,6 @@ import beacon/effect
 import beacon/element.{type Attr}
 import beacon/error
 import beacon/handler
-import beacon/store
 
 /// A node in the virtual DOM tree. Re-exported from `beacon/element`.
 pub type Node(msg) =
@@ -106,8 +105,6 @@ pub opaque type AppBuilder(model, msg) {
     secret_key: String,
     middlewares: List(middleware.Middleware),
     static_dir: Option(String),
-    subscriptions: List(String),
-    on_pubsub: Option(fn() -> msg),
     serialize_model: Option(fn(model) -> String),
     deserialize_model: Option(fn(String) -> Result(model, String)),
     /// For app_with_local: wraps model+local into a combined model type.
@@ -146,8 +143,6 @@ pub fn app(
     secret_key: generate_secret(),
     middlewares: [middleware.secure_headers()],
     static_dir: None,
-    subscriptions: [],
-    on_pubsub: None,
     serialize_model: None,
     deserialize_model: None,
     has_local: False,
@@ -176,8 +171,6 @@ pub fn app_with_effects(
     secret_key: generate_secret(),
     middlewares: [middleware.secure_headers()],
     static_dir: None,
-    subscriptions: [],
-    on_pubsub: None,
     serialize_model: None,
     deserialize_model: None,
     has_local: False,
@@ -227,8 +220,6 @@ pub fn app_with_local(
     secret_key: generate_secret(),
     middlewares: [middleware.secure_headers()],
     static_dir: None,
-    subscriptions: [],
-    on_pubsub: None,
     serialize_model: None,
     deserialize_model: None,
     has_local: True,
@@ -376,40 +367,6 @@ pub fn static_dir(
   AppBuilder(..builder, static_dir: Some(dir))
 }
 
-/// Subscribe to a PubSub topic. When a notification arrives,
-/// `on_notify` is called to produce a Msg for the update loop.
-pub fn subscribe(
-  builder: AppBuilder(model, msg),
-  topic: String,
-  on_notify: fn() -> msg,
-) -> AppBuilder(model, msg) {
-  AppBuilder(
-    ..builder,
-    subscriptions: list_append(builder.subscriptions, [topic]),
-    on_pubsub: Some(on_notify),
-  )
-}
-
-/// Watch a key-value store for changes. When any value is put or deleted,
-/// `on_change` is called to produce a Msg for the update loop.
-/// No manual PubSub wiring needed.
-pub fn watch(
-  builder: AppBuilder(model, msg),
-  s: store.Store(value),
-  on_change: fn() -> msg,
-) -> AppBuilder(model, msg) {
-  subscribe(builder, store.topic(s), on_change)
-}
-
-/// Watch a list store for changes. When values are appended or deleted,
-/// `on_change` is called to produce a Msg for the update loop.
-pub fn watch_list(
-  builder: AppBuilder(model, msg),
-  s: store.ListStore(value),
-  on_change: fn() -> msg,
-) -> AppBuilder(model, msg) {
-  subscribe(builder, store.list_topic(s), on_change)
-}
 
 /// Enable state recovery on WebSocket reconnect.
 pub fn with_state_recovery(
@@ -460,8 +417,6 @@ pub fn start(
       title: builder.title,
       serialize_model: builder.serialize_model,
       deserialize_model: builder.deserialize_model,
-      subscriptions: builder.subscriptions,
-      on_pubsub: builder.on_pubsub,
       middlewares: builder.middlewares,
       static_dir: builder.static_dir,
       route_patterns: builder.route_patterns,

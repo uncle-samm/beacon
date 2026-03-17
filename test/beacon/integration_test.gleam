@@ -44,8 +44,6 @@ fn test_app_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     title: "Integration Test",
     serialize_model: option.None,
     deserialize_model: option.None,
-      subscriptions: [],
-      on_pubsub: option.None,
     middlewares: [middleware.secure_headers()],
     static_dir: option.None,
     route_patterns: [],

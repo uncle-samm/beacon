@@ -135,12 +135,6 @@ pub type RuntimeConfig(model, msg) {
     /// Deserialize model from a string (from session token).
     /// Returns Ok(model) if valid, Error if the serialized data is stale/invalid.
     deserialize_model: option.Option(fn(String) -> Result(model, String)),
-    /// PubSub topics to subscribe to. When a notification arrives,
-    /// `on_pubsub` is called to produce a Msg for the update loop.
-    subscriptions: List(String),
-    /// Called when a PubSub notification arrives on a subscribed topic.
-    /// Returns the Msg to dispatch into the update loop.
-    on_pubsub: option.Option(fn() -> msg),
     /// Route patterns for URL matching.
     route_patterns: List(route.RoutePattern),
     /// Called when URL changes — produces a Msg for the update loop.
@@ -205,45 +199,21 @@ pub fn start(
     Ok(started) -> {
       log.info("beacon.runtime", "Runtime actor started successfully")
       let subject = started.data
-      // Subscribe to PubSub topics and forward notifications to the runtime
-      let has_static = case config.on_pubsub, config.subscriptions {
-        Some(_), [_, ..] -> True
-        _, _ -> False
-      }
-      let has_dynamic = option.is_some(config.dynamic_subscriptions)
-      case has_static || has_dynamic {
-        True -> {
-          let make_msg = case config.on_pubsub {
-            Some(f) -> f
-            None -> fn() {
-              // Dummy — dynamic subscriptions use on_notify instead
-              let assert Some(notify) = config.on_notify
-              notify("")
-            }
-          }
-          let initial_dynamic = case config.dynamic_subscriptions {
-            Some(compute) -> compute(initial_model)
-            None -> []
-          }
-          let all_topics =
-            list.append(config.subscriptions, initial_dynamic)
+      // Start dynamic PubSub listener if subscriptions are configured
+      case config.dynamic_subscriptions, config.on_notify {
+        Some(compute), Some(notify) -> {
+          let initial_topics = compute(initial_model)
           let listener =
-            start_pubsub_listener(
-              subject,
-              make_msg,
-              config.on_notify,
-              all_topics,
-            )
-          // Tell the runtime about the listener so it can manage dynamic subs
+            start_pubsub_listener(subject, notify, initial_topics)
           process.send(
             subject,
             SetListenerSubject(
               listener: listener,
-              initial_subs: initial_dynamic,
+              initial_subs: initial_topics,
             ),
           )
         }
-        False -> Nil
+        _, _ -> Nil
       }
       Ok(subject)
     }
@@ -1066,19 +1036,17 @@ type ListenerReceiveResult {
   ReceiveTimeout
 }
 
-/// Start the PubSub listener — spawns a process that handles both
-/// static subscriptions (backward compat) and dynamic subscription commands.
+/// Start the PubSub listener — spawns a process that handles
+/// dynamic subscription commands and forwards notifications.
 /// Returns a Subject for sending commands to the listener.
 fn start_pubsub_listener(
   runtime_subject: Subject(RuntimeMessage(msg)),
-  make_msg: fn() -> msg,
-  on_notify: option.Option(fn(String) -> msg),
+  on_notify: fn(String) -> msg,
   topics: List(String),
 ) -> Subject(ListenerCommand) {
   let command_subject = process.new_subject()
   let _ =
     process.spawn(fn() {
-      // Subscribe to initial static topics
       list.each(topics, pubsub.subscribe)
       log.debug(
         "beacon.subscription",
@@ -1086,8 +1054,7 @@ fn start_pubsub_listener(
           <> int.to_string(list.length(topics))
           <> " initial topics",
       )
-      // Enter receive loop
-      listener_loop(runtime_subject, command_subject, make_msg, on_notify)
+      listener_loop(runtime_subject, command_subject, on_notify)
     })
   command_subject
 }
@@ -1096,35 +1063,30 @@ fn start_pubsub_listener(
 fn listener_loop(
   runtime_subject: Subject(RuntimeMessage(msg)),
   command_subject: Subject(ListenerCommand),
-  make_msg: fn() -> msg,
-  on_notify: option.Option(fn(String) -> msg),
+  on_notify: fn(String) -> msg,
 ) -> Nil {
   case receive_with_commands(command_subject, 60_000) {
     CommandReceived(SubscribeTo(topic)) -> {
       pubsub.subscribe(topic)
       log.debug("beacon.subscription", "Subscribed to: " <> topic)
-      listener_loop(runtime_subject, command_subject, make_msg, on_notify)
+      listener_loop(runtime_subject, command_subject, on_notify)
     }
     CommandReceived(UnsubscribeFrom(topic)) -> {
       pubsub.unsubscribe(topic)
       log.debug("beacon.subscription", "Unsubscribed from: " <> topic)
-      listener_loop(runtime_subject, command_subject, make_msg, on_notify)
+      listener_loop(runtime_subject, command_subject, on_notify)
     }
     CommandReceived(ShutdownListener) -> {
       log.info("beacon.subscription", "Listener shutting down")
       Nil
     }
     NotificationReceived(topic) -> {
-      // Dispatch: use topic-aware handler if available, else static handler
-      let msg = case on_notify {
-        Some(notify_fn) -> notify_fn(topic)
-        None -> make_msg()
-      }
+      let msg = on_notify(topic)
       process.send(runtime_subject, EffectDispatched(message: msg))
-      listener_loop(runtime_subject, command_subject, make_msg, on_notify)
+      listener_loop(runtime_subject, command_subject, on_notify)
     }
     ReceiveTimeout -> {
-      listener_loop(runtime_subject, command_subject, make_msg, on_notify)
+      listener_loop(runtime_subject, command_subject, on_notify)
     }
   }
 }
