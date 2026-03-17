@@ -56,8 +56,11 @@ pub fn start_counter_app(
 
 /// Generate a unique port in the 12000-12999 range for parallel test execution.
 pub fn unique_port() -> Int {
-  12_000 + { erlang_unique_pos() % 1000 }
+  12_000 + { abs(erlang_unique_pos()) % 3000 }
 }
+
+@external(erlang, "erlang", "abs")
+fn abs(n: Int) -> Int
 
 @external(erlang, "erlang", "unique_integer")
 fn erlang_unique_pos() -> Int

@@ -304,8 +304,8 @@ pub fn sim_50_with_faults_test() {
   process.sleep(1000)
   let procs_after = metrics.snapshot_processes()
 
-  // At least 80% should succeed (some may fail due to port exhaustion)
-  let assert True = result.succeeded >= 40
+  // At least 95% should succeed
+  let assert True = result.succeeded >= 48
   // No process leak
   let assert True = { procs_after - procs_before } < 50
 
