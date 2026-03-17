@@ -275,6 +275,71 @@ function attachEvents() {
       t = t.parentNode;
     }
   };
+  appRoot.onkeydown = function(e) {
+    var t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-keydown")) {
+        eventClock++;
+        send({ type: "event", name: "keydown", handler_id: t.getAttribute("data-beacon-event-keydown"), data: JSON.stringify({ value: e.key }), target_path: getPath(t), clock: eventClock });
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.ondragstart = function(e) {
+    var t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-dragstart")) {
+        var dragId = t.getAttribute("data-drag-id") || "";
+        e.dataTransfer.setData("text/plain", dragId);
+        e.dataTransfer.effectAllowed = "move";
+        setTimeout(function() { t.style.opacity = "0.4"; }, 0);
+        eventClock++;
+        send({ type: "event", name: "dragstart", handler_id: t.getAttribute("data-beacon-event-dragstart"), data: JSON.stringify({ value: dragId }), target_path: getPath(t), clock: eventClock });
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.ondragend = function() {
+    appRoot.querySelectorAll("[draggable]").forEach(function(el) { el.style.opacity = "1"; });
+  };
+  appRoot.ondragover = function(e) {
+    var t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-drop")) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        t.style.outline = "2px dashed #2196F3";
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.ondragleave = function(e) {
+    var t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-drop")) {
+        if (!t.contains(e.relatedTarget)) { t.style.outline = ""; }
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.ondrop = function(e) {
+    var t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-drop")) {
+        e.preventDefault();
+        t.style.outline = "";
+        var dragId = e.dataTransfer.getData("text/plain");
+        eventClock++;
+        send({ type: "event", name: "drop", handler_id: t.getAttribute("data-beacon-event-drop"), data: JSON.stringify({ value: dragId }), target_path: getPath(t), clock: eventClock });
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
 }
 
 function getPath(node) {
