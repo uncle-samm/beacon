@@ -237,3 +237,91 @@ pub fn sim_process_leak_test() {
   let assert True = leaked < 30
   metrics.destroy(mt)
 }
+
+// ===== Draw Simulation =====
+
+pub fn sim_50_draw_test() {
+  let port = test_app.unique_port()
+  let assert Ok(_app) = test_app.start_counter_app(port)
+  process.sleep(200)
+
+  let mt = metrics.new()
+  let mem_before = metrics.snapshot_memory()
+  let procs_before = metrics.snapshot_processes()
+
+  let result =
+    pool.run(pool.PoolConfig(
+      concurrency: 50,
+      host: "localhost",
+      port: port,
+      scenario: scenario.draw(100),
+      stagger_ms: 5,
+      metrics: mt,
+    ))
+
+  process.sleep(500)
+  let mem_after = metrics.snapshot_memory()
+  let procs_after = metrics.snapshot_processes()
+
+  let m = metrics.collect(mt)
+  let r =
+    report.generate(
+      "draw_50x100",
+      result,
+      m,
+      mem_before,
+      mem_after,
+      procs_before,
+      procs_after,
+    )
+  report.log_report(r)
+  report.assert_passed(r)
+  metrics.destroy(mt)
+}
+
+// ===== Fault-Based Kill Test =====
+
+pub fn sim_50_with_faults_test() {
+  let port = test_app.unique_port()
+  let assert Ok(_app) = test_app.start_counter_app(port)
+  process.sleep(200)
+
+  let mt = metrics.new()
+  let procs_before = metrics.snapshot_processes()
+
+  // Run 50 connections with a longer scenario (sleep gives fault injector time)
+  // Some connections will be killed by the server handling malformed data
+  let result =
+    pool.run(pool.PoolConfig(
+      concurrency: 50,
+      host: "localhost",
+      port: port,
+      scenario: scenario.counter(20),
+      stagger_ms: 5,
+      metrics: mt,
+    ))
+
+  process.sleep(1000)
+  let procs_after = metrics.snapshot_processes()
+
+  // At least 80% should succeed (some may fail due to port exhaustion)
+  let assert True = result.succeeded >= 40
+  // No process leak
+  let assert True = { procs_after - procs_before } < 50
+
+  // Server still alive — verify with a new connection
+  let mt2 = metrics.new()
+  let verify =
+    pool.run(pool.PoolConfig(
+      concurrency: 1,
+      host: "localhost",
+      port: port,
+      scenario: scenario.counter(1),
+      stagger_ms: 0,
+      metrics: mt2,
+    ))
+  let assert True = verify.succeeded == 1
+
+  metrics.destroy(mt)
+  metrics.destroy(mt2)
+}

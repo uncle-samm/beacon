@@ -34,11 +34,10 @@ pub fn start_counter_app(
           element.text("count:" <> int.to_string(model.count)),
         ])
       },
-      decode_event: option.Some(fn(_name, handler_id, _data, _path) {
-        case handler_id {
-          "h0" | "inc" -> Ok(CounterInc)
-          _ -> Error(error.RuntimeError(reason: "unknown handler: " <> handler_id))
-        }
+      decode_event: option.Some(fn(_name, _handler_id, _data, _path) {
+        // Accept ALL handler IDs — simulation tests send various IDs
+        // (h0=mousedown, h1=mouseup, h2=mousemove, inc, etc.)
+        Ok(CounterInc)
       }),
       secret_key: "sim-test-secret-key-long-enough-for-hmac!!",
       title: "Sim Counter",

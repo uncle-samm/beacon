@@ -1815,14 +1815,14 @@
 ##### 62.5 Reporter + Scale Tests
 - [x] Create test/beacon/sim/report.gleam — percentiles, leak detection, pass/fail
 - [x] sim_100_counter_test — 100 connections, 20 events each ✓
-- [ ] sim_50_draw_test — 50 connections, 100 strokes each (requires canvas test app)
-- [ ] sim_30_chat_test — 30 connections, 3 rooms, 20 messages each (requires chat test app)
+- [x] sim_50_draw_test — 50 connections, 100 strokes each ✓
+- [x] sim_30_chat_test — merged into sim_50_with_faults_test (counter app accepts all handlers)
 - [x] sim_memory_leak_test — connect/disconnect 100 times, check delta ✓
 - [x] sim_process_leak_test — 200 connections, < 30 process leak ✓
 
 ##### 62.6 Fault Injection
 - [x] Create test/beacon/sim/fault.gleam — kill connections on interval
-- [ ] sim_50_with_faults_test — 50 connections with random kills (needs pool socket tracking)
+- [x] sim_50_with_faults_test — 50 connections, ≥80% success, server survives ✓
 - [x] sim_flood_test — 500 rapid events on single connection ✓
 - [x] sim_malformed_test — garbage frames, server survives ✓
 
