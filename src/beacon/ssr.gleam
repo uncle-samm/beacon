@@ -219,11 +219,17 @@ fn build_html_document(
 }
 
 /// Get the current client JS filename from the build manifest.
-/// Falls back to "beacon_client.js" if no manifest exists.
+/// The manifest is created by `gleam run -m beacon/build`.
 fn client_js_filename() -> String {
   case simplifile.read("priv/static/beacon_client.manifest") {
     Ok(name) -> string.trim(name)
-    Error(_) -> "beacon_client.js"
+    Error(_) -> {
+      log.warning(
+        "beacon.ssr",
+        "No beacon_client.manifest found — run `gleam run -m beacon/build`",
+      )
+      "beacon_client.js"
+    }
   }
 }
 

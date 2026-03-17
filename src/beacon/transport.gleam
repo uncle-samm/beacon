@@ -366,7 +366,7 @@ pub fn create_handler(
   let core_handler = fn(req: Request(mist.Connection)) {
     case request.path_segments(req) {
       ["ws"] -> handle_websocket(req, config)
-      ["beacon.js"] | ["beacon_client.js"] -> serve_client_js()
+      ["beacon_client.js"] -> serve_client_js()
       ["health"] -> {
         response.new(200)
         |> response.set_header("content-type", "application/json")
@@ -606,17 +606,29 @@ fn default_page_html() -> String {
 fn get_client_js_filename() -> String {
   case simplifile.read("priv/static/beacon_client.manifest") {
     Ok(name) -> string.trim(name)
-    Error(_) -> "beacon_client.js"
+    Error(_) -> {
+      log.warning(
+        "beacon.transport",
+        "No beacon_client.manifest — run `gleam run -m beacon/build`",
+      )
+      "beacon_client.js"
+    }
   }
 }
 
 /// Serve the compiled Gleam-to-JS client runtime bundle.
-/// Falls back to a "not built yet" message if the bundle doesn't exist.
+/// Requires `gleam run -m beacon/build` to have been run first.
 fn serve_client_js() -> response.Response(mist.ResponseData) {
-  // Try hashed filename from manifest first, fallback to plain name
   let filename = case simplifile.read("priv/static/beacon_client.manifest") {
     Ok(name) -> string.trim(name)
-    Error(_) -> "beacon_client.js"
+    Error(err) -> {
+      log.error(
+        "beacon.transport",
+        "No beacon_client.manifest: " <> string.inspect(err)
+          <> " — run `gleam run -m beacon/build`",
+      )
+      "beacon_client_missing.js"
+    }
   }
   serve_js_file("priv/static/" <> filename)
 }
@@ -641,33 +653,19 @@ fn serve_js_file(path: String) -> response.Response(mist.ResponseData) {
       )
       |> response.set_body(mist.Bytes(bytes_tree.from_string(contents)))
     }
-    Error(_) -> {
-      // Fallback: serve the standalone beacon.js (server-only runtime)
-      log.info(
+    Error(err) -> {
+      log.error(
         "beacon.transport",
-        "Compiled client JS not found, serving standalone fallback",
+        "Client JS not found: " <> string.inspect(err)
+          <> " — run `gleam run -m beacon/build` to compile client JS",
       )
-      case simplifile.read("priv/static/beacon.js") {
-        Ok(fallback) ->
-          response.new(200)
-          |> response.set_header(
-            "content-type",
-            "application/javascript; charset=utf-8",
-          )
-          |> response.set_body(
-            mist.Bytes(bytes_tree.from_string(fallback)),
-          )
-        Error(_) ->
-          // Last resort: serve embedded minimal runtime
-          response.new(200)
-          |> response.set_header(
-            "content-type",
-            "application/javascript; charset=utf-8",
-          )
-          |> response.set_body(
-            mist.Bytes(bytes_tree.from_string(embedded_beacon_js())),
-          )
-      }
+      response.new(500)
+      |> response.set_header("content-type", "text/plain")
+      |> response.set_body(
+        mist.Bytes(bytes_tree.from_string(
+          "// beacon.js not found. Run: gleam run -m beacon/build\n",
+        )),
+      )
     }
   }
 }
@@ -706,8 +704,3 @@ pub fn start(
   }
 }
 
-/// Embedded minimal beacon.js — last-resort fallback when no file exists.
-/// Provides: boot, WebSocket, event delegation, DOM morph, heartbeat.
-fn embedded_beacon_js() -> String {
-  "(function(){\"use strict\";var ws=null,ht=null,ra=0,ar=null,hy=false,ec=0,cs=null,cd=[];function boot(s){ar=document.querySelector(s||\"#beacon-app\");if(!ar)return;hy=ar.childNodes.length>0;if(hy)ae();var u=(location.protocol===\"https:\"?\"wss://\":\"ws://\")+location.host+\"/ws\";co(u)}function co(u){ws=new WebSocket(u);ws.onopen=function(){ra=0;sh();var t=ar?ar.getAttribute(\"data-beacon-token\")||\"\":\"\";se({type:\"join\",token:t})};ws.onmessage=function(e){hm(e.data)};ws.onclose=function(){ph();var d=Math.min(1e3*Math.pow(2,ra),3e4);ra++;setTimeout(function(){co(u)},d)};ws.onerror=function(e){console.error(\"[beacon] WS error:\",e)}}function se(m){if(ws&&ws.readyState===1)ws.send(JSON.stringify(m))}function sh(){ph();ht=setInterval(function(){se({type:\"heartbeat\"})},3e4)}function ph(){if(ht){clearInterval(ht);ht=null}}function hm(r){var m;try{m=JSON.parse(r)}catch(e){return}switch(m.type){case\"mount\":hmo(m.payload);break;case\"patch\":hp(m.payload);break;case\"navigate\":if(m.path&&m.path!==location.pathname+location.search){history.pushState(null,\"\",m.path);se({type:\"navigate\",path:m.path})}break;case\"reload\":location.reload();break;case\"heartbeat_ack\":break;case\"error\":console.error(\"[beacon]\",m.reason);break}}function hmo(p){if(!ar)return;if(hy){hy=false;try{var d=JSON.parse(p);if(d&&d.s){cs=d.s;cd=ed(d)}}catch(e){}ae();return}try{var d=JSON.parse(p);if(d&&d.s){cs=d.s;cd=ed(d);mi(ar,zs(cs,cd));ae();return}}catch(e){}mi(ar,p);ae()}function hp(p){if(!ar)return;try{var d=JSON.parse(p);if(Array.isArray(d)){for(var i=0;i<d.length;i++)ap(d[i]);ae();return}if(d&&d.s){cs=d.s;cd=ed(d);mi(ar,zs(cs,cd));ae();return}if(d&&cs){for(var k in d)if(k!==\"s\"){var idx=parseInt(k,10);if(!isNaN(idx))cd[idx]=d[k]}mi(ar,zs(cs,cd));ae();return}}catch(e){}mi(ar,p);ae()}function ed(d){var r=[],i=0;while(d.hasOwnProperty(String(i))){r.push(d[String(i)]);i++}return r}function zs(s,d){var h=\"\";for(var i=0;i<s.length;i++){h+=s[i];if(i<d.length)h+=d[i]}return h}function ap(p){var n=rn(p.path);if(!n)return;switch(p.op){case\"replace_text\":n.textContent=p.content;break;case\"replace_node\":var nn=cn(p.node);if(n.parentNode)n.parentNode.replaceChild(nn,n);break;case\"insert_child\":var nc=cn(p.node);n.insertBefore(nc,n.childNodes[p.index]||null);break;case\"remove_child\":var ch=n.childNodes[p.index];if(ch)n.removeChild(ch);break;case\"set_attr\":if(n.setAttribute)n.setAttribute(p.name,p.value);break;case\"remove_attr\":if(n.removeAttribute)n.removeAttribute(p.name);break;case\"set_event\":if(n.setAttribute)n.setAttribute(\"data-beacon-event-\"+p.event,p.handler);break;case\"remove_event\":if(n.removeAttribute)n.removeAttribute(\"data-beacon-event-\"+p.event);break}}function rn(p){var n=ar;for(var i=0;i<p.length;i++){if(!n||p[i]>=n.childNodes.length)return null;n=n.childNodes[p[i]]}return n}function cn(j){if(j.t===\"text\")return document.createTextNode(j.c);if(j.t===\"el\"){var el=document.createElement(j.tag);if(j.a)for(var i=0;i<j.a.length;i++){var a=j.a[i];if(a.t===\"attr\")el.setAttribute(a.n,a.v);else if(a.t===\"event\")el.setAttribute(\"data-beacon-event-\"+a.n,a.h)}if(j.ch)for(var i=0;i<j.ch.length;i++)el.appendChild(cn(j.ch[i]));return el}return document.createTextNode(\"\")}function mi(c,h){var f=document.activeElement,ft=f&&f.tagName,fn=f&&(f.getAttribute(\"name\")||f.getAttribute(\"data-beacon-event-input\")),ss=f&&f.selectionStart,sn=f&&f.selectionEnd,fv=f&&f.value;var t=document.createElement(\"template\");t.innerHTML=h;mc(c,t.content);if(ft===\"INPUT\"||ft===\"TEXTAREA\"||ft===\"SELECT\"){var r=null;if(fn)r=c.querySelector('[name=\"'+fn+'\"]')||c.querySelector('[data-beacon-event-input=\"'+fn+'\"]');if(r&&r!==document.activeElement){r.focus();if(typeof ss===\"number\"&&r.setSelectionRange)try{r.setSelectionRange(ss,sn)}catch(e){}if(fv!==undefined&&r.value!==fv)r.value=fv}}}function mc(o,n){var oc=o.firstChild,nc=n.firstChild;while(nc){if(!oc){o.appendChild(nc.cloneNode(true));nc=nc.nextSibling;continue}if(sn2(oc,nc)){mn(oc,nc);oc=oc.nextSibling;nc=nc.nextSibling;continue}var m=fm(oc.nextSibling,nc);if(m){while(oc&&oc!==m){var nx=oc.nextSibling;o.removeChild(oc);oc=nx}if(oc){mn(oc,nc);oc=oc.nextSibling}nc=nc.nextSibling;continue}o.insertBefore(nc.cloneNode(true),oc);nc=nc.nextSibling}while(oc){var nx=oc.nextSibling;o.removeChild(oc);oc=nx}}function mn(o,n){if(o.nodeType===3){if(o.textContent!==n.textContent)o.textContent=n.textContent;return}if(o.nodeType!==1)return;ma(o,n);if((o.tagName===\"INPUT\"||o.tagName===\"TEXTAREA\"||o.tagName===\"SELECT\")&&o===document.activeElement)return;mc(o,n)}function ma(o,n){for(var i=o.attributes.length-1;i>=0;i--)if(!n.hasAttribute(o.attributes[i].name))o.removeAttribute(o.attributes[i].name);for(var i=0;i<n.attributes.length;i++){var nm=n.attributes[i].name,v=n.attributes[i].value;if(o.getAttribute(nm)!==v)o.setAttribute(nm,v)}}function sn2(a,b){if(a.nodeType!==b.nodeType)return false;if(a.nodeType===3)return true;if(a.nodeType!==1)return false;if(a.tagName!==b.tagName)return false;if(a.id&&b.id)return a.id===b.id;return true}function fm(s,t){var c=s,k=5;while(c&&k>0){if(sn2(c,t))return c;c=c.nextSibling;k--}return null}function ae(){if(!ar)return;ar.onclick=function(e){var t=e.target;while(t&&t!==ar){if(t.hasAttribute&&t.hasAttribute(\"data-beacon-event-click\")){e.preventDefault();ec++;se({type:\"event\",name:\"click\",handler_id:t.getAttribute(\"data-beacon-event-click\"),data:\"{}\",target_path:gp(t),clock:ec});return}t=t.parentNode}};ar.oninput=function(e){var t=e.target;while(t&&t!==ar){if(t.hasAttribute&&t.hasAttribute(\"data-beacon-event-input\")){ec++;se({type:\"event\",name:\"input\",handler_id:t.getAttribute(\"data-beacon-event-input\"),data:JSON.stringify({value:t.value||\"\"}),target_path:gp(t),clock:ec});return}t=t.parentNode}};ar.onsubmit=function(e){var t=e.target;while(t&&t!==ar){if(t.hasAttribute&&t.hasAttribute(\"data-beacon-event-submit\")){e.preventDefault();ec++;se({type:\"event\",name:\"submit\",handler_id:t.getAttribute(\"data-beacon-event-submit\"),data:\"{}\",target_path:gp(t),clock:ec});return}t=t.parentNode}}}function gp(n){var p=[],c=n;while(c&&c!==ar){var pr=c.parentNode;if(pr){var ch=pr.childNodes;for(var i=0;i<ch.length;i++)if(ch[i]===c){p.unshift(i);break}}c=c.parentNode}return p.join(\".\")}document.addEventListener(\"click\",function(e){var a=e.target.closest&&e.target.closest(\"a[href]\");if(!a)return;if(a.hostname!==location.hostname)return;if(a.hasAttribute(\"data-beacon-external\"))return;if(a.target===\"_blank\")return;e.preventDefault();var p=a.pathname+a.search;if(p!==location.pathname+location.search){history.pushState(null,\"\",p);se({type:\"navigate\",path:p})}});window.addEventListener(\"popstate\",function(){se({type:\"navigate\",path:location.pathname+location.search})});if(document.readyState===\"loading\")document.addEventListener(\"DOMContentLoaded\",function(){boot()});else boot()})();"
-}
