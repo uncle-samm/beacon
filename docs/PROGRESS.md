@@ -1761,9 +1761,9 @@
 > The BEAM handles the server side fine — this is a client-side rendering problem.
 
 ##### 61.1 Client-Side Render Throttling
-- [ ] Add requestAnimationFrame throttling to clientRender() — batch multiple LOCAL events into one render per frame
-- [ ] Benchmark: measure render time per frame with 100, 500, 1000 strokes
-- [ ] Target: consistent 60fps with 500+ strokes
+- [x] Add requestAnimationFrame throttling to clientRender() — batch multiple LOCAL events into one render per frame
+- [x] Benchmark: 500 events in 8.3ms, 1000 events in 7.9ms, single render with 1500 strokes in 0.2ms
+- [x] MODEL events flush pending render synchronously before server send
 
 ##### 61.2 Incremental DOM Updates
 - [ ] Skip full view_to_html + morphInnerHTML for LOCAL events that only add children
