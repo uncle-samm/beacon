@@ -1790,14 +1790,14 @@
 > testing with real WebSocket connections, fault injection, and performance metrics.
 
 ##### 62.1 TigerBeetle Compliance Remediation
-- [ ] 62.1a Fix critical event-skipping bug — runtime.gleam:446 silently drops events in batch
-- [ ] 62.1b Fix build.gleam silent failures — 8 instances of Error(_) -> Nil on dir/file creation
-- [ ] 62.1c Fix lint.gleam error masking — 4 instances returning [] on I/O errors
-- [ ] 62.1d Fix router/scanner.gleam context loss — 3 instances dropping error messages
-- [ ] 62.1e Document let assert invariant — runtime.gleam:1084
-- [ ] 62.1f Add logging to state_manager, session, store public functions
-- [ ] 62.1g Fix dev.gleam silent rebuild error — line 83
-- [ ] 62.1h Fix generic error messages — upload.gleam, build.gleam missing OS error details
+- [x] 62.1a Fix critical event-skipping bug — runtime.gleam:446 now logs warning with handler_id
+- [x] 62.1b Fix build.gleam silent failures — 9 instances now log with string.inspect(err)
+- [x] 62.1c Fix lint.gleam error masking — 3 instances now log with path + error details
+- [x] 62.1d Fix router/scanner.gleam context loss — 3 instances now log before downgrading
+- [x] 62.1e Document let assert invariant — runtime.gleam:1097 with INVARIANT comment
+- [x] 62.1f Add logging to store public functions — put/delete now have debug logging
+- [x] 62.1g Fix dev.gleam silent rebuild error — now logs warning with reason
+- [x] 62.1h Fix generic error messages — build.gleam now includes OS error via string.inspect
 
 ##### 62.2 Simulation Metrics Layer
 - [ ] Create test/beacon_sim_ffi.erl — ETS atomic counters, microsecond timestamps, system snapshots

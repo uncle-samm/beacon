@@ -1,0 +1,123 @@
+/// Simulation metrics — ETS-backed atomic counters for cross-process
+/// metric accumulation. Any spawned test process can increment counters
+/// without locking. Latency samples are stored in an ETS bag table.
+
+import gleam/float
+import gleam/int
+import gleam/list
+
+/// Opaque handle to the metrics ETS tables (counters + latencies).
+pub type MetricsTable
+
+/// Collected simulation metrics.
+pub type SimMetrics {
+  SimMetrics(
+    events_sent: Int,
+    events_acked: Int,
+    events_failed: Int,
+    connections_opened: Int,
+    connections_closed: Int,
+    connections_failed: Int,
+    latencies_us: List(Int),
+  )
+}
+
+/// Create a new metrics table pair.
+pub fn new() -> MetricsTable {
+  new_metrics_ffi()
+}
+
+/// Atomically increment a counter by 1.
+pub fn increment(table: MetricsTable, key: String) -> Nil {
+  increment_ffi(table, key)
+}
+
+/// Record a latency sample in microseconds.
+pub fn record_latency(table: MetricsTable, latency_us: Int) -> Nil {
+  record_latency_ffi(table, latency_us)
+}
+
+/// Get monotonic time in microseconds (for latency measurement).
+pub fn now_us() -> Int {
+  monotonic_us_ffi()
+}
+
+/// Get current memory usage in bytes.
+pub fn snapshot_memory() -> Int {
+  snapshot_memory_ffi()
+}
+
+/// Get current process count.
+pub fn snapshot_processes() -> Int {
+  snapshot_processes_ffi()
+}
+
+/// Collect all metrics from the tables.
+pub fn collect(table: MetricsTable) -> SimMetrics {
+  let #(sent, acked, failed, opened, closed, conn_failed, latencies) =
+    collect_ffi(table)
+  SimMetrics(
+    events_sent: sent,
+    events_acked: acked,
+    events_failed: failed,
+    connections_opened: opened,
+    connections_closed: closed,
+    connections_failed: conn_failed,
+    latencies_us: latencies,
+  )
+}
+
+/// Destroy the metrics tables.
+pub fn destroy(table: MetricsTable) -> Nil {
+  destroy_ffi(table)
+}
+
+/// Calculate percentile from a list of values.
+/// p is 0.0-1.0 (e.g., 0.5 for p50, 0.99 for p99).
+pub fn percentile(values: List(Int), p: Float) -> Int {
+  case values {
+    [] -> 0
+    _ -> {
+      let sorted = list.sort(values, int.compare)
+      let len = list.length(sorted)
+      let idx_float = int.to_float(len - 1) *. p
+      let idx = float.truncate(idx_float)
+      let idx = case idx >= len {
+        True -> len - 1
+        False -> idx
+      }
+      case list.drop(sorted, idx) {
+        [val, ..] -> val
+        [] -> 0
+      }
+    }
+  }
+}
+
+// --- FFI ---
+
+@external(erlang, "beacon_sim_ffi", "new_metrics")
+fn new_metrics_ffi() -> MetricsTable
+
+@external(erlang, "beacon_sim_ffi", "increment")
+fn increment_ffi(table: MetricsTable, key: String) -> Nil
+
+@external(erlang, "beacon_sim_ffi", "record_latency")
+fn record_latency_ffi(table: MetricsTable, latency_us: Int) -> Nil
+
+@external(erlang, "beacon_sim_ffi", "collect")
+fn collect_ffi(
+  table: MetricsTable,
+) -> #(Int, Int, Int, Int, Int, Int, List(Int))
+
+@external(erlang, "beacon_sim_ffi", "destroy")
+fn destroy_ffi(table: MetricsTable) -> Nil
+
+@external(erlang, "beacon_sim_ffi", "monotonic_us")
+fn monotonic_us_ffi() -> Int
+
+@external(erlang, "beacon_sim_ffi", "snapshot_memory")
+fn snapshot_memory_ffi() -> Int
+
+@external(erlang, "beacon_sim_ffi", "snapshot_processes")
+fn snapshot_processes_ffi() -> Int
