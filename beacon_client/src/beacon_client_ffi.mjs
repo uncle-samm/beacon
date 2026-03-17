@@ -495,6 +495,79 @@ function attachEvents() {
       t = t.parentNode;
     }
   };
+  appRoot.ondragstart = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-dragstart")) {
+        const hid = t.getAttribute("data-beacon-event-dragstart");
+        const dragId = t.getAttribute("data-drag-id") || "";
+        e.dataTransfer.setData("text/plain", dragId);
+        e.dataTransfer.effectAllowed = "move";
+        // Add visual feedback
+        setTimeout(() => { t.style.opacity = "0.4"; }, 0);
+        eventClock++;
+        const data = JSON.stringify({ value: dragId });
+        const tp = getPath(t);
+        if (clientInitialized) {
+          const r = handleEventLocally(hid, data, "dragstart", tp, eventClock);
+          if (r === "send") send({ type: "event", name: "dragstart", handler_id: hid, data: data, target_path: tp, clock: eventClock });
+        } else {
+          send({ type: "event", name: "dragstart", handler_id: hid, data: data, target_path: tp, clock: eventClock });
+        }
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.ondragend = (e) => {
+    // Reset opacity on all draggable elements
+    appRoot.querySelectorAll("[draggable]").forEach(el => { el.style.opacity = "1"; });
+  };
+  appRoot.ondragover = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-dragover")) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        // Add drop target highlight
+        t.style.outline = "2px dashed #2196F3";
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.ondragleave = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-dragover")) {
+        t.style.outline = "";
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.ondrop = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-drop")) {
+        e.preventDefault();
+        t.style.outline = "";
+        const dragId = e.dataTransfer.getData("text/plain");
+        eventClock++;
+        const hid = t.getAttribute("data-beacon-event-drop");
+        const data = JSON.stringify({ value: dragId });
+        const tp = getPath(t);
+        if (clientInitialized) {
+          const r = handleEventLocally(hid, data, "drop", tp, eventClock);
+          if (r === "send") send({ type: "event", name: "drop", handler_id: hid, data: data, target_path: tp, clock: eventClock });
+        } else {
+          send({ type: "event", name: "drop", handler_id: hid, data: data, target_path: tp, clock: eventClock });
+        }
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
   appRoot.onkeydown = (e) => {
     let t = e.target;
     while (t && t !== appRoot) {

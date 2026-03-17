@@ -90,6 +90,25 @@ pub fn on_keydown(callback: fn(String) -> msg) -> Attr {
   element.EventAttr(event_name: "keydown", handler_id: id)
 }
 
+/// Attach a dragstart handler. The callback receives the element's `data-drag-id` value.
+/// Use with `html.attribute("draggable", "true")` and `html.attribute("data-drag-id", id)`.
+pub fn on_dragstart(callback: fn(String) -> msg) -> Attr {
+  let id = handler.register_parameterized(callback)
+  element.EventAttr(event_name: "dragstart", handler_id: id)
+}
+
+/// Attach a dragover handler. Automatically calls preventDefault to allow drops.
+pub fn on_dragover(msg: msg) -> Attr {
+  let id = handler.register_simple(msg)
+  element.EventAttr(event_name: "dragover", handler_id: id)
+}
+
+/// Attach a drop handler. The callback receives the dragged element's `data-drag-id`.
+pub fn on_drop(callback: fn(String) -> msg) -> Attr {
+  let id = handler.register_parameterized(callback)
+  element.EventAttr(event_name: "drop", handler_id: id)
+}
+
 /// Broadcast a PubSub notification to a topic.
 /// All runtimes subscribed to this topic will receive their `on_pubsub` message.
 pub fn broadcast(topic: String) -> Nil {
