@@ -424,8 +424,8 @@ pub fn sim_corrupt_data_resilience_test() {
 
   // Server survived all the corruption
   let assert True = verify.succeeded == 5
-  // Process leak should be near zero — corrupt connections must clean up
-  let assert True = r.processes_leaked < 10
+  // Zero process leak — corrupt connections MUST clean up completely
+  let assert True = r.processes_leaked == 0
 
   metrics.destroy(mt)
   metrics.destroy(mt2)
