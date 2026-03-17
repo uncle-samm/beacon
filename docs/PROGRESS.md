@@ -7,8 +7,8 @@
 
 ## Current Status
 
-**Active Milestone:** 63 — Server-Push & Stress Examples
-**Last Completed:** 62 — TigerStyle Compliance + Simulation Testing (451 tests)
+**Active Milestone:** 64 — CDP Verification of All Examples
+**Last Completed:** 63 — Server-Push & Stress Examples (453 tests)
 **Build Status:** GREEN (zero errors, zero warnings)
 **Test Status:** GREEN (441 passed, 0 failures)
 **Linter:** PASSING (zero violations)
@@ -1865,7 +1865,46 @@
 - [x] Typing indicator auto-clears after 2s (effect.after)
 - [x] Dynamic subscriptions for both room messages AND typing topics
 
-#### Milestone 64: Context System
+#### Milestone 64: CDP Verification of All Examples
+> Test every example via Chrome DevTools Protocol with full monitoring:
+> DOM mutations, console logs, network/WS traffic. Fix every bug found.
+
+##### 64.1 Snake CDP Test
+- [ ] Start snake, enter name, verify game renders
+- [ ] Arrow keys change direction, snake moves via server tick
+- [ ] Food collection increases score
+- [ ] Wall/self collision triggers Game Over
+- [ ] Restart works
+- [ ] No console errors, no unexpected DOM mutations
+
+##### 64.2 Dashboard CDP Test
+- [ ] Start dashboard, verify auto-refresh without interaction
+- [ ] Process count, memory, uptime update every second
+- [ ] Sparkline charts render and grow
+- [ ] No console errors, no memory leaks over 30 seconds
+
+##### 64.3 Kanban CDP Test
+- [ ] Start kanban, verify initial cards render
+- [ ] Add a new card → appears in Todo column
+- [ ] Click card → select it (blue border)
+- [ ] Click column → card moves there
+- [ ] Delete card works
+- [ ] No console errors
+
+##### 64.4 Chat CDP Test
+- [ ] Start chat, join as user, verify room renders
+- [ ] Send message → appears in chat
+- [ ] Switch rooms → messages change
+- [ ] Typing indicator appears when other tab types
+- [ ] Online users list updates
+- [ ] No console errors
+
+##### 64.5 Canvas CDP Test (regression)
+- [ ] Verify canvas still works after all framework changes
+- [ ] Draw strokes, verify SVG renders
+- [ ] Multi-tab sync still works
+
+#### Milestone 65: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
 
 #### Milestone 65: Streaming & Progressive Loading
