@@ -86,6 +86,26 @@ pub fn background_is_not_none_test() {
   let assert False = effect.is_none(eff)
 }
 
+pub fn every_dispatches_periodically_test() {
+  let subject = process.new_subject()
+  let eff = effect.every(50, fn() { 1 })
+  effect.perform(eff, fn(n) { process.send(subject, n) })
+  // Should receive at least 3 ticks in 200ms
+  let assert Ok(1) = process.receive(subject, 200)
+  let assert Ok(1) = process.receive(subject, 200)
+  let assert Ok(1) = process.receive(subject, 200)
+}
+
+pub fn after_dispatches_once_test() {
+  let subject = process.new_subject()
+  let eff = effect.after(50, fn() { 42 })
+  effect.perform(eff, fn(n) { process.send(subject, n) })
+  // Should receive exactly once after ~50ms
+  let assert Ok(42) = process.receive(subject, 200)
+  // Should NOT receive again
+  let assert Error(Nil) = process.receive(subject, 150)
+}
+
 // --- Mutable ref helpers using process dictionary ---
 // Used only in tests to capture side effects.
 

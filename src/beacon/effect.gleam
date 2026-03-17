@@ -83,6 +83,55 @@ pub fn background(callback: fn(fn(msg) -> Nil) -> Nil) -> Effect(msg) {
   ])
 }
 
+/// Create a periodic timer effect. Dispatches `make_msg()` every `interval_ms`.
+/// The timer runs in a separate BEAM process and continues until the runtime shuts down.
+///
+/// Reference: Phoenix LiveView `Process.send_after` in `handle_info`.
+///
+/// Example:
+/// ```gleam
+/// effect.every(150, fn() { Tick })  // game loop at ~7fps
+/// effect.every(1000, fn() { RefreshStats })  // dashboard update every second
+/// ```
+pub fn every(interval_ms: Int, make_msg: fn() -> msg) -> Effect(msg) {
+  Effect(callbacks: [
+    fn(dispatch) {
+      let _ =
+        process.spawn(fn() { timer_loop(interval_ms, make_msg, dispatch) })
+      Nil
+    },
+  ])
+}
+
+fn timer_loop(
+  interval_ms: Int,
+  make_msg: fn() -> msg,
+  dispatch: fn(msg) -> Nil,
+) -> Nil {
+  process.sleep(interval_ms)
+  dispatch(make_msg())
+  timer_loop(interval_ms, make_msg, dispatch)
+}
+
+/// Create a single delayed effect. Dispatches `make_msg()` once after `delay_ms`.
+///
+/// Example:
+/// ```gleam
+/// effect.after(3000, fn() { HideNotification })
+/// ```
+pub fn after(delay_ms: Int, make_msg: fn() -> msg) -> Effect(msg) {
+  Effect(callbacks: [
+    fn(dispatch) {
+      let _ =
+        process.spawn(fn() {
+          process.sleep(delay_ms)
+          dispatch(make_msg())
+        })
+      Nil
+    },
+  ])
+}
+
 /// Check if an effect has any callbacks to execute.
 pub fn is_none(effect: Effect(msg)) -> Bool {
   list.is_empty(effect.callbacks)
