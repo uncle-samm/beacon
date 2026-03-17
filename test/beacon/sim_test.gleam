@@ -378,6 +378,7 @@ pub fn sim_corrupt_data_resilience_test() {
   process.sleep(200)
 
   let mt = metrics.new()
+  let mem_before = metrics.snapshot_memory()
   let procs_before = metrics.snapshot_processes()
 
   // 20 connections all sending various corrupt data
@@ -391,14 +392,25 @@ pub fn sim_corrupt_data_resilience_test() {
       metrics: mt,
     ))
 
-  process.sleep(500)
+  // Allow cleanup — corrupt connections may take longer to close
+  process.sleep(2000)
   let procs_after = metrics.snapshot_processes()
+  let mem_after = metrics.snapshot_memory()
 
   let m = metrics.collect(mt)
-  let _ = result
-  let _ = m
+  let r =
+    report.generate(
+      "corrupt_data",
+      result,
+      m,
+      mem_before,
+      mem_after,
+      procs_before,
+      procs_after,
+    )
+  report.log_report(r)
 
-  // Verify server is still alive with a clean connection
+  // Verify server is still alive with clean connections
   let mt2 = metrics.new()
   let verify =
     pool.run(pool.PoolConfig(
@@ -412,8 +424,8 @@ pub fn sim_corrupt_data_resilience_test() {
 
   // Server survived all the corruption
   let assert True = verify.succeeded == 5
-  // No process leak
-  let assert True = { procs_after - procs_before } < 50
+  // Process leak should be near zero — corrupt connections must clean up
+  let assert True = r.processes_leaked < 10
 
   metrics.destroy(mt)
   metrics.destroy(mt2)
