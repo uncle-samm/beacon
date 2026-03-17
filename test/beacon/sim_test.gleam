@@ -325,3 +325,96 @@ pub fn sim_50_with_faults_test() {
   metrics.destroy(mt)
   metrics.destroy(mt2)
 }
+
+// ===== 1000 Connections =====
+
+pub fn sim_1000_connections_test() {
+  let port = test_app.unique_port()
+  let assert Ok(_app) = test_app.start_counter_app(port)
+  process.sleep(300)
+
+  let mt = metrics.new()
+  let mem_before = metrics.snapshot_memory()
+  let procs_before = metrics.snapshot_processes()
+
+  let result =
+    pool.run(pool.PoolConfig(
+      concurrency: 1000,
+      host: "localhost",
+      port: port,
+      scenario: scenario.counter(5),
+      stagger_ms: 1,
+      metrics: mt,
+    ))
+
+  process.sleep(2000)
+  let mem_after = metrics.snapshot_memory()
+  let procs_after = metrics.snapshot_processes()
+
+  let m = metrics.collect(mt)
+  let r =
+    report.generate(
+      "scale_1000",
+      result,
+      m,
+      mem_before,
+      mem_after,
+      procs_before,
+      procs_after,
+    )
+  report.log_report(r)
+  // At least 95% should succeed at 1000 connections
+  let assert True = result.succeeded >= 950
+  // Process leak < 50 after cleanup
+  let assert True = { procs_after - procs_before } < 50
+  metrics.destroy(mt)
+}
+
+// ===== Corruption Resilience =====
+
+pub fn sim_corrupt_data_resilience_test() {
+  let port = test_app.unique_port()
+  let assert Ok(_app) = test_app.start_counter_app(port)
+  process.sleep(200)
+
+  let mt = metrics.new()
+  let procs_before = metrics.snapshot_processes()
+
+  // 20 connections all sending various corrupt data
+  let result =
+    pool.run(pool.PoolConfig(
+      concurrency: 20,
+      host: "localhost",
+      port: port,
+      scenario: scenario.corrupt(),
+      stagger_ms: 10,
+      metrics: mt,
+    ))
+
+  process.sleep(500)
+  let procs_after = metrics.snapshot_processes()
+
+  let m = metrics.collect(mt)
+  let _ = result
+  let _ = m
+
+  // Verify server is still alive with a clean connection
+  let mt2 = metrics.new()
+  let verify =
+    pool.run(pool.PoolConfig(
+      concurrency: 5,
+      host: "localhost",
+      port: port,
+      scenario: scenario.counter(3),
+      stagger_ms: 0,
+      metrics: mt2,
+    ))
+
+  // Server survived all the corruption
+  let assert True = verify.succeeded == 5
+  // No process leak
+  let assert True = { procs_after - procs_before } < 50
+
+  metrics.destroy(mt)
+  metrics.destroy(mt2)
+}

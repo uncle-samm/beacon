@@ -113,6 +113,45 @@ fn generate_strokes(total: Int, i: Int, acc: List(Action)) -> List(Action) {
   }
 }
 
+/// Corruption scenario — sends various types of bad data.
+pub fn corrupt() -> Scenario {
+  Scenario(
+    name: "corrupt",
+    actions: [
+      Connect,
+      Join,
+      WaitForResponse(5000),
+      // Valid JSON but wrong structure
+      SendMalformed("{\"type\":\"garbage\",\"foo\":123}"),
+      // Partial JSON
+      SendMalformed("{\"type\":\"event\",\"name\":"),
+      // Empty string
+      SendMalformed(""),
+      // Binary noise
+      SendMalformed("\u{00}\u{ff}\u{fe}\u{01}\u{80}"),
+      // Enormous payload (10KB of junk)
+      SendMalformed(repeat_string("AAAAAAAAAA", 1000)),
+      // Valid event but handler doesn't exist
+      SendMalformed("{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"does_not_exist_999\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":999999}"),
+      // Valid event with corrupt data field
+      SendMalformed("{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"h0\",\"data\":\"NOT_JSON\",\"target_path\":\"0\",\"clock\":1}"),
+      // Negative clock
+      SendMalformed("{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"h0\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":-1}"),
+      // Send a valid event to prove connection still works after all that
+      SendEvent("h0", "{}"),
+      WaitForResponse(5000),
+      Disconnect,
+    ],
+  )
+}
+
+fn repeat_string(s: String, n: Int) -> String {
+  case n <= 0 {
+    True -> ""
+    False -> s <> repeat_string(s, n - 1)
+  }
+}
+
 /// Combine two scenarios sequentially (for the second, skip Connect/Join).
 pub fn combine(a: Scenario, b: Scenario) -> Scenario {
   Scenario(
