@@ -205,3 +205,35 @@ pub fn sim_flood_single_connection_test() {
   let assert True = m.events_sent == 500
   metrics.destroy(mt)
 }
+
+// ===== Process Leak Test =====
+
+pub fn sim_process_leak_test() {
+  let port = test_app.unique_port()
+  let assert Ok(_app) = test_app.start_counter_app(port)
+  process.sleep(200)
+
+  let mt = metrics.new()
+  let procs_before = metrics.snapshot_processes()
+
+  // Connect and disconnect 200 times
+  let result =
+    pool.run(pool.PoolConfig(
+      concurrency: 200,
+      host: "localhost",
+      port: port,
+      scenario: scenario.connect_disconnect(),
+      stagger_ms: 2,
+      metrics: mt,
+    ))
+
+  // Allow cleanup
+  process.sleep(2000)
+  let procs_after = metrics.snapshot_processes()
+
+  let assert True = result.succeeded > 0
+  // Process leak should be small (< 30 — allows for supervisor/transport overhead)
+  let leaked = procs_after - procs_before
+  let assert True = leaked < 30
+  metrics.destroy(mt)
+}
