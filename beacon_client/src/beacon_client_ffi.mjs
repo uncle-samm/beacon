@@ -132,8 +132,12 @@ function handleEventLocally(handlerId, eventData, eventName, targetPath, clock) 
       }
       return "send";  // no buffer, send single event
     } else {
-      // LOCAL event — buffer for potential replay, don't send
-      localEventBuffer.push({ name: eventName, handler_id: handlerId, data: eventData, target_path: targetPath, clock: clock });
+      // LOCAL event — buffer for potential replay, don't send.
+      // Cap buffer at 2000 events to prevent memory issues on very long drags.
+      // Older events are dropped — the server will still get the final MODEL state.
+      if (localEventBuffer.length < 2000) {
+        localEventBuffer.push({ name: eventName, handler_id: handlerId, data: eventData, target_path: targetPath, clock: clock });
+      }
       return "local";
     }
   } catch (e) {
