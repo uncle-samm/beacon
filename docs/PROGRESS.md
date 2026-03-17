@@ -7,8 +7,8 @@
 
 ## Current Status
 
-**Active Milestone:** 61 — Rendering Performance
-**Last Completed:** Dynamic PubSub Subscriptions + Canvas Example
+**Active Milestone:** 62 — TigerBeetle Compliance + Simulation Testing
+**Last Completed:** 61 — Rendering Performance (RAF throttle, SVG groups)
 **Build Status:** GREEN (zero errors, zero warnings)
 **Test Status:** GREEN (441 passed, 0 failures)
 **Linter:** PASSING (zero violations)
@@ -1785,7 +1785,48 @@
 - [ ] Or: render committed strokes as a background image, only SVG for pending strokes
 - [ ] Benchmark end-to-end: draw 500 strokes, measure total time and frame drops
 
-#### Milestone 62: Context System
+#### Milestone 62: TigerBeetle Compliance + Simulation Testing
+> Audit found 30+ TigerBeetle principle violations. Build full-system simulation
+> testing with real WebSocket connections, fault injection, and performance metrics.
+
+##### 62.1 TigerBeetle Compliance Remediation
+- [ ] 62.1a Fix critical event-skipping bug — runtime.gleam:446 silently drops events in batch
+- [ ] 62.1b Fix build.gleam silent failures — 8 instances of Error(_) -> Nil on dir/file creation
+- [ ] 62.1c Fix lint.gleam error masking — 4 instances returning [] on I/O errors
+- [ ] 62.1d Fix router/scanner.gleam context loss — 3 instances dropping error messages
+- [ ] 62.1e Document let assert invariant — runtime.gleam:1084
+- [ ] 62.1f Add logging to state_manager, session, store public functions
+- [ ] 62.1g Fix dev.gleam silent rebuild error — line 83
+- [ ] 62.1h Fix generic error messages — upload.gleam, build.gleam missing OS error details
+
+##### 62.2 Simulation Metrics Layer
+- [ ] Create test/beacon_sim_ffi.erl — ETS atomic counters, microsecond timestamps, system snapshots
+- [ ] Create test/beacon/sim/metrics.gleam — MetricsTable, SimMetrics types, increment/collect API
+
+##### 62.3 Scenario Engine
+- [ ] Create test/beacon/sim/scenario.gleam — Action type, Scenario type, predefined scenarios
+- [ ] Implement counter(n), draw(n_strokes), chat(room, n_msgs), reconnect(), chaos() scenarios
+
+##### 62.4 Test App Helper + Connection Pool
+- [ ] Create test/beacon/sim/test_app.gleam — start_counter_app(port), start_chat_app(port)
+- [ ] Create test/beacon/sim/pool.gleam — spawn N real WS connections, execute scenarios
+- [ ] First smoke test: sim_10_smoke_test — 10 connections, 10 events each
+
+##### 62.5 Reporter + Scale Tests
+- [ ] Create test/beacon/sim/report.gleam — percentiles, leak detection, pass/fail
+- [ ] sim_100_counter_test — 100 connections, p99 < 500ms
+- [ ] sim_50_draw_test — 50 connections, 100 strokes each
+- [ ] sim_30_chat_test — 30 connections, 3 rooms, 20 messages each
+- [ ] sim_memory_leak_test — connect/disconnect 100 times, check delta
+- [ ] sim_process_leak_test — 200 connections, check cleanup
+
+##### 62.6 Fault Injection
+- [ ] Create test/beacon/sim/fault.gleam — kill connections, malformed frames, event flood
+- [ ] sim_50_with_faults_test — 50 connections with random kills
+- [ ] sim_flood_test — 1000 rapid events on single connection
+- [ ] sim_malformed_test — garbage frames, server must not crash
+
+#### Milestone 63: Context System
 > TODO: Replace make_init/make_update factory pattern with framework-provided Context.
 
 #### Milestone 63: Streaming & Progressive Loading

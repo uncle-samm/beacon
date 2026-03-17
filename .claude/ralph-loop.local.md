@@ -1,10 +1,10 @@
 ---
 active: true
-iteration: 3
+iteration: 1
 session_id: 
 max_iterations: 200
-completion_promise: "BEACON_PERF_COMPLETE"
-started_at: "2026-03-17T08:31:48Z"
+completion_promise: "SIM_TESTING_COMPLETE"
+started_at: "2026-03-17T09:49:36Z"
 ---
 
-You are optimizing rendering performance for Beacon, a full-stack Gleam web framework. Read docs/PROGRESS.md Milestone 61 for the full task list. CRITICAL BOTTLENECK: every LOCAL mousemove event re-renders ALL SVG strokes client-side (500 strokes x 60fps = 30K element renders/sec). The BEAM server side is fine — this is a client-side rendering problem in beacon_client_ffi.mjs. TASKS: (1) Add requestAnimationFrame throttling to clientRender — batch LOCAL events into one render per frame. (2) Skip full view_to_html + morphInnerHTML for LOCAL events that only append children — append new SVG line directly. (3) Benchmark with 100/500/1000 strokes to measure improvements. (4) Coalesce consecutive same-handler LOCAL events in the buffer. (5) Optimize server patches — SVG attributes should be dynamic not static. Key files: beacon_client/src/beacon_client_ffi.mjs (clientRender, morphInnerHTML, handleEventLocally), src/beacon/view.gleam, src/beacon/template/rendered.gleam, examples/src/canvas.gleam. Verify with gleam build (zero warnings) AND gleam test (all pass). Commit and push after each optimization. Output BEACON_PERF_COMPLETE only when canvas drawing is smooth at 500+ strokes.
+You are implementing TigerBeetle compliance fixes and a full-system simulation testing framework for Beacon, a full-stack Gleam web framework. Read docs/PROGRESS.md Milestone 62 for the full task list. Read the plan at .claude/plans/bubbly-squishing-naur.md for detailed implementation guidance. IMPLEMENTATION ORDER: (1) Fix all TigerBeetle violations first (62.1a-h) — these hide bugs that simulation tests would find. (2) Build metrics layer (62.2). (3) Scenario engine (62.3). (4) Test app helper + connection pool (62.4). (5) Reporter + scale tests (62.5). (6) Fault injection (62.6). CRITICAL RULES: Always verify with gleam build (zero warnings) AND gleam test (all pass) after each change. Commit and push after each sub-milestone. Use existing patterns from test/beacon/integration_test.gleam (WS client via beacon_http_client_ffi.erl, dynamic ports, concurrent spawning). Use existing beacon/debug.gleam for metrics. Output SIM_TESTING_COMPLETE only when ALL tasks in Milestone 62 are checked off AND all simulation tests pass.

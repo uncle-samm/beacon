@@ -30,7 +30,7 @@ pub fn main() {
           log.info("beacon.build", "Using specified module: " <> arg)
           compile_module(arg, source)
         }
-        Error(_) -> log.error("beacon.build", "Cannot read file: " <> arg)
+        Error(err) -> log.error("beacon.build", "Cannot read file " <> arg <> ": " <> string.inspect(err))
       }
     }
     False -> {
@@ -98,11 +98,11 @@ fn create_temp_project(
   // Create directory structure
   case simplifile.create_directory_all(dir <> "/src/beacon") {
     Ok(Nil) -> Nil
-    Error(_) -> Nil
+    Error(err) -> log.error("beacon.build", "File operation failed: " <> string.inspect(err))
   }
   case simplifile.create_directory_all(dir <> "/src/beacon/template") {
     Ok(Nil) -> Nil
-    Error(_) -> Nil
+    Error(err) -> log.error("beacon.build", "File operation failed: " <> string.inspect(err))
   }
 
   // Write gleam.toml
@@ -110,7 +110,7 @@ fn create_temp_project(
     "name = \"beacon_client_app\"\nversion = \"0.1.0\"\ntarget = \"javascript\"\n\n[dependencies]\ngleam_stdlib = \">= 0.44.0 and < 2.0.0\"\ngleam_json = \">= 3.1.0 and < 4.0.0\"\n"
   case simplifile.write(dir <> "/gleam.toml", toml) {
     Ok(Nil) -> Nil
-    Error(_) -> Nil
+    Error(err) -> log.error("beacon.build", "File operation failed: " <> string.inspect(err))
   }
 
   // Find the beacon package root — works whether we're in the beacon project
@@ -135,7 +135,7 @@ fn create_temp_project(
   // Copy the client handler registry
   case simplifile.create_directory_all(dir <> "/src/beacon_client") {
     Ok(Nil) -> Nil
-    Error(_) -> Nil
+    Error(err) -> log.error("beacon.build", "File operation failed: " <> string.inspect(err))
   }
   copy_if_exists(
     beacon_root <> "/beacon_client/src/beacon_client/handler.gleam",
@@ -150,27 +150,27 @@ fn create_temp_project(
   let beacon_gleam = generate_client_beacon()
   case simplifile.write(dir <> "/src/beacon.gleam", beacon_gleam) {
     Ok(Nil) -> Nil
-    Error(_) -> Nil
+    Error(err) -> log.error("beacon.build", "File operation failed: " <> string.inspect(err))
   }
 
   // Write client-side store stub (no-op implementations for JS target)
   let store_stub = generate_client_store_stub()
   case simplifile.write(dir <> "/src/beacon/store.gleam", store_stub) {
     Ok(Nil) -> Nil
-    Error(_) -> Nil
+    Error(err) -> log.error("beacon.build", "File operation failed: " <> string.inspect(err))
   }
 
   // Write the user's module as the app
   case simplifile.write(dir <> "/src/app.gleam", rewrite_user_module(user_source)) {
     Ok(Nil) -> Nil
-    Error(_) -> Nil
+    Error(err) -> log.error("beacon.build", "File operation failed: " <> string.inspect(err))
   }
 
   // Generate the entry point that wires update+view to the client runtime
   let entry = generate_entry_point(analysis, user_source)
   case simplifile.write(dir <> "/src/beacon_app_entry.gleam", entry) {
     Ok(Nil) -> Nil
-    Error(_) -> Nil
+    Error(err) -> log.error("beacon.build", "File operation failed: " <> string.inspect(err))
   }
 
   Ok(Nil)
@@ -537,14 +537,14 @@ fn bundle_js() -> Result(Nil, String) {
   // Ensure priv/static exists
   case simplifile.create_directory_all("priv/static") {
     Ok(Nil) -> Nil
-    Error(_) -> Nil
+    Error(err) -> log.error("beacon.build", "File operation failed: " <> string.inspect(err))
   }
   // Create a tiny entry that imports both the FFI and user entry
   let entry_js =
     "import { initClientAfterBoot } from './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\ninitClientAfterBoot();\n"
   case simplifile.write("build/beacon_client_app/bundle_entry.mjs", entry_js) {
     Ok(Nil) -> Nil
-    Error(_) -> Nil
+    Error(err) -> log.error("beacon.build", "File operation failed: " <> string.inspect(err))
   }
   // Generate unique hash for cache busting
   let hash = run_command("date +%s | shasum | head -c 8")
@@ -562,7 +562,7 @@ fn bundle_js() -> Result(Nil, String) {
       // Write manifest so server knows the current filename
       case simplifile.write("priv/static/beacon_client.manifest", filename) {
         Ok(Nil) -> Nil
-        Error(_) -> Nil
+        Error(err) -> log.error("beacon.build", "Failed to write manifest: " <> string.inspect(err))
       }
       Ok(Nil)
     }
@@ -759,11 +759,11 @@ fn copy_if_exists(from: String, to: String) -> Nil {
     Ok(contents) -> {
       case simplifile.write(to, contents) {
         Ok(Nil) -> Nil
-        Error(_) -> Nil
+        Error(err) -> log.error("beacon.build", "Failed to write " <> to <> ": " <> string.inspect(err))
       }
     }
-    Error(_) -> {
-      log.warning("beacon.build", "Could not copy: " <> from)
+    Error(err) -> {
+      log.warning("beacon.build", "Could not copy " <> from <> ": " <> string.inspect(err))
       Nil
     }
   }

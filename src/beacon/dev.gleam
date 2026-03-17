@@ -80,7 +80,7 @@ fn handle_recompile() -> Nil {
       }
       case run_client_build() {
         Ok(Nil) -> log.info("beacon.dev", "Client JS rebuilt")
-        Error(_) -> Nil
+        Error(reason) -> log.warning("beacon.dev", "Client JS rebuild failed: " <> reason)
       }
       // Notify browsers to reload
       notify_browser_reload()

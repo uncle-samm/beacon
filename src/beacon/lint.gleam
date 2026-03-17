@@ -46,13 +46,16 @@ pub fn lint_directory(dir: String) -> List(Violation) {
                 False -> []
               }
             }
-            Error(_) -> []
+            Error(err) -> {
+              log.warning("beacon.lint", "Cannot stat " <> path <> ": " <> string.inspect(err))
+              []
+            }
           }
         })
       violations
     }
-    Error(_) -> {
-      log.warning("beacon.lint", "Cannot read directory: " <> dir)
+    Error(err) -> {
+      log.warning("beacon.lint", "Cannot read directory " <> dir <> ": " <> string.inspect(err))
       []
     }
   }
@@ -77,8 +80,8 @@ pub fn lint_source(file_path: String, source: String) -> List(Violation) {
       let logging_violations = check_public_functions_log(file_path, module)
       list.append(todo_violations, logging_violations)
     }
-    Error(_) -> {
-      // If we can't parse the file, that's a compiler issue, not a lint issue
+    Error(err) -> {
+      log.warning("beacon.lint", "Cannot parse " <> file_path <> ": " <> string.inspect(err))
       []
     }
   }

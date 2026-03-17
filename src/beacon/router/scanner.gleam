@@ -82,7 +82,10 @@ fn scan_directory(
               // Recurse into subdirectory
               case scan_directory(full_path, base_dir) {
                 Ok(sub_routes) -> Ok(sub_routes)
-                Error(_) -> Error(Nil)
+                Error(err) -> {
+                  log.warning("beacon.router.scanner", "Skipping " <> full_path <> ": " <> error.to_string(err))
+                  Error(Nil)
+                }
               }
             }
             Ok(False) -> {
@@ -91,13 +94,19 @@ fn scan_directory(
                 True -> {
                   case scan_file(full_path, base_dir) {
                     Ok(route) -> Ok([route])
-                    Error(_) -> Error(Nil)
+                    Error(err) -> {
+                      log.warning("beacon.router.scanner", "Skipping " <> full_path <> ": " <> error.to_string(err))
+                      Error(Nil)
+                    }
                   }
                 }
                 False -> Error(Nil)
               }
             }
-            Error(_) -> Error(Nil)
+            Error(err) -> {
+              log.warning("beacon.router.scanner", "Cannot stat " <> full_path <> ": " <> string.inspect(err))
+              Error(Nil)
+            }
           }
         })
       Ok(list.flatten(results))

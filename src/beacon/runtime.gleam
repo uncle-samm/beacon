@@ -443,7 +443,20 @@ fn handle_message(
                 )
               }
             }
-            Error(_) -> #(acc_state, idx + 1)
+            Error(err) -> {
+              log.warning(
+                "beacon.runtime",
+                "Event skipped in batch (idx "
+                  <> int.to_string(idx)
+                  <> "/"
+                  <> int.to_string(count)
+                  <> ", handler="
+                  <> handler_id
+                  <> "): "
+                  <> error.to_string(err),
+              )
+              #(acc_state, idx + 1)
+            }
           }
         })
       let _ = processed
@@ -1080,7 +1093,10 @@ fn start_pubsub_listener(
       )
       listener_loop(runtime_subject, command_subject, on_notify)
     })
-  // Wait for the listener to send us its command subject
+  // INVARIANT: The listener process was just spawned and MUST send its
+  // command_subject back immediately. If this times out (5s), the listener
+  // failed to start — a fatal configuration error. Crash is intentional:
+  // the runtime cannot function without its PubSub listener.
   let assert Ok(command_subject) =
     process.receive(reply_subject, 5000)
   command_subject

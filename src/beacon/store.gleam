@@ -29,12 +29,14 @@ pub fn get(store: Store(value), key: String) -> Result(value, Nil) {
 
 /// Set a value by key. Auto-broadcasts to watchers.
 pub fn put(store: Store(value), key: String, value: value) -> Nil {
+  log.debug("beacon.store", "put: " <> key)
   state_manager.ets_put(store.manager, key, value)
   pubsub.broadcast(store.topic, Nil)
 }
 
 /// Delete a value by key. Auto-broadcasts to watchers.
 pub fn delete(store: Store(value), key: String) -> Nil {
+  log.debug("beacon.store", "delete: " <> key)
   state_manager.ets_delete(store.manager, key)
   pubsub.broadcast(store.topic, Nil)
 }
