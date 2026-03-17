@@ -7,7 +7,7 @@
 
 ## Current Status
 
-**Active Milestone:** 62 — TigerBeetle Compliance + Simulation Testing
+**Active Milestone:** 62 — TigerStyle Compliance + Simulation Testing
 **Last Completed:** 61 — Rendering Performance (RAF throttle, SVG groups)
 **Build Status:** GREEN (zero errors, zero warnings)
 **Test Status:** GREEN (441 passed, 0 failures)
@@ -1785,11 +1785,11 @@
 - [ ] Or: render committed strokes as a background image, only SVG for pending strokes
 - [ ] Benchmark end-to-end: draw 500 strokes, measure total time and frame drops
 
-#### Milestone 62: TigerBeetle Compliance + Simulation Testing
+#### Milestone 62: TigerStyle Compliance + Simulation Testing
 > Audit found 30+ TigerBeetle principle violations. Build full-system simulation
 > testing with real WebSocket connections, fault injection, and performance metrics.
 
-##### 62.1 TigerBeetle Compliance Remediation
+##### 62.1 TigerStyle Compliance Remediation
 - [x] 62.1a Fix critical event-skipping bug — runtime.gleam:446 now logs warning with handler_id
 - [x] 62.1b Fix build.gleam silent failures — 9 instances now log with string.inspect(err)
 - [x] 62.1c Fix lint.gleam error masking — 3 instances now log with path + error details
