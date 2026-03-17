@@ -26,7 +26,7 @@ These are non-negotiable. Every contributor and tool (including AI) must follow 
 - Log at appropriate levels: `error` for failures, `warning` for unexpected-but-handled cases, `info` for state transitions, `debug` for detailed tracing.
 - In development, default to verbose logging. In production, allow configuration.
 
-### TigerBeetle Approach
+### TigerStyle (see [docs/TIGERSTYLE.md](docs/TIGERSTYLE.md) for full reference)
 
 - Deterministic, reproducible behavior is paramount.
 - Assertions are not optional — assert invariants aggressively. If something "can't happen," assert it. When it does happen, you'll know immediately instead of chasing a downstream symptom.
