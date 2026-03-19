@@ -158,6 +158,14 @@ fn repeat_string(s: String, n: Int) -> String {
   }
 }
 
+/// Connection churn DoS scenario — rapid open/close cycles to starve legitimate clients.
+/// Uses full WebSocket handshake + immediate disconnect.
+pub fn connection_churn(cycles: Int) -> Scenario {
+  let churn_actions = list.repeat([Connect, Sleep(50), Disconnect], cycles)
+    |> list.flatten
+  Scenario(name: "churn(" <> int.to_string(cycles) <> ")", actions: churn_actions)
+}
+
 /// Patch efficiency scenario: join (gets mount + model_sync), N increments each with response tracking.
 pub fn patch_efficiency(n_events: Int) -> Scenario {
   let events =

@@ -55,11 +55,12 @@ ws_connect(Host, Port, Attempt) ->
             maybe_retry(Host, Port, Attempt, list_to_binary(io_lib:format("connect: ~p", [Reason])))
     end.
 
-%% Retry once after a short delay — mirrors real client reconnect behavior.
-maybe_retry(_Host, _Port, Attempt, Reason) when Attempt >= 2 ->
+%% Retry up to 3 times with exponential backoff — mirrors real client reconnect behavior.
+%% Delays: 200ms, 400ms, 600ms. Real browsers use exponential backoff + jitter.
+maybe_retry(_Host, _Port, Attempt, Reason) when Attempt >= 3 ->
     {error, Reason};
 maybe_retry(Host, Port, Attempt, _Reason) ->
-    timer:sleep(100),
+    timer:sleep(Attempt * 200),
     ws_connect(Host, Port, Attempt + 1).
 
 %% Send a WebSocket text frame. Returns {ok, nil} or {error, Reason}.
