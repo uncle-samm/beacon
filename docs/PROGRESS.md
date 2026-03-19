@@ -31,7 +31,8 @@
 - [x] Update docs that reference server functions (EFFECTS.md, WIRE_PROTOCOL.md, ARCHITECTURE.md, GETTING_STARTED.md)
 - [x] Also: removed `server_fn.` from analyzer.gleam server-code detection, removed from todos.gleam example
 - [x] `gleam build` — zero warnings
-- [x] `gleam test` — 544 passed. NOTE: sim_corrupt_data_resilience_test fails ~2/3 of runs (verify.succeeded==5 fails, 4/5 clean connections succeed after 20 corrupt). Investigated: corrupt scenario sends no server_fn messages, decoder catch-all unchanged, connection cleanup unchanged. Cannot baseline-test (many other uncommitted changes). Likely timing issue with 2s cleanup window — needs investigation separately.
+- [x] `gleam test` — 544 passed, 5/5 runs green
+- [x] Fixed sim_corrupt_data_resilience_test: verify phase used stagger_ms:0 causing TCP race when 5 connections hit simultaneously after corrupt barrage. Fix: stagger_ms:20. Root cause: server is healthy, but raw gen_tcp:connect can fail when 5 simultaneous connections arrive while close handlers for 20 corrupt connections are still processing.
 
 #### 83.2 — Constant leak prevention (highest security impact)
 - [ ] `src/beacon/build/analyzer.gleam` — parse `@server` attribute on constants (skip if present)

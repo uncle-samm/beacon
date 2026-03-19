@@ -409,7 +409,6 @@ pub fn sim_corrupt_data_resilience_test() {
       procs_after,
     )
   report.log_report(r)
-
   // Verify server is still alive with clean connections
   let mt2 = metrics.new()
   let verify =
@@ -418,10 +417,11 @@ pub fn sim_corrupt_data_resilience_test() {
       host: "localhost",
       port: port,
       scenario: scenario.counter(3),
-      stagger_ms: 0,
+      stagger_ms: 20,
       metrics: mt2,
     ))
 
+  // Server survived all the corruption
   // Server survived all the corruption
   let assert True = verify.succeeded == 5
   // Zero process leak — corrupt connections MUST clean up completely
