@@ -417,7 +417,7 @@ pub fn sim_corrupt_data_resilience_test() {
       host: "localhost",
       port: port,
       scenario: scenario.counter(3),
-      stagger_ms: 0,
+      stagger_ms: 20,
       metrics: mt2,
     ))
 
