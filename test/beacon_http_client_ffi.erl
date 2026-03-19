@@ -20,6 +20,9 @@ http_get(Url) ->
 
 %% Open a real WebSocket connection via gen_tcp + HTTP upgrade handshake.
 ws_connect(Host, Port) ->
+    ws_connect(Host, Port, 1).
+
+ws_connect(Host, Port, Attempt) ->
     HostStr = binary_to_list(Host),
     case gen_tcp:connect(HostStr, Port, [binary, {active, false}, {packet, raw}], 5000) of
         {ok, Socket} ->
@@ -40,15 +43,24 @@ ws_connect(Host, Port) ->
                 {ok, Response} ->
                     case binary:match(Response, <<"101">>) of
                         {_, _} -> {ok, Socket};
-                        nomatch -> {error, <<"upgrade_failed">>}
+                        nomatch ->
+                            gen_tcp:close(Socket),
+                            maybe_retry(Host, Port, Attempt, <<"upgrade_failed">>)
                     end;
                 {error, Reason} ->
                     gen_tcp:close(Socket),
-                    {error, list_to_binary(io_lib:format("~p", [Reason]))}
+                    maybe_retry(Host, Port, Attempt, list_to_binary(io_lib:format("recv: ~p", [Reason])))
             end;
         {error, Reason} ->
-            {error, list_to_binary(io_lib:format("~p", [Reason]))}
+            maybe_retry(Host, Port, Attempt, list_to_binary(io_lib:format("connect: ~p", [Reason])))
     end.
+
+%% Retry once after a short delay — mirrors real client reconnect behavior.
+maybe_retry(_Host, _Port, Attempt, Reason) when Attempt >= 2 ->
+    {error, Reason};
+maybe_retry(Host, Port, Attempt, _Reason) ->
+    timer:sleep(100),
+    ws_connect(Host, Port, Attempt + 1).
 
 %% Send a WebSocket text frame. Returns {ok, nil} or {error, Reason}.
 ws_send(Socket, Payload) ->
