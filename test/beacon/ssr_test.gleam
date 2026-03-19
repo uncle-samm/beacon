@@ -3,6 +3,7 @@ import beacon/element
 import beacon/route
 import beacon/ssr
 import gleam/option
+import gleam/string
 
 // --- Test helpers ---
 
@@ -37,14 +38,23 @@ fn test_config() -> ssr.SsrConfig(TestModel, TestMsg) {
 
 pub fn render_page_produces_html_test() {
   let page = ssr.render_page(test_config())
-  let assert True = str_contains(page.html, "<!DOCTYPE html>")
-  let assert True = str_contains(page.html, "<html>")
-  let assert True = str_contains(page.html, "</html>")
+  // Verify doctype is at the very start of the HTML string
+  let assert True = string.starts_with(page.html, "<!DOCTYPE html>")
+  // Verify ORDER: <!DOCTYPE html> comes before <html> comes before </html>
+  let assert Ok(doctype_pos) = string_index_of(page.html, "<!DOCTYPE html>")
+  let assert Ok(html_open_pos) = string_index_of(page.html, "<html>")
+  let assert Ok(html_close_pos) = string_index_of(page.html, "</html>")
+  let assert True = doctype_pos < html_open_pos
+  let assert True = html_open_pos < html_close_pos
 }
 
 pub fn render_page_includes_view_content_test() {
   let page = ssr.render_page(test_config())
   let assert True = str_contains(page.html, "Hello, World!")
+  // Verify "Hello, World!" appears AFTER id="beacon-app" (content is inside the app root)
+  let assert Ok(app_pos) = string_index_of(page.html, "id=\"beacon-app\"")
+  let assert Ok(content_pos) = string_index_of(page.html, "Hello, World!")
+  let assert True = app_pos < content_pos
 }
 
 pub fn render_page_includes_title_test() {
@@ -67,8 +77,13 @@ pub fn render_page_includes_beacon_app_root_test() {
 pub fn render_page_includes_session_token_test() {
   let page = ssr.render_page(test_config())
   let assert True = str_contains(page.html, "data-beacon-token=\"")
-  // Token should be non-empty
-  let assert True = string_length(page.session_token) > 10
+  // Verify the token is actually valid by verifying it with the same secret
+  let assert Ok(_ts) =
+    ssr.verify_session_token(
+      page.session_token,
+      "test-secret-key-at-least-32-chars-long!!",
+      3600,
+    )
 }
 
 pub fn render_page_view_inside_app_root_test() {
@@ -88,7 +103,12 @@ pub fn create_session_token_not_empty_test() {
 pub fn verify_valid_token_test() {
   let secret = "my-secret-key-for-testing-purposes!!"
   let token = ssr.create_session_token(secret)
-  let assert Ok(_ts) = ssr.verify_session_token(token, secret, 3600)
+  let assert Ok(ts) = ssr.verify_session_token(token, secret, 3600)
+  // Assert the timestamp is recent — within the last 60 seconds
+  let now = current_system_time_seconds()
+  let age = now - ts
+  let assert True = age >= 0
+  let assert True = age < 60
 }
 
 pub fn verify_token_wrong_secret_test() {
@@ -161,3 +181,13 @@ fn string_length(s: String) -> Int {
 
 @external(erlang, "erlang", "byte_size")
 fn do_string_length(s: String) -> Int
+
+fn string_index_of(haystack: String, needle: String) -> Result(Int, Nil) {
+  do_string_index_of(haystack, needle)
+}
+
+@external(erlang, "beacon_test_ffi", "string_index_of")
+fn do_string_index_of(haystack: String, needle: String) -> Result(Int, Nil)
+
+@external(erlang, "beacon_test_ffi", "system_time_seconds")
+fn current_system_time_seconds() -> Int

@@ -1,79 +1,67 @@
 ---
 name: tigerstyle
-description: Run a TigerStyle compliance audit on the Beacon codebase. Finds error swallowing, missing logging, undocumented assertions, and banned patterns.
+description: Audit code for TigerBeetle/TigerStyle compliance — no error swallowing, log everything, assert invariants, no shortcuts, no fallbacks.
+user_invocable: true
 ---
 
 # TigerStyle Compliance Audit
 
-You are auditing the Beacon codebase against TigerStyle coding principles (see docs/TIGERSTYLE.md for the full reference).
+Run a TigerStyle compliance audit on the Beacon codebase (or a specific file).
 
-## Scope
+## Usage
 
-Audit `$ARGUMENTS` (or all of `src/beacon/` if no path given).
+- `/tigerstyle` — audit the full codebase
+- `/tigerstyle src/beacon/runtime.gleam` — audit a specific file
 
-## Checks to Run
+## What to Check
 
-### 1. Error Swallowing (CRITICAL)
+Read `docs/TIGERSTYLE.md` and `CLAUDE.md` for the full rules. Then scan the target code for violations:
 
-Search for these patterns — every one is a violation:
-
+### 1. No Error Swallowing
 - `Error(_) -> Nil` — error silently discarded
-- `Error(_) -> []` — error masked as empty list
-- `Error(_) -> Error(Nil)` — error context lost (original reason dropped)
-- `Error(_) -> default_value` without logging — silent fallback
-- `_ ->` catch-all in case expressions that could match errors
+- `Error(_) -> []` — error masked as empty result
+- `_ -> Nil` catch-all that hides failures
+- Any `case` arm that ignores the error variant without logging
 
-For each match, check: is there a `log.warning` or `log.error` call? If not, it's a violation.
+### 2. Log Everything
+- Public functions in transport/runtime/store/session should log on entry/exit/error
+- State transitions (connected, disconnected, updated) must be logged
+- Errors must be logged at `error` or `warning` level with context
 
-### 2. Missing Logging
+### 3. Proper Assertions
+- `let assert` must have a comment explaining why the invariant is safe
+- No `todo` or `panic` in shipped code
+- Custom error types should carry diagnostic context
 
-Check all public functions (`pub fn`) in these critical modules:
-- `src/beacon/runtime.gleam`
-- `src/beacon/transport.gleam`
-- `src/beacon/pubsub.gleam`
-- `src/beacon/store.gleam`
-- `src/beacon/state_manager.gleam`
-- `src/beacon/session.gleam`
+### 4. No Fallbacks
+- Never add fallback behavior unless the user explicitly approved it
+- If something fails, it fails loudly with a clear error
+- No "try X, if that fails try Y" patterns without user approval
 
-Each public function should have at least one `log.*` call (info, debug, warning, or error).
+### 5. No Shortcuts
+- No "quick fixes" that paper over the real problem
+- No backwards-compatibility hacks (renaming unused vars, re-exporting removed types)
+- Fix root causes, not symptoms
 
-### 3. Undocumented Assertions
-
-Find all `let assert` usages. Each MUST have a comment above it explaining:
-- What invariant is being asserted
-- Why it's guaranteed to hold
-
-### 4. Banned Patterns
-
-- `todo` in shipped code (src/, not test/)
-- `panic` in shipped code
-- Generic error messages without context (e.g., `"failed"` without saying what failed)
-
-### 5. Simulation Test Coverage
-
-Verify that `gleam test` passes and check the simulation test results:
-- Run `gleam test` and report pass/fail count
-- Check if any sim tests have loose thresholds (process leak > 0 allowed where it shouldn't be)
+### 6. No Error Swallowing in FFI
+- Check `.erl` files for `catch _:_ -> nil` patterns
+- Check `.mjs` files for empty `catch(e) {}` blocks
 
 ## Output Format
 
-For each violation:
+For each violation found, report:
 ```
-[SEVERITY] file:line — pattern_type
-  Code: <the offending line>
-  Fix: <what to change>
+[VIOLATION] file.gleam:42 — Error swallowed: Error(_) -> Nil
+  Context: function do_thing silently discards file write errors
+  Fix: log.warning("module", "Failed to write: " <> string.inspect(err))
 ```
 
-Severities: CRITICAL (error swallowing), HIGH (missing logging), MEDIUM (undocumented assert), LOW (generic message)
-
-End with a summary:
+At the end, summarize:
 ```
 TigerStyle Audit Results:
-  CRITICAL: N
-  HIGH: N
-  MEDIUM: N
-  LOW: N
-  Status: PASS / FAIL (FAIL if any CRITICAL)
+  Files scanned: N
+  Violations found: N
+  Critical (error swallowing): N
+  Warning (missing logging): N
+  Info (style suggestions): N
 ```
-
-If the codebase is clean, celebrate it. If not, offer to fix the violations.

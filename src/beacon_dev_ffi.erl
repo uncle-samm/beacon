@@ -47,7 +47,9 @@ do_hot_swap() ->
                     ModName = list_to_atom(filename:rootname(BeamFile)),
                     case code:load_file(ModName) of
                         {module, _} -> Acc + 1;
-                        _ -> Acc
+                        {error, Reason} ->
+                            logger:warning("[beacon.dev] Failed to hot-swap module ~p: ~p", [ModName, Reason]),
+                            Acc
                     end
                 end,
                 0,
@@ -88,7 +90,8 @@ get_mtime(File) ->
     case file:read_file_info(binary_to_list(File)) of
         {ok, Info} ->
             calendar:datetime_to_gregorian_seconds(element(6, Info));
-        _ ->
+        {error, Reason} ->
+            logger:warning("[beacon.dev] Failed to stat file ~s: ~p", [File, Reason]),
             0
     end.
 
@@ -107,9 +110,11 @@ notify_browser_reload() ->
     try pg:get_members(beacon_pg, <<"beacon:reload">>) of
         Pids ->
             [Pid ! {beacon_reload} || Pid <- Pids],
-            nil
+            {ok, nil}
     catch
-        _:_ -> nil
+        Class:Reason ->
+            logger:warning("[beacon.dev] notify_browser_reload failed: ~p:~p", [Class, Reason]),
+            {error, iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))}
     end.
 
 %% Check if a native file watcher (fswatch or inotifywait) is available.

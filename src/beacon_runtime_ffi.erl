@@ -1,5 +1,9 @@
 -module(beacon_runtime_ffi).
--export([rescue/1, store_redirect_target/1, get_redirect_target/0, try_load_codec_encoder/0]).
+-export([
+    rescue/1, store_redirect_target/1, get_redirect_target/0,
+    try_load_codec_encoder/0, try_load_codec_decoder/0,
+    try_load_substate_names/0, try_load_substate_encoder/1, try_load_flat_encoder/0
+]).
 
 %% Execute a function, catching any exception.
 %% Returns {ok, Result} on success, {error, Reason} on failure.
@@ -36,6 +40,85 @@ try_load_codec_encoder() ->
             case erlang:function_exported(beacon_codec, encode_model, 1) of
                 true ->
                     {ok, fun beacon_codec:encode_model/1};
+                false ->
+                    {error, nil}
+            end;
+        _ ->
+            {error, nil}
+    end.
+
+%% Auto-discover beacon_codec module and return its decode_model function.
+%% Returns {ok, Fun} if the module exists and exports decode_model/1,
+%% or {error, nil} if not found.
+try_load_codec_decoder() ->
+    case code:ensure_loaded(beacon_codec) of
+        {module, beacon_codec} ->
+            case erlang:function_exported(beacon_codec, decode_model, 1) of
+                true ->
+                    {ok, fun beacon_codec:decode_model/1};
+                false ->
+                    {error, nil}
+            end;
+        _ ->
+            {error, nil}
+    end.
+
+%% Load substate_names/0 from beacon_codec.
+%% Returns {ok, List(String)} or {error, nil}.
+try_load_substate_names() ->
+    case code:ensure_loaded(beacon_codec) of
+        {module, beacon_codec} ->
+            case erlang:function_exported(beacon_codec, substate_names, 0) of
+                true ->
+                    {ok, beacon_codec:substate_names()};
+                false ->
+                    {error, nil}
+            end;
+        _ ->
+            {error, nil}
+    end.
+
+%% Load encode_substate_<Name>/1 from beacon_codec.
+%% Name is a binary like <<"cards">>.
+%% Returns {ok, Fun} or {error, nil}.
+try_load_substate_encoder(Name) ->
+    case validate_atom_name(Name) of
+        ok ->
+            case code:ensure_loaded(beacon_codec) of
+                {module, beacon_codec} ->
+                    FnName = binary_to_atom(<<"encode_substate_", Name/binary>>, utf8),
+                    case erlang:function_exported(beacon_codec, FnName, 1) of
+                        true ->
+                            {ok, fun(Model) -> erlang:apply(beacon_codec, FnName, [Model]) end};
+                        false ->
+                            {error, nil}
+                    end;
+                _ ->
+                    {error, nil}
+            end;
+        {error, _} ->
+            {error, nil}
+    end.
+
+%% Validate that a name is safe for atom conversion.
+%% Max 255 bytes, alphanumeric + underscore + hyphen only (no spaces, no special chars).
+%% This prevents atom table exhaustion from arbitrary user-controlled input.
+validate_atom_name(Name) when byte_size(Name) > 255 ->
+    {error, <<"Name too long (max 255 bytes)">>};
+validate_atom_name(Name) ->
+    case re:run(Name, <<"^[a-zA-Z0-9_-]+$">>) of
+        {match, _} -> ok;
+        nomatch -> {error, <<"Invalid name: must be alphanumeric, underscore, or hyphen">>}
+    end.
+
+%% Load encode_flat_fields/1 from beacon_codec.
+%% Returns {ok, Fun} or {error, nil}.
+try_load_flat_encoder() ->
+    case code:ensure_loaded(beacon_codec) of
+        {module, beacon_codec} ->
+            case erlang:function_exported(beacon_codec, encode_flat_fields, 1) of
+                true ->
+                    {ok, fun beacon_codec:encode_flat_fields/1};
                 false ->
                     {error, nil}
             end;

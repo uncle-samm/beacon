@@ -148,6 +148,10 @@ pub fn secure_headers() -> Middleware {
       "permissions-policy",
       "camera=(), microphone=(), geolocation=()",
     )
+    |> response.set_header(
+      "content-security-policy",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:",
+    )
   }
 }
 
@@ -299,6 +303,97 @@ fn erlang_monotonic_time() -> Int
 
 @external(erlang, "zlib", "gzip")
 fn gzip_compress(data: BitArray) -> BitArray
+
+// ===== Route Scoping =====
+
+/// Apply middleware only when the request path starts with the given prefix.
+///
+/// ```gleam
+/// middleware.only("/admin", auth.require_auth(store))
+/// middleware.only("/api", middleware.rate_limit(limiter))
+/// ```
+pub fn only(prefix: String, mw: Middleware) -> Middleware {
+  fn(
+    req: Request(mist.Connection),
+    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
+  ) -> Response(mist.ResponseData) {
+    case string.starts_with(req.path, prefix) {
+      True -> mw(req, next)
+      False -> next(req)
+    }
+  }
+}
+
+/// Apply middleware only when the request path exactly matches.
+///
+/// ```gleam
+/// middleware.at("/healthz", middleware.skip_auth())
+/// ```
+pub fn at(path: String, mw: Middleware) -> Middleware {
+  fn(
+    req: Request(mist.Connection),
+    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
+  ) -> Response(mist.ResponseData) {
+    case req.path == path {
+      True -> mw(req, next)
+      False -> next(req)
+    }
+  }
+}
+
+/// Apply middleware to all paths EXCEPT those starting with the given prefix.
+/// Useful for skipping auth on public routes.
+///
+/// ```gleam
+/// middleware.except("/public", auth.require_auth(store))
+/// ```
+pub fn except(prefix: String, mw: Middleware) -> Middleware {
+  fn(
+    req: Request(mist.Connection),
+    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
+  ) -> Response(mist.ResponseData) {
+    case string.starts_with(req.path, prefix) {
+      True -> next(req)
+      False -> mw(req, next)
+    }
+  }
+}
+
+/// Apply middleware only for specific HTTP methods.
+///
+/// ```gleam
+/// middleware.methods([http.Post, http.Put], middleware.rate_limit(limiter))
+/// ```
+pub fn methods(allowed: List(http.Method), mw: Middleware) -> Middleware {
+  fn(
+    req: Request(mist.Connection),
+    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
+  ) -> Response(mist.ResponseData) {
+    case list.contains(allowed, req.method) {
+      True -> mw(req, next)
+      False -> next(req)
+    }
+  }
+}
+
+/// Group multiple middleware into one. All run in order on matching requests.
+///
+/// ```gleam
+/// middleware.only("/admin", middleware.group([
+///   auth.require_auth(store),
+///   auth.csrf_protection(store),
+///   middleware.rate_limit(limiter),
+/// ]))
+/// ```
+pub fn group(middlewares: List(Middleware)) -> Middleware {
+  fn(
+    req: Request(mist.Connection),
+    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
+  ) -> Response(mist.ResponseData) {
+    let handler = pipeline(middlewares, next)
+    handler(req)
+  }
+}
 
 /// Request context — a dictionary that middleware can attach data to.
 /// This is how middleware passes information (e.g., authenticated user)

@@ -29,8 +29,9 @@ pub fn element_with_text_child_test() {
 pub fn element_with_attribute_test() {
   let node = element.el("div", [element.attr("class", "box")], [])
   let r = view.render(node)
-  let assert ["<div class=\"box\"></div>"] = r.statics
-  let assert [] = r.dynamics
+  // Attribute values are DYNAMIC — so the attribute name/quotes are static
+  let assert ["<div class=\"", "\"></div>"] = r.statics
+  let assert ["box"] = r.dynamics
 }
 
 pub fn element_with_event_test() {
@@ -75,8 +76,8 @@ pub fn void_element_with_attrs_test() {
   let node =
     element.el("input", [element.attr("type", "text")], [])
   let r = view.render(node)
-  let assert ["<input type=\"text\">"] = r.statics
-  let assert [] = r.dynamics
+  let assert ["<input type=\"", "\">"] = r.statics
+  let assert ["text"] = r.dynamics
 }
 
 pub fn memo_node_transparent_test() {

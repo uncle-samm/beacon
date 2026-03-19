@@ -19,6 +19,12 @@ pub type SimMetrics {
     connections_closed: Int,
     connections_failed: Int,
     latencies_us: List(Int),
+    /// Wire efficiency tracking
+    bytes_sent: Int,
+    bytes_received: Int,
+    patches_received: Int,
+    model_syncs_received: Int,
+    mounts_received: Int,
   )
 }
 
@@ -30,6 +36,11 @@ pub fn new() -> MetricsTable {
 /// Atomically increment a counter by 1.
 pub fn increment(table: MetricsTable, key: String) -> Nil {
   increment_ffi(table, key)
+}
+
+/// Atomically increment a counter by N.
+pub fn increment_by(table: MetricsTable, key: String, amount: Int) -> Nil {
+  increment_by_ffi(table, key, amount)
 }
 
 /// Record a latency sample in microseconds.
@@ -54,7 +65,10 @@ pub fn snapshot_processes() -> Int {
 
 /// Collect all metrics from the tables.
 pub fn collect(table: MetricsTable) -> SimMetrics {
-  let #(sent, acked, failed, opened, closed, conn_failed, latencies) =
+  let #(
+    sent, acked, failed, opened, closed, conn_failed, latencies,
+    bytes_s, bytes_r, patches, syncs, mounts,
+  ) =
     collect_ffi(table)
   SimMetrics(
     events_sent: sent,
@@ -64,6 +78,11 @@ pub fn collect(table: MetricsTable) -> SimMetrics {
     connections_closed: closed,
     connections_failed: conn_failed,
     latencies_us: latencies,
+    bytes_sent: bytes_s,
+    bytes_received: bytes_r,
+    patches_received: patches,
+    model_syncs_received: syncs,
+    mounts_received: mounts,
   )
 }
 
@@ -102,13 +121,16 @@ fn new_metrics_ffi() -> MetricsTable
 @external(erlang, "beacon_sim_ffi", "increment")
 fn increment_ffi(table: MetricsTable, key: String) -> Nil
 
+@external(erlang, "beacon_sim_ffi", "increment_by")
+fn increment_by_ffi(table: MetricsTable, key: String, amount: Int) -> Nil
+
 @external(erlang, "beacon_sim_ffi", "record_latency")
 fn record_latency_ffi(table: MetricsTable, latency_us: Int) -> Nil
 
 @external(erlang, "beacon_sim_ffi", "collect")
 fn collect_ffi(
   table: MetricsTable,
-) -> #(Int, Int, Int, Int, Int, Int, List(Int))
+) -> #(Int, Int, Int, Int, Int, Int, List(Int), Int, Int, Int, Int, Int)
 
 @external(erlang, "beacon_sim_ffi", "destroy")
 fn destroy_ffi(table: MetricsTable) -> Nil

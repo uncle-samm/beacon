@@ -19,6 +19,7 @@ receive_with_commands(Subject, Timeout) ->
         {beacon_pubsub, Topic, _Msg} ->
             {notification_received, Topic};
         _Other ->
+            logger:debug("[beacon.subscription] Discarding unexpected message: ~p", [_Other]),
             receive_with_commands(Subject, Timeout)
     after
         Timeout ->

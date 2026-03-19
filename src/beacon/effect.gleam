@@ -83,8 +83,13 @@ pub fn background(callback: fn(fn(msg) -> Nil) -> Nil) -> Effect(msg) {
   ])
 }
 
+/// Maximum concurrent timers per runtime process.
+/// Prevents runaway timer creation from buggy update handlers.
+const max_timers = 10
+
 /// Create a periodic timer effect. Dispatches `make_msg()` every `interval_ms`.
 /// The timer runs in a separate BEAM process and continues until the runtime shuts down.
+/// Capped at 10 concurrent timers per runtime — additional timers are rejected with a warning.
 ///
 /// Reference: Phoenix LiveView `Process.send_after` in `handle_info`.
 ///
@@ -96,12 +101,35 @@ pub fn background(callback: fn(fn(msg) -> Nil) -> Nil) -> Effect(msg) {
 pub fn every(interval_ms: Int, make_msg: fn() -> msg) -> Effect(msg) {
   Effect(callbacks: [
     fn(dispatch) {
-      let _ =
-        process.spawn(fn() { timer_loop(interval_ms, make_msg, dispatch) })
-      Nil
+      let current = get_timer_count()
+      case current >= max_timers {
+        True -> {
+          log_timer_limit_warning(current)
+          Nil
+        }
+        False -> {
+          increment_timer_count()
+          let _ =
+            process.spawn(fn() { timer_loop(interval_ms, make_msg, dispatch) })
+          Nil
+        }
+      }
     },
   ])
 }
+
+/// Get the current timer count from the process dictionary.
+/// Effects execute inside the runtime process, so the count is per-runtime.
+@external(erlang, "beacon_effect_ffi", "get_timer_count")
+fn get_timer_count() -> Int
+
+/// Increment the timer count in the process dictionary.
+@external(erlang, "beacon_effect_ffi", "increment_timer_count")
+fn increment_timer_count() -> Nil
+
+/// Log a warning when the timer limit is reached.
+@external(erlang, "beacon_effect_ffi", "log_timer_limit_warning")
+fn log_timer_limit_warning(current: Int) -> Nil
 
 fn timer_loop(
   interval_ms: Int,

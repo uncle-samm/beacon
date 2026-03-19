@@ -3,9 +3,11 @@
 
 import beacon/log
 import beacon/sim/metrics.{type MetricsTable}
+import gleam/string
 import beacon/sim/scenario.{
-  type Action, type Scenario, AbruptDisconnect, Connect, Disconnect, Join,
-  SendEvent, SendMalformed, Sleep, WaitForResponse,
+  type Action, type Scenario, AbruptDisconnect, AssertResponseContains, Connect,
+  Disconnect, Join, SendEvent, SendMalformed, Sleep, WaitForModelSync,
+  WaitForPatch, WaitForResponse,
 }
 import gleam/erlang/process
 import gleam/int
@@ -216,9 +218,11 @@ fn execute_action(
             <> "\",\"data\":\""
             <> data
             <> "\",\"target_path\":\"0\",\"clock\":1}"
+          let msg_bytes = string.byte_size(event_msg)
           case ws_send(s, event_msg) {
             Ok(_) -> {
               metrics.increment(mt, "events_sent")
+              metrics.increment_by(mt, "bytes_sent", msg_bytes)
               let latency = metrics.now_us() - t0
               metrics.record_latency(mt, latency)
               Ok(Some(s))
@@ -237,14 +241,72 @@ fn execute_action(
       case socket {
         Some(s) -> {
           case ws_recv(s, timeout_ms) {
-            Ok(_payload) -> {
+            Ok(payload) -> {
               metrics.increment(mt, "events_acked")
+              track_response_type(mt, payload)
               Ok(Some(s))
             }
             Error(reason) -> Error(reason)
           }
         }
         None -> Error("No socket for WaitForResponse")
+      }
+    }
+
+    WaitForPatch(timeout_ms) -> {
+      case socket {
+        Some(s) -> {
+          case ws_recv(s, timeout_ms) {
+            Ok(payload) -> {
+              metrics.increment(mt, "events_acked")
+              track_response_type(mt, payload)
+              case string.contains(payload, "\"type\":\"patch\"") {
+                True -> Ok(Some(s))
+                False -> Error("Expected patch, got: " <> string.slice(payload, 0, 50))
+              }
+            }
+            Error(reason) -> Error(reason)
+          }
+        }
+        None -> Error("No socket for WaitForPatch")
+      }
+    }
+
+    WaitForModelSync(timeout_ms) -> {
+      case socket {
+        Some(s) -> {
+          case ws_recv(s, timeout_ms) {
+            Ok(payload) -> {
+              metrics.increment(mt, "events_acked")
+              track_response_type(mt, payload)
+              case string.contains(payload, "\"type\":\"model_sync\"") {
+                True -> Ok(Some(s))
+                False -> Error("Expected model_sync, got: " <> string.slice(payload, 0, 50))
+              }
+            }
+            Error(reason) -> Error(reason)
+          }
+        }
+        None -> Error("No socket for WaitForModelSync")
+      }
+    }
+
+    AssertResponseContains(timeout_ms, expected) -> {
+      case socket {
+        Some(s) -> {
+          case ws_recv(s, timeout_ms) {
+            Ok(payload) -> {
+              metrics.increment(mt, "events_acked")
+              track_response_type(mt, payload)
+              case string.contains(payload, expected) {
+                True -> Ok(Some(s))
+                False -> Error("Response missing '" <> expected <> "': " <> string.slice(payload, 0, 80))
+              }
+            }
+            Error(reason) -> Error(reason)
+          }
+        }
+        None -> Error("No socket for AssertResponseContains")
       }
     }
 
@@ -284,6 +346,33 @@ fn execute_action(
         None -> Ok(option_none())
       }
     }
+  }
+}
+
+/// Track response message type in metrics (patch/model_sync/mount/other).
+fn track_response_type(mt: MetricsTable, payload: String) -> Nil {
+  let bytes = string.byte_size(payload)
+  metrics.increment_by(mt, "bytes_received", bytes)
+  case string.contains(payload, "\"type\":\"patch\"") {
+    True -> {
+      metrics.increment(mt, "patches_received")
+      Nil
+    }
+    False ->
+      case string.contains(payload, "\"type\":\"model_sync\"") {
+        True -> {
+          metrics.increment(mt, "model_syncs_received")
+          Nil
+        }
+        False ->
+          case string.contains(payload, "\"type\":\"mount\"") {
+            True -> {
+              metrics.increment(mt, "mounts_received")
+              Nil
+            }
+            False -> Nil
+          }
+      }
   }
 }
 

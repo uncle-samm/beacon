@@ -80,10 +80,20 @@ pub fn secure_headers_sets_x_content_type_test() {
   let piped = middleware.pipeline([middleware.secure_headers()], handler)
   let req = make_request("GET", "/")
   let resp = piped(req)
+  // Verify ALL headers set by secure_headers()
   let assert Ok("nosniff") =
     response.get_header(resp, "x-content-type-options")
   let assert Ok("SAMEORIGIN") =
     response.get_header(resp, "x-frame-options")
+  let assert Ok("1; mode=block") =
+    response.get_header(resp, "x-xss-protection")
+  let assert Ok("strict-origin-when-cross-origin") =
+    response.get_header(resp, "referrer-policy")
+  let assert Ok("camera=(), microphone=(), geolocation=()") =
+    response.get_header(resp, "permissions-policy")
+  let assert Ok(
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:",
+  ) = response.get_header(resp, "content-security-policy")
 }
 
 // --- Request ID tests ---
@@ -261,6 +271,178 @@ fn unique_id() -> String {
 fn do_unique_id() -> String
 
 import beacon/rate_limit as beacon_rate_limit
+import gleam/http
+
+// --- Route scoping tests ---
+
+pub fn only_applies_to_matching_prefix_test() {
+  let handler = fn(_req) {
+    response.new(200)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+  }
+  // Middleware that adds a header — only on /admin/*
+  let tag_mw = fn(req, next) {
+    let resp = next(req)
+    response.set_header(resp, "x-auth", "checked")
+  }
+  let piped = middleware.pipeline([middleware.only("/admin", tag_mw)], handler)
+
+  // /admin/users → middleware runs
+  let resp = piped(make_request("GET", "/admin/users"))
+  let assert Ok("checked") = response.get_header(resp, "x-auth")
+
+  // /public → middleware skipped
+  let resp2 = piped(make_request("GET", "/public"))
+  let assert Error(Nil) = response.get_header(resp2, "x-auth")
+}
+
+pub fn only_short_circuits_on_matching_prefix_test() {
+  let handler = fn(_req) {
+    response.new(200)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+  }
+  // Auth middleware that blocks — only on /admin/*
+  let auth_mw = fn(_req, _next) {
+    response.new(401)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("unauthorized")))
+  }
+  let piped = middleware.pipeline([middleware.only("/admin", auth_mw)], handler)
+
+  // /admin/secret → blocked
+  let assert 401 = { piped(make_request("GET", "/admin/secret")) }.status
+  // /public → passes through
+  let assert 200 = { piped(make_request("GET", "/public")) }.status
+}
+
+pub fn at_matches_exact_path_test() {
+  let handler = fn(_req) {
+    response.new(200)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+  }
+  let tag_mw = fn(req, next) {
+    let resp = next(req)
+    response.set_header(resp, "x-hit", "yes")
+  }
+  let piped = middleware.pipeline([middleware.at("/healthz", tag_mw)], handler)
+
+  // Exact match → runs
+  let resp = piped(make_request("GET", "/healthz"))
+  let assert Ok("yes") = response.get_header(resp, "x-hit")
+
+  // Prefix match → does NOT run (at is exact)
+  let resp2 = piped(make_request("GET", "/healthz/detail"))
+  let assert Error(Nil) = response.get_header(resp2, "x-hit")
+
+  // Different path → does NOT run
+  let resp3 = piped(make_request("GET", "/api"))
+  let assert Error(Nil) = response.get_header(resp3, "x-hit")
+}
+
+pub fn except_skips_matching_prefix_test() {
+  let handler = fn(_req) {
+    response.new(200)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+  }
+  // Auth on everything EXCEPT /public
+  let auth_mw = fn(_req, _next) {
+    response.new(401)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("unauthorized")))
+  }
+  let piped = middleware.pipeline([middleware.except("/public", auth_mw)], handler)
+
+  // /public/page → auth skipped, passes through
+  let assert 200 = { piped(make_request("GET", "/public/page")) }.status
+  // /admin → auth applied, blocked
+  let assert 401 = { piped(make_request("GET", "/admin")) }.status
+}
+
+pub fn methods_filters_by_http_method_test() {
+  let handler = fn(_req) {
+    response.new(200)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+  }
+  // Rate limit only POST and PUT
+  let block_mw = fn(_req, _next) {
+    response.new(429)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("rate limited")))
+  }
+  let piped =
+    middleware.pipeline(
+      [middleware.methods([http.Post, http.Put], block_mw)],
+      handler,
+    )
+
+  // GET → passes through
+  let assert 200 = { piped(make_request("GET", "/api")) }.status
+  // POST → blocked
+  let assert 429 = { piped(make_request("POST", "/api")) }.status
+}
+
+pub fn group_chains_multiple_middleware_test() {
+  let handler = fn(_req) {
+    response.new(200)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+  }
+  let tag1 = fn(req, next) {
+    let resp = next(req)
+    response.set_header(resp, "x-one", "1")
+  }
+  let tag2 = fn(req, next) {
+    let resp = next(req)
+    response.set_header(resp, "x-two", "2")
+  }
+  // Group only runs on /admin
+  let piped =
+    middleware.pipeline(
+      [middleware.only("/admin", middleware.group([tag1, tag2]))],
+      handler,
+    )
+
+  // /admin → both headers added
+  let resp = piped(make_request("GET", "/admin/dash"))
+  let assert Ok("1") = response.get_header(resp, "x-one")
+  let assert Ok("2") = response.get_header(resp, "x-two")
+
+  // /other → neither header
+  let resp2 = piped(make_request("GET", "/other"))
+  let assert Error(Nil) = response.get_header(resp2, "x-one")
+  let assert Error(Nil) = response.get_header(resp2, "x-two")
+}
+
+pub fn composing_only_and_except_test() {
+  let handler = fn(_req) {
+    response.new(200)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+  }
+  let auth_mw = fn(_req, _next) {
+    response.new(401)
+    |> response.set_body(mist.Bytes(bytes_tree.from_string("unauthorized")))
+  }
+  let tag_mw = fn(req, next) {
+    let resp = next(req)
+    response.set_header(resp, "x-tagged", "yes")
+  }
+  // Auth on /api/* except /api/health, plus tagging on everything
+  let piped =
+    middleware.pipeline(
+      [
+        tag_mw,
+        middleware.only("/api", middleware.except("/api/health", auth_mw)),
+      ],
+      handler,
+    )
+
+  // /api/users → auth blocks
+  let assert 401 = { piped(make_request("GET", "/api/users")) }.status
+  // /api/health → auth skipped, passes through
+  let resp = piped(make_request("GET", "/api/health"))
+  let assert 200 = resp.status
+  let assert Ok("yes") = response.get_header(resp, "x-tagged")
+  // /public → no auth applied at all
+  let resp2 = piped(make_request("GET", "/public"))
+  let assert 200 = resp2.status
+  let assert Ok("yes") = response.get_header(resp2, "x-tagged")
+}
 
 // --- Helpers ---
 

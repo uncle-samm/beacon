@@ -223,12 +223,14 @@ fn build_html_document(
 fn client_js_filename() -> String {
   case simplifile.read("priv/static/beacon_client.manifest") {
     Ok(name) -> string.trim(name)
-    Error(_) -> {
-      log.warning(
+    Error(err) -> {
+      log.error(
         "beacon.ssr",
-        "No beacon_client.manifest found — run `gleam run -m beacon/build`",
+        "FATAL: No beacon_client.manifest: "
+          <> string.inspect(err)
+          <> " — client JS not built. Run `gleam run -m beacon/build`.",
       )
-      "beacon_client.js"
+      "MISSING_CLIENT_JS_RUN_BEACON_BUILD"
     }
   }
 }

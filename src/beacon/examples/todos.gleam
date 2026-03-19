@@ -3,7 +3,6 @@
 
 import beacon/effect
 import beacon/element
-import gleam/dict
 import beacon/error
 import beacon/form
 import beacon/log
@@ -364,7 +363,7 @@ pub fn start(port: Int) -> Result(Nil, error.BeaconError) {
       deserialize_model: option.None,
       route_patterns: [],
       on_route_change: option.None,
-      server_fns: dict.new(), dynamic_subscriptions: option.None, on_notify: option.None,
+      dynamic_subscriptions: option.None, on_notify: option.None,
     )
   case runtime.start(config) {
     Ok(runtime_subject) -> {

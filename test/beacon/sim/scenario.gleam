@@ -12,8 +12,14 @@ pub type Action {
   Join
   /// Send a single event
   SendEvent(handler_id: String, data: String)
-  /// Wait for a server response (patch, model_sync, etc.)
+  /// Wait for a server response (patch, model_sync, etc.) — tracks type in metrics
   WaitForResponse(timeout_ms: Int)
+  /// Wait and assert the response is a "patch" message
+  WaitForPatch(timeout_ms: Int)
+  /// Wait and assert the response is a "model_sync" message
+  WaitForModelSync(timeout_ms: Int)
+  /// Wait and assert the response contains expected string
+  AssertResponseContains(timeout_ms: Int, expected: String)
   /// Sleep for N milliseconds
   Sleep(ms: Int)
   /// Send a malformed WebSocket frame (fault injection)
@@ -150,6 +156,81 @@ fn repeat_string(s: String, n: Int) -> String {
     True -> ""
     False -> s <> repeat_string(s, n - 1)
   }
+}
+
+/// Patch efficiency scenario: join (gets mount + model_sync), N increments each with response tracking.
+pub fn patch_efficiency(n_events: Int) -> Scenario {
+  let events =
+    list.map(list.repeat(Nil, n_events), fn(_) {
+      [SendEvent("h0", "{}"), WaitForResponse(5000)]
+    })
+    |> list.flatten
+  Scenario(
+    name: "patch_efficiency(" <> int.to_string(n_events) <> ")",
+    actions: list.flatten([
+      [Connect, Join],
+      // Mount comes first, then model_sync
+      [WaitForResponse(5000), WaitForResponse(5000)],
+      events,
+      [Disconnect],
+    ]),
+  )
+}
+
+/// State correctness scenario: send N increments, verify final count in response.
+pub fn verify_count(n_events: Int) -> Scenario {
+  let events = list.repeat(SendEvent("h0", "{}"), n_events)
+  Scenario(
+    name: "verify_count(" <> int.to_string(n_events) <> ")",
+    actions: list.flatten([
+      [Connect, Join, WaitForResponse(5000)],
+      // Drain mount
+      [WaitForResponse(2000)],
+      events,
+      [WaitForResponse(5000)],
+      [AssertResponseContains(5000, int.to_string(n_events))],
+      [Disconnect],
+    ]),
+  )
+}
+
+/// Reconnection scenario: connect, increment, disconnect, reconnect, verify data.
+pub fn reconnect(n_before: Int) -> Scenario {
+  let events = list.repeat(SendEvent("h0", "{}"), n_before)
+  Scenario(
+    name: "reconnect(" <> int.to_string(n_before) <> ")",
+    actions: list.flatten([
+      // First session: connect, drain mount+sync, send events
+      [Connect, Join, WaitForResponse(5000), WaitForResponse(5000)],
+      events,
+      [WaitForResponse(5000)],
+      [Disconnect, Sleep(500)],
+      // Second session: reconnect, receive mount + model_sync
+      // The model_sync should contain the accumulated count
+      [Connect, Join, WaitForResponse(5000), WaitForResponse(5000)],
+      [Disconnect],
+    ]),
+  )
+}
+
+/// Server-push scenario: connect, join, sleep, check for multiple responses.
+pub fn server_push(wait_ms: Int) -> Scenario {
+  Scenario(
+    name: "server_push(" <> int.to_string(wait_ms) <> ")",
+    actions: [
+      Connect,
+      Join,
+      WaitForResponse(5000),
+      // Drain mount
+      WaitForResponse(2000),
+      Sleep(wait_ms),
+      // After sleeping, there should be patches from server ticks
+      WaitForResponse(3000),
+      WaitForResponse(3000),
+      WaitForResponse(3000),
+      Disconnect,
+    ],
+  )
 }
 
 /// Combine two scenarios sequentially (for the second, skip Connect/Join).

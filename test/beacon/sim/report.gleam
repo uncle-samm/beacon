@@ -28,6 +28,12 @@ pub type SimReport {
     processes_after: Int,
     processes_leaked: Int,
     duration_ms: Int,
+    /// Wire efficiency metrics
+    bytes_sent: Int,
+    bytes_received: Int,
+    patches_received: Int,
+    model_syncs_received: Int,
+    mounts_received: Int,
   )
 }
 
@@ -71,6 +77,11 @@ pub fn generate(
     processes_after: procs_after,
     processes_leaked: procs_after - procs_before,
     duration_ms: pool.duration_ms,
+    bytes_sent: m.bytes_sent,
+    bytes_received: m.bytes_received,
+    patches_received: m.patches_received,
+    model_syncs_received: m.model_syncs_received,
+    mounts_received: m.mounts_received,
   )
 }
 
@@ -118,6 +129,20 @@ pub fn log_report(r: SimReport) -> Nil {
     "beacon.sim",
     "Duration: " <> int.to_string(r.duration_ms) <> "ms",
   )
+  log.info(
+    "beacon.sim",
+    "Wire: "
+      <> int.to_string(r.bytes_sent)
+      <> "B sent, "
+      <> int.to_string(r.bytes_received)
+      <> "B recv, "
+      <> int.to_string(r.patches_received)
+      <> " patches, "
+      <> int.to_string(r.model_syncs_received)
+      <> " syncs, "
+      <> int.to_string(r.mounts_received)
+      <> " mounts",
+  )
 }
 
 /// Assert the report passes standard thresholds.
@@ -136,4 +161,27 @@ pub fn assert_strict(r: SimReport) -> Nil {
   // Process leak < 20
   let assert True = r.processes_leaked < 20
   Nil
+}
+
+/// Assert the report passes strict thresholds for clean (non-fault) scenarios.
+pub fn assert_clean_passed(r: SimReport) -> Nil {
+  // Clean scenarios should have 100% success rate (or very close)
+  let assert True = r.success_rate >=. 0.98
+  // Process leak < 20
+  let assert True = r.processes_leaked < 20
+  Nil
+}
+
+/// Assert wire efficiency: if patches were received, they must outnumber
+/// model_syncs. This proves the patch optimization is working — after the
+/// initial model_sync on join, subsequent updates use smaller patches.
+pub fn assert_patch_efficiency(r: SimReport) -> Nil {
+  case r.patches_received > 0 {
+    True -> {
+      let assert True = r.patches_received > r.model_syncs_received
+      Nil
+    }
+    // No patches means no events were sent — nothing to assert
+    False -> Nil
+  }
 }

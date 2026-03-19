@@ -1,36 +1,48 @@
 import beacon/transport
+import gleam/dynamic/decode
+import gleam/json
 import gleam/list
-import gleam/string
 
 // --- ServerMessage encoding tests ---
 
 pub fn encode_mount_message_test() {
   let msg = transport.ServerMount(payload: "{\"html\":\"<h1>Hi</h1>\"}")
   let encoded = transport.encode_server_message(msg)
-  // Verify it contains the expected JSON structure
-  let assert True = contains(encoded, "\"type\":\"mount\"")
-  let assert True = contains(encoded, "\"payload\":")
+  // Parse the JSON and validate fields
+  let assert Ok("mount") =
+    json.parse(encoded, decode.at(["type"], decode.string))
+  let assert Ok("{\"html\":\"<h1>Hi</h1>\"}") =
+    json.parse(encoded, decode.at(["payload"], decode.string))
 }
 
-pub fn encode_patch_message_test() {
-  let msg = transport.ServerPatch(payload: "{\"0\":\"new value\"}", clock: 3)
+pub fn encode_model_sync_message_test() {
+  let msg =
+    transport.ServerModelSync(model_json: "{\"count\":1}", version: 1, ack_clock: 1)
   let encoded = transport.encode_server_message(msg)
-  let assert True = contains(encoded, "\"type\":\"patch\"")
-  let assert True = contains(encoded, "\"payload\":")
-  let assert True = contains(encoded, "\"clock\":3")
+  let assert Ok("model_sync") =
+    json.parse(encoded, decode.at(["type"], decode.string))
+  let assert Ok("{\"count\":1}") =
+    json.parse(encoded, decode.at(["model"], decode.string))
+  let assert Ok(1) =
+    json.parse(encoded, decode.at(["version"], decode.int))
+  let assert Ok(1) =
+    json.parse(encoded, decode.at(["ack_clock"], decode.int))
 }
 
 pub fn encode_heartbeat_ack_test() {
   let msg = transport.ServerHeartbeatAck
   let encoded = transport.encode_server_message(msg)
-  let assert True = contains(encoded, "\"type\":\"heartbeat_ack\"")
+  let assert Ok("heartbeat_ack") =
+    json.parse(encoded, decode.at(["type"], decode.string))
 }
 
 pub fn encode_error_message_test() {
   let msg = transport.ServerError(reason: "something went wrong")
   let encoded = transport.encode_server_message(msg)
-  let assert True = contains(encoded, "\"type\":\"error\"")
-  let assert True = contains(encoded, "\"reason\":\"something went wrong\"")
+  let assert Ok("error") =
+    json.parse(encoded, decode.at(["type"], decode.string))
+  let assert Ok("something went wrong") =
+    json.parse(encoded, decode.at(["reason"], decode.string))
 }
 
 // --- ClientMessage decoding tests ---
@@ -42,13 +54,19 @@ pub fn decode_heartbeat_test() {
 
 pub fn decode_join_test() {
   let raw = "{\"type\":\"join\"}"
-  let assert Ok(transport.ClientJoin(token: "")) =
+  let assert Ok(transport.ClientJoin(token: "", path: "/")) =
     transport.decode_client_message(raw)
 }
 
 pub fn decode_join_with_token_test() {
   let raw = "{\"type\":\"join\",\"token\":\"abc123\"}"
-  let assert Ok(transport.ClientJoin(token: "abc123")) =
+  let assert Ok(transport.ClientJoin(token: "abc123", path: "/")) =
+    transport.decode_client_message(raw)
+}
+
+pub fn decode_join_with_path_test() {
+  let raw = "{\"type\":\"join\",\"token\":\"\",\"path\":\"/blog/hello\"}"
+  let assert Ok(transport.ClientJoin(token: "", path: "/blog/hello")) =
     transport.decode_client_message(raw)
 }
 
@@ -61,6 +79,7 @@ pub fn decode_event_test() {
     data: "{}",
     target_path: "0.1.0",
     clock: 0,
+    ops: "",
   )) = transport.decode_client_message(raw)
 }
 
@@ -73,6 +92,7 @@ pub fn decode_event_with_handler_id_test() {
     data: "{}",
     target_path: "0.3",
     clock: 5,
+    ops: "",
   )) = transport.decode_client_message(raw)
 }
 
@@ -85,7 +105,21 @@ pub fn decode_event_with_data_test() {
     data: _,
     target_path: "0.2",
     clock: 0,
+    ops: "",
   )) = transport.decode_client_message(raw)
+}
+
+pub fn decode_navigate_test() {
+  let raw = "{\"type\":\"navigate\",\"path\":\"/about\"}"
+  let assert Ok(transport.ClientNavigate(path: "/about")) =
+    transport.decode_client_message(raw)
+}
+
+pub fn decode_server_fn_is_unknown_test() {
+  // server_fn messages are no longer supported — should fail to decode
+  let raw =
+    "{\"type\":\"server_fn\",\"name\":\"greet\",\"args\":\"hello\",\"call_id\":\"c1\"}"
+  let assert Error(_) = transport.decode_client_message(raw)
 }
 
 pub fn decode_invalid_json_test() {
@@ -109,39 +143,87 @@ pub fn decode_event_missing_fields_test() {
   let assert Error(_) = transport.decode_client_message(raw)
 }
 
+// --- Patch message tests ---
+
+pub fn encode_patch_message_test() {
+  let msg =
+    transport.ServerPatch(
+      ops_json: "[{\"op\":\"replace\",\"path\":\"/count\",\"value\":1}]",
+      version: 2,
+      ack_clock: 2,
+    )
+  let encoded = transport.encode_server_message(msg)
+  let assert Ok("patch") =
+    json.parse(encoded, decode.at(["type"], decode.string))
+  let assert Ok("[{\"op\":\"replace\",\"path\":\"/count\",\"value\":1}]") =
+    json.parse(encoded, decode.at(["ops"], decode.string))
+  let assert Ok(2) =
+    json.parse(encoded, decode.at(["version"], decode.int))
+  let assert Ok(2) =
+    json.parse(encoded, decode.at(["ack_clock"], decode.int))
+}
+
+pub fn encode_navigate_message_test() {
+  let msg = transport.ServerNavigate(path: "/next")
+  let encoded = transport.encode_server_message(msg)
+  let assert Ok("navigate") =
+    json.parse(encoded, decode.at(["type"], decode.string))
+  let assert Ok("/next") =
+    json.parse(encoded, decode.at(["path"], decode.string))
+}
+
+pub fn encode_reload_message_test() {
+  let msg = transport.ServerReload
+  let encoded = transport.encode_server_message(msg)
+  let assert Ok("reload") =
+    json.parse(encoded, decode.at(["type"], decode.string))
+}
+
+pub fn decode_event_with_ops_test() {
+  let raw =
+    "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"increment\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":1,\"ops\":\"[{\\\"op\\\":\\\"replace\\\",\\\"path\\\":\\\"/count\\\",\\\"value\\\":1}]\"}"
+  let assert Ok(transport.ClientEvent(
+    name: "click",
+    handler_id: "increment",
+    data: "{}",
+    target_path: "0",
+    clock: 1,
+    ops: ops,
+  )) = transport.decode_client_message(raw)
+  let assert True = ops != ""
+}
+
+pub fn decode_event_without_ops_test() {
+  let raw =
+    "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"h1\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":1}"
+  let assert Ok(transport.ClientEvent(
+    name: "click",
+    handler_id: "h1",
+    data: "{}",
+    target_path: "0",
+    clock: 1,
+    ops: "",
+  )) = transport.decode_client_message(raw)
+}
+
 // --- Round-trip test ---
 
 pub fn encode_decode_roundtrip_consistency_test() {
-  // Verify that encoding produces valid JSON that could be parsed
+  // Verify that encoding produces valid JSON by parsing every message
   let messages = [
     transport.ServerMount(payload: "test"),
-    transport.ServerPatch(payload: "test", clock: 0),
+    transport.ServerModelSync(model_json: "{}", version: 0, ack_clock: 0),
+    transport.ServerPatch(ops_json: "[]", version: 0, ack_clock: 0),
     transport.ServerHeartbeatAck,
     transport.ServerError(reason: "test error"),
+    transport.ServerNavigate(path: "/foo"),
+    transport.ServerReload,
   ]
-  list_each(messages, fn(msg) {
+  list.each(messages, fn(msg) {
     let encoded = transport.encode_server_message(msg)
-    // At minimum, the encoded string should start with { and end with }
-    let assert True = starts_with(encoded, "{")
-    let assert True = ends_with(encoded, "}")
+    // Parse with a decoder that accepts any type field — proves valid JSON
+    let assert Ok(_type_str) =
+      json.parse(encoded, decode.at(["type"], decode.string))
     Nil
   })
-}
-
-// --- Helper functions ---
-
-fn contains(haystack: String, needle: String) -> Bool {
-  string.contains(haystack, needle)
-}
-
-fn starts_with(s: String, prefix: String) -> Bool {
-  string.starts_with(s, prefix)
-}
-
-fn ends_with(s: String, suffix: String) -> Bool {
-  string.ends_with(s, suffix)
-}
-
-fn list_each(items: List(a), f: fn(a) -> Nil) -> Nil {
-  list.each(items, f)
 }

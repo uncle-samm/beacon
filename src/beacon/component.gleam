@@ -6,6 +6,7 @@
 
 import beacon/effect.{type Effect}
 import beacon/element.{type Node}
+import beacon/log
 
 /// A component definition — an encapsulated MVU unit.
 /// Components have their own model, messages, and lifecycle.
@@ -30,6 +31,7 @@ pub fn new(
   view: fn(model) -> Node(msg),
   to_parent: fn(msg) -> parent_msg,
 ) -> Component(model, msg, parent_msg) {
+  log.debug("beacon.component", "Creating new component definition")
   Component(init: init, update: update, view: view, to_parent: to_parent)
 }
 
@@ -41,6 +43,7 @@ pub fn render(
   component: Component(model, msg, parent_msg),
   model: model,
 ) -> Node(parent_msg) {
+  log.debug("beacon.component", "Rendering component")
   let child_view = component.view(model)
   map_node(child_view, component.to_parent)
 }
@@ -51,6 +54,7 @@ pub fn render(
 ///
 /// Reference: Lustre's element.map, Elm's Html.map.
 pub fn map_node(node: Node(a), f: fn(a) -> b) -> Node(b) {
+  log.debug("beacon.component", "Mapping node messages to parent type")
   case node {
     element.TextNode(content) -> element.TextNode(content: content)
     element.ElementNode(tag, attributes, children) ->
@@ -78,6 +82,7 @@ pub fn update_component(
   model: model,
   msg: msg,
 ) -> #(model, Effect(parent_msg)) {
+  log.debug("beacon.component", "Updating component model")
   let #(new_model, child_effect) = component.update(model, msg)
   let mapped_effect = effect.map(child_effect, component.to_parent)
   #(new_model, mapped_effect)

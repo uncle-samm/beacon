@@ -12,7 +12,6 @@ import beacon/middleware
 import beacon/pubsub
 import beacon/route
 import beacon/runtime
-import gleam/dict
 import beacon/ssr
 import beacon/state_manager
 import beacon/static
@@ -56,12 +55,12 @@ pub type AppConfig(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when URL changes — produces a Msg for the update loop.
     on_route_change: Option(fn(route.Route) -> msg),
-    /// Registered server functions.
-    server_fns: dict.Dict(String, fn(String) -> Result(String, String)),
     /// Dynamic subscription function: model → list of topics.
     dynamic_subscriptions: Option(fn(model) -> List(String)),
     /// Topic-aware notification handler for dynamic subscriptions.
     on_notify: Option(fn(String) -> msg),
+    /// Configurable security limits for the transport layer.
+    security_limits: transport.SecurityLimits,
   )
 }
 
@@ -113,7 +112,6 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       deserialize_model: config.deserialize_model,
       route_patterns: config.route_patterns,
       on_route_change: config.on_route_change,
-      server_fns: config.server_fns,
       dynamic_subscriptions: config.dynamic_subscriptions,
       on_notify: config.on_notify,
     )
@@ -139,6 +137,7 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       ..base_transport_config,
       middlewares: config.middlewares,
       static_config: static_cfg,
+      security_limits: config.security_limits,
     )
   case transport.start(transport_config) {
     Ok(transport_pid) -> {
@@ -239,7 +238,7 @@ fn wait_for_shutdown() -> Nil {
 fn shutdown_timeout() -> Int {
   case get_env_int("BEACON_SHUTDOWN_TIMEOUT") {
     Ok(ms) -> ms
-    Error(Nil) -> 5000
+    Error(_reason) -> 5000
   }
 }
 
@@ -250,4 +249,4 @@ fn trap_exit() -> Nil
 fn receive_shutdown_signal(timeout: Int) -> Bool
 
 @external(erlang, "beacon_application_ffi", "get_env_int")
-fn get_env_int(name: String) -> Result(Int, Nil)
+fn get_env_int(name: String) -> Result(Int, String)

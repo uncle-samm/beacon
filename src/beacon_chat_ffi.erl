@@ -4,8 +4,24 @@
 %% Create a new ETS table for storing chat messages.
 %% Uses a bag (allows multiple entries per key = room name).
 new_store(Name) ->
-    AtomName = binary_to_atom(<<"beacon_chat_", Name/binary>>, utf8),
-    ets:new(AtomName, [bag, public, named_table, {read_concurrency, true}]).
+    case validate_atom_name(Name) of
+        ok ->
+            AtomName = binary_to_atom(<<"beacon_chat_", Name/binary>>, utf8),
+            ets:new(AtomName, [bag, public, named_table, {read_concurrency, true}]);
+        {error, Reason} ->
+            error(Reason)
+    end.
+
+%% Validate that a name is safe for atom conversion.
+%% Max 255 bytes, alphanumeric + underscore + hyphen only (no spaces, no special chars).
+%% This prevents atom table exhaustion from arbitrary user-controlled input.
+validate_atom_name(Name) when byte_size(Name) > 255 ->
+    {error, <<"Name too long (max 255 bytes)">>};
+validate_atom_name(Name) ->
+    case re:run(Name, <<"^[a-zA-Z0-9_-]+$">>) of
+        {match, _} -> ok;
+        nomatch -> {error, <<"Invalid name: must be alphanumeric, underscore, or hyphen">>}
+    end.
 
 %% Append a message to a room.
 append_message(Store, Room, Msg) ->

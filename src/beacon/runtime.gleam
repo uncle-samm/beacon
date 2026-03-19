@@ -9,11 +9,26 @@ import beacon/element.{type Node}
 import beacon/error
 import beacon/handler.{type HandlerRegistry}
 import beacon/log
+import beacon/patch
 import beacon/pubsub
 import beacon/route
-import beacon/template/rendered.{type Rendered}
 import beacon/transport
-import beacon/view
+
+/// Cached serialized state for diffing.
+/// When substates are detected, each is tracked independently to skip unchanged diffs.
+pub type CachedModelState {
+  /// No substates detected — fall back to full-model diffing (backward compat).
+  FullModelCache(json: Option(String))
+  /// Substates detected — per-substate caches + flat field cache.
+  SubstateCache(
+    /// Full model JSON (needed for model_sync on join).
+    full_json: Option(String),
+    /// Per-substate cached JSON strings: field_name → JSON string.
+    substate_jsons: Dict(String, String),
+    /// Cached flat fields JSON (non-substate primitives).
+    flat_fields_json: Option(String),
+  )
+}
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/int
@@ -42,22 +57,17 @@ pub type RuntimeMessage(msg) {
     event_data: String,
     target_path: String,
     clock: Int,
+    /// JSON-encoded patch ops from client. Empty string means no ops.
+    ops: String,
   )
   /// A batch of events to process atomically (all updates, one render).
   /// Used when LOCAL events are replayed before a MODEL event.
   ClientEventBatchReceived(
     conn_id: transport.ConnectionId,
-    events: List(#(String, String, String, String, Int)),
+    events: List(#(String, String, String, String, Int, String)),
   )
   /// A client navigated to a new URL path.
   ClientNavigated(conn_id: transport.ConnectionId, path: String)
-  /// A client called a server function.
-  ClientCalledServerFn(
-    conn_id: transport.ConnectionId,
-    name: String,
-    args: String,
-    call_id: String,
-  )
   /// Set the listener subject for dynamic subscription management.
   SetListenerSubject(
     listener: Subject(ListenerCommand),
@@ -88,9 +98,6 @@ pub type RuntimeState(model, msg) {
     connections: Dict(transport.ConnectionId, Subject(transport.InternalMessage)),
     /// The runtime's own subject for dispatching effect messages.
     self: Subject(RuntimeMessage(msg)),
-    /// The previous Rendered struct, used for LiveView-style diffing.
-    /// None on first render.
-    previous_rendered: Option(Rendered),
     /// Current event clock value — monotonically increasing.
     /// Used for event ordering and optimistic update acknowledgment.
     event_clock: Int,
@@ -104,8 +111,6 @@ pub type RuntimeState(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when URL changes — produces a Msg for the update loop.
     on_route_change: option.Option(fn(route.Route) -> msg),
-    /// Registered server functions.
-    server_fns: Dict(String, fn(String) -> Result(String, String)),
     /// Subject for sending commands to the PubSub listener process.
     listener_subject: Option(Subject(ListenerCommand)),
     /// Current set of dynamic subscriptions (for diffing).
@@ -114,6 +119,9 @@ pub type RuntimeState(model, msg) {
     dynamic_subscriptions: Option(fn(model) -> List(String)),
     /// Topic-aware notification handler for dynamic subscriptions.
     on_notify: Option(fn(String) -> msg),
+    /// Cached serialized model state for diffing.
+    /// Tracks per-substate JSON when available, or full model JSON as fallback.
+    cached_model: CachedModelState,
   )
 }
 
@@ -139,8 +147,6 @@ pub type RuntimeConfig(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when URL changes — produces a Msg for the update loop.
     on_route_change: option.Option(fn(route.Route) -> msg),
-    /// Registered server functions: name → handler(args) → Result(result, error).
-    server_fns: Dict(String, fn(String) -> Result(String, String)),
     /// Dynamic subscription function: given the current model, returns
     /// the set of topics this runtime should be subscribed to.
     /// Called after every update. The framework diffs against current subscriptions.
@@ -168,7 +174,6 @@ pub fn start(
           handler_registry: None,
           connections: dict.new(),
           self: subject,
-          previous_rendered: None,
           event_clock: 0,
           serialize_model: case config.serialize_model {
             Some(f) -> Some(f)
@@ -178,11 +183,11 @@ pub fn start(
           secret_key: "",
           route_patterns: config.route_patterns,
           on_route_change: config.on_route_change,
-          server_fns: config.server_fns,
           listener_subject: None,
           current_subscriptions: [],
           dynamic_subscriptions: config.dynamic_subscriptions,
           on_notify: config.on_notify,
+          cached_model: FullModelCache(json: None),
         )
       log.info("beacon.runtime", "Runtime initialising")
       // Execute initial effects
@@ -281,7 +286,14 @@ fn handle_message(
         }
         _, Some(deserialize) -> {
           // Try to deserialize model state from token payload
-          case recover_model_from_token(token, state.secret_key, deserialize) {
+          case
+            recover_model_from_token(
+              token,
+              state.secret_key,
+              deserialize,
+              default_token_max_age_seconds,
+            )
+          {
             Ok(recovered_model) -> {
               log.info(
                 "beacon.runtime",
@@ -299,53 +311,90 @@ fn handle_message(
           }
         }
       }
-      // Render view with the model (current or recovered)
+      // Render view to plain HTML for initial mount (SSR hydration)
       handler.start_render()
       let current_vdom = model_to_use |> state.view
       let view_registry = handler.finish_render()
-      let current_rendered = view.render(current_vdom)
-      let mount_json =
-        rendered.to_mount_json(current_rendered)
-        |> json.to_string
+      let mount_html = element.to_string(current_vdom)
       case dict.get(state.connections, conn_id) {
         Ok(subject) -> {
-          process.send(subject, transport.SendMount(payload: mount_json))
-          // Also send model_sync so client has authoritative model state
-          case state.serialize_model {
+          // Send SSR HTML for immediate display
+          process.send(subject, transport.SendMount(payload: mount_html))
+          // Send model JSON — client takes over rendering from here
+          // Always try fresh encoder (hot-reloaded codec may differ from init-time cache)
+          let mount_serializer = case discover_model_encoder() {
+            Some(f) -> Some(f)
+            None -> state.serialize_model
+          }
+          case mount_serializer {
             Some(serialize) -> {
               let model_json = serialize(model_to_use)
-              process.send(
-                subject,
-                transport.SendModelSync(
-                  model_json: model_json,
-                  version: state.event_clock,
-                  ack_clock: state.event_clock,
+              // Check model size before sending to client
+              case check_model_size(model_json, "join_model_sync") {
+                True -> {
+                  process.send(
+                    subject,
+                    transport.SendModelSync(
+                      model_json: model_json,
+                      version: state.event_clock,
+                      ack_clock: state.event_clock,
+                    ),
+                  )
+                  // Cache the sent model JSON for future patch diffing
+                  log.debug("beacon.runtime", "Sent mount + model_sync to " <> conn_id)
+                }
+                False -> {
+                  log.error(
+                    "beacon.runtime",
+                    "Model too large to send on join for " <> conn_id
+                      <> " — client will not receive model_sync",
+                  )
+                }
+              }
+              // Update model state, cache handler registry, store last_model_json
+              // (cache even if too large — needed for future patch diffing)
+              actor.continue(
+                RuntimeState(
+                  ..state,
+                  model: model_to_use,
+                  handler_registry: Some(view_registry),
+                  cached_model: FullModelCache(json: Some(model_json)),
                 ),
               )
             }
-            None -> Nil
+            None -> {
+              log.warning(
+                "beacon.runtime",
+                "No model encoder available during mount — client won't receive model_sync. "
+                  <> "Ensure beacon_codec.gleam is generated and compiled.",
+              )
+              actor.continue(
+                RuntimeState(
+                  ..state,
+                  model: model_to_use,
+                  handler_registry: Some(view_registry),
+                ),
+              )
+            }
           }
-          log.debug("beacon.runtime", "Sent mount + model_sync to " <> conn_id)
         }
         Error(Nil) -> {
           log.warning(
             "beacon.runtime",
             "Client " <> conn_id <> " not found in connections for join",
           )
+          actor.continue(
+            RuntimeState(
+              ..state,
+              model: model_to_use,
+              handler_registry: Some(view_registry),
+            ),
+          )
         }
       }
-      // Cache the Rendered, handler registry, and update model
-      actor.continue(
-        RuntimeState(
-          ..state,
-          model: model_to_use,
-          previous_rendered: Some(current_rendered),
-          handler_registry: Some(view_registry),
-        ),
-      )
     }
 
-    ClientEventReceived(conn_id, event_name, handler_id, event_data, target_path, clock) -> {
+    ClientEventReceived(conn_id, event_name, handler_id, event_data, target_path, clock, ops) -> {
       log.debug(
         "beacon.runtime",
         "Event from "
@@ -355,40 +404,101 @@ fn handle_message(
           <> " ["
           <> handler_id
           <> "] clock="
-          <> int.to_string(clock),
+          <> int.to_string(clock)
+          <> case ops {
+            "" -> ""
+            _ -> " +ops"
+          },
       )
-      // Try handler registry first (automatic), then fall back to decode_event
-      let resolve_result = case state.handler_registry {
-        Some(registry) -> handler.resolve(registry, handler_id, event_data)
-        None -> Error(error.RuntimeError(reason: "No handler registry"))
-      }
-      let resolve_result = case resolve_result {
-        Ok(msg) -> Ok(msg)
-        Error(_) -> {
-          // Fall back to decode_event if provided
-          case state.decode_event {
-            Some(decode_fn) ->
-              decode_fn(event_name, handler_id, event_data, target_path)
-            None -> Error(error.RuntimeError(reason: "Unknown handler: " <> handler_id))
+      // If client sent patch ops, apply them directly to the model
+      // (client already ran update locally and knows the correct result).
+      case ops {
+        "" -> {
+          // No ops — run update on server as normal
+          let resolve_result = case state.handler_registry {
+            Some(registry) -> handler.resolve(registry, handler_id, event_data)
+            None -> Error(error.RuntimeError(reason: "No handler registry"))
+          }
+          let resolve_result = case resolve_result {
+            Ok(msg) -> Ok(msg)
+            Error(_) -> {
+              case state.decode_event {
+                Some(decode_fn) ->
+                  decode_fn(event_name, handler_id, event_data, target_path)
+                None -> Error(error.RuntimeError(reason: "Unknown handler: " <> handler_id))
+              }
+            }
+          }
+          case resolve_result {
+            Ok(msg) -> {
+              // run_update_for broadcasts to all clients internally
+              let new_state = run_update_for(RuntimeState(..state, event_clock: clock), msg, option.Some(conn_id))
+              actor.continue(new_state)
+            }
+            Error(err) -> {
+              let err_str = error.to_string(err)
+              log.warning(
+                "beacon.runtime",
+                "Failed to decode event from "
+                  <> conn_id
+                  <> ": "
+                  <> err_str,
+              )
+              // Send error back to the client — no silent failures
+              case dict.get(state.connections, conn_id) {
+                Ok(transport_subject) ->
+                  process.send(transport_subject, transport.SendError(reason: err_str))
+                Error(Nil) -> Nil
+              }
+              actor.continue(state)
+            }
           }
         }
-      }
-      case resolve_result {
-        Ok(msg) -> {
-          let new_state = run_update_for(RuntimeState(..state, event_clock: clock), msg, option.Some(conn_id))
-          // Send model_sync to the triggering client
-          send_model_sync(new_state, conn_id)
-          actor.continue(new_state)
-        }
-        Error(err) -> {
-          log.warning(
-            "beacon.runtime",
-            "Failed to decode event from "
-              <> conn_id
-              <> ": "
-              <> error.to_string(err),
+        _ -> {
+          // Client sent patch ops — apply to server model.
+          // Also resolve the handler and run effects (for on_update side effects
+          // like store writes). The update function's MODEL result is ignored
+          // (the ops are authoritative), but its EFFECTS are executed.
+          let resolve_result = case state.handler_registry {
+            Some(registry) -> handler.resolve(registry, handler_id, event_data)
+            None -> Error(error.RuntimeError(reason: "No handler registry"))
+          }
+          let resolve_result = case resolve_result {
+            Ok(msg) -> Ok(msg)
+            Error(_) -> {
+              case state.decode_event {
+                Some(decode_fn) ->
+                  decode_fn(event_name, handler_id, event_data, target_path)
+                None -> Error(error.RuntimeError(reason: "Unknown handler: " <> handler_id))
+              }
+            }
+          }
+          // Apply ops to get the correct model state FIRST
+          let new_state = apply_client_ops(
+            RuntimeState(..state, event_clock: clock),
+            ops,
+            conn_id,
           )
-          actor.continue(state)
+          // Run update with POST-ops model to get effects (store writes, etc.)
+          // The update's model result is ignored — the ops are authoritative.
+          // But on_update callbacks see the correct model.strokes, etc.
+          case resolve_result {
+            Ok(msg) -> {
+              let #(_model_ignored, effects) = new_state.update(new_state.model, msg)
+              run_effects_with_context(effects, new_state.self, option.Some(conn_id), new_state.connections)
+            }
+            Error(err) -> {
+              log.warning(
+                "beacon.runtime",
+                "Client ops path: failed to resolve handler from "
+                  <> conn_id
+                  <> ": "
+                  <> error.to_string(err)
+                  <> " — ops applied but effects skipped",
+              )
+            }
+          }
+          actor.continue(new_state)
         }
       }
     }
@@ -407,60 +517,71 @@ fn handle_message(
       let #(final_state, processed) =
         list.fold(events, #(state, 0), fn(acc, evt) {
           let #(acc_state, idx) = acc
-          let #(event_name, handler_id, event_data, _target_path, clock) = evt
-          let resolve_result = case acc_state.handler_registry {
-            Some(registry) ->
-              handler.resolve(registry, handler_id, event_data)
-            None ->
-              Error(error.RuntimeError(reason: "No handler registry"))
-          }
-          let resolve_result = case resolve_result {
-            Ok(msg) -> Ok(msg)
-            Error(_) ->
-              case acc_state.decode_event {
-                Some(decode_fn) ->
-                  decode_fn(event_name, handler_id, event_data, "")
-                None ->
-                  Error(error.RuntimeError(
-                    reason: "Unknown handler: " <> handler_id,
-                  ))
-              }
-          }
-          case resolve_result {
-            Ok(msg) -> {
-              let new_state =
-                RuntimeState(..acc_state, event_clock: clock)
-              case idx == count - 1 {
-                // Last event: full update + render + broadcast patch
-                True -> #(
-                  run_update_for(new_state, msg, option.Some(conn_id)),
-                  idx + 1,
-                )
-                // Intermediate: update only, no render
-                False -> #(
-                  run_update_only(new_state, msg, option.Some(conn_id)),
-                  idx + 1,
-                )
-              }
-            }
-            Error(err) -> {
-              log.warning(
-                "beacon.runtime",
-                "Event skipped in batch (idx "
-                  <> int.to_string(idx)
-                  <> "/"
-                  <> int.to_string(count)
-                  <> ", handler="
-                  <> handler_id
-                  <> "): "
-                  <> error.to_string(err),
+          let #(event_name, handler_id, event_data, _target_path, clock, evt_ops) = evt
+          // If the last event has ops, apply them directly
+          case evt_ops, idx == count - 1 {
+            ops, True if ops != "" -> {
+              let new_state = apply_client_ops(
+                RuntimeState(..acc_state, event_clock: clock),
+                ops,
+                conn_id,
               )
-              #(acc_state, idx + 1)
+              #(new_state, idx + 1)
+            }
+            _, _ -> {
+              let resolve_result = case acc_state.handler_registry {
+                Some(registry) ->
+                  handler.resolve(registry, handler_id, event_data)
+                None ->
+                  Error(error.RuntimeError(reason: "No handler registry"))
+              }
+              let resolve_result = case resolve_result {
+                Ok(msg) -> Ok(msg)
+                Error(_) ->
+                  case acc_state.decode_event {
+                    Some(decode_fn) ->
+                      decode_fn(event_name, handler_id, event_data, "")
+                    None ->
+                      Error(error.RuntimeError(
+                        reason: "Unknown handler: " <> handler_id,
+                      ))
+                  }
+              }
+              case resolve_result {
+                Ok(msg) -> {
+                  let new_state =
+                    RuntimeState(..acc_state, event_clock: clock)
+                  case idx == count - 1 {
+                    True -> #(
+                      run_update_for(new_state, msg, option.Some(conn_id)),
+                      idx + 1,
+                    )
+                    False -> #(
+                      run_update_only(new_state, msg, option.Some(conn_id)),
+                      idx + 1,
+                    )
+                  }
+                }
+                Error(err) -> {
+                  log.warning(
+                    "beacon.runtime",
+                    "Event skipped in batch (idx "
+                      <> int.to_string(idx)
+                      <> "/"
+                      <> int.to_string(count)
+                      <> ", handler="
+                      <> handler_id
+                      <> "): "
+                      <> error.to_string(err),
+                  )
+                  #(acc_state, idx + 1)
+                }
+              }
             }
           }
         })
       let _ = processed
-      send_model_sync(final_state, conn_id)
+      // Batch's last event already triggered broadcast via run_update_for
       actor.continue(final_state)
     }
 
@@ -480,45 +601,6 @@ fn handle_message(
       }
     }
 
-    ClientCalledServerFn(conn_id, name, args, call_id) -> {
-      log.info("beacon.runtime", "Server fn: " <> name <> " [" <> call_id <> "]")
-      case dict.get(state.server_fns, name) {
-        Ok(handler) -> {
-          let #(result, ok) = case handler(args) {
-            Ok(r) -> #(r, True)
-            Error(e) -> #(e, False)
-          }
-          case dict.get(state.connections, conn_id) {
-            Ok(subject) ->
-              process.send(
-                subject,
-                transport.SendServerFnResult(
-                  call_id: call_id,
-                  result: result,
-                  ok: ok,
-                ),
-              )
-            Error(Nil) -> Nil
-          }
-        }
-        Error(Nil) -> {
-          case dict.get(state.connections, conn_id) {
-            Ok(subject) ->
-              process.send(
-                subject,
-                transport.SendServerFnResult(
-                  call_id: call_id,
-                  result: "Unknown server function: " <> name,
-                  ok: False,
-                ),
-              )
-            Error(Nil) -> Nil
-          }
-        }
-      }
-      actor.continue(state)
-    }
-
     SetListenerSubject(listener, initial_subs) -> {
       log.debug("beacon.runtime", "Listener subject registered")
       actor.continue(RuntimeState(
@@ -530,10 +612,8 @@ fn handle_message(
 
     EffectDispatched(msg) -> {
       log.info("beacon.runtime", "Effect dispatched (PubSub notification received)")
+      // run_update internally broadcasts to all clients (via run_update_for)
       let new_state = run_update(state, msg)
-      // Send model_sync to ALL connected clients so their client-side
-      // models stay in sync (e.g., PubSub watcher updates like StrokesUpdated)
-      broadcast_model_sync(new_state)
       actor.continue(new_state)
     }
 
@@ -555,6 +635,7 @@ fn run_update(
 }
 
 /// Run update with a specific connection context (for targeted effects).
+/// State-over-the-wire: sends model JSON to clients. No server-side view rendering.
 fn run_update_for(
   state: RuntimeState(model, msg),
   msg: msg,
@@ -564,53 +645,58 @@ fn run_update_for(
   let #(new_model, effects) = state.update(state.model, msg)
   log.debug("beacon.runtime", "Model updated")
 
-  // Render new view — wrapped in error boundary + handler registry
+  // Render view to populate handler registry (needed for event resolution).
+  // We don't send the HTML — client renders from model JSON.
   handler.start_render()
-  let #(new_rendered, new_registry) = case rescue_view(state.view, new_model) {
-    Ok(vdom) -> {
-      let new_r = view.render(vdom)
-      let view_registry = handler.finish_render()
-      // Diff against previous Rendered and broadcast
-      case state.previous_rendered {
-        Some(old_r) -> {
-          let diff = rendered.diff(old_r, new_r)
-          let diff_json = rendered.diff_to_json_string(diff)
-          broadcast_patch(
-            RuntimeState(..state, model: new_model),
-            diff_json,
-          )
-        }
-        None -> {
-          let mount_json =
-            rendered.to_mount_json(new_r)
-            |> json.to_string
-          broadcast_patch(RuntimeState(..state, model: new_model), mount_json)
-        }
-      }
-      #(Some(new_r), Some(view_registry))
-    }
+  let new_registry = case rescue(fn() { new_model |> state.view }) {
+    Ok(_vdom) -> handler.finish_render()
     Error(reason) -> {
-      log.error(
-        "beacon.runtime",
-        "View rendering failed: " <> reason,
-      )
-      let _ = broadcast_error(state, "View rendering error: " <> reason)
+      log.error("beacon.runtime", "View rendering failed: " <> reason)
       let _ = handler.finish_render()
-      #(state.previous_rendered, state.handler_registry)
+      // Keep old registry if view crashes
+      case state.handler_registry {
+        Some(r) -> r
+        None -> handler.finish_render()
+      }
     }
   }
+
+  // State-over-the-wire: send model JSON to all clients (as patches when possible).
+  // Try per-substate diffing first (only diffs changed substates).
+  // Falls back to full-model diff if no substate encoders available.
+  let serializer = case discover_model_encoder() {
+    Some(f) -> Some(f)
+    None -> state.serialize_model
+  }
+  let new_model_json = case serializer {
+    Some(serialize) -> {
+      let json = serialize(new_model)
+      // Check model size bounds before broadcasting
+      case check_model_size(json, "run_update") {
+        True -> Some(json)
+        False -> None
+      }
+    }
+    None -> None
+  }
+  let broadcast_state =
+    RuntimeState(
+      ..state,
+      model: new_model,
+      handler_registry: Some(new_registry),
+    )
+  // Attempt per-substate broadcast, fall back to full-model broadcast
+  let new_cached =
+    broadcast_with_substates(broadcast_state, new_model, new_model_json)
+  let new_state =
+    RuntimeState(
+      ..broadcast_state,
+      cached_model: new_cached,
+    )
 
   // Execute effects — pass connection context for targeted sends
   run_effects_with_context(effects, state.self, conn_id, state.connections)
 
-  // Return updated state with new Rendered and handler registry cached
-  let new_state =
-    RuntimeState(
-      ..state,
-      model: new_model,
-      previous_rendered: new_rendered,
-      handler_registry: new_registry,
-    )
   // Diff dynamic subscriptions after model change
   update_dynamic_subscriptions(new_state)
 }
@@ -667,77 +753,9 @@ fn run_update_only(
   RuntimeState(..state, model: new_model)
 }
 
-/// Safely execute the view function, catching any crashes.
-/// Returns Ok(Node) on success, Error(reason) on failure.
-/// This is the error boundary — a view crash doesn't kill the runtime.
-fn rescue_view(
-  view_fn: fn(model) -> Node(msg),
-  model: model,
-) -> Result(Node(msg), String) {
-  rescue(fn() { view_fn(model) })
-}
-
+/// Safely execute a function, catching crashes.
 @external(erlang, "beacon_runtime_ffi", "rescue")
 fn rescue(f: fn() -> a) -> Result(a, String)
-
-/// Broadcast an error message to all connected clients.
-fn broadcast_error(
-  state: RuntimeState(model, msg),
-  reason: String,
-) -> Nil {
-  dict.each(state.connections, fn(_conn_id, subject) {
-    process.send(subject, transport.SendError(reason: reason))
-  })
-}
-
-/// Broadcast a patch to all connected clients.
-/// Uses direct Subject sends for local connections (efficient single-node),
-/// and also broadcasts via PubSub for distributed subscribers.
-fn broadcast_patch(
-  state: RuntimeState(model, msg),
-  html: String,
-) -> Nil {
-  let conn_count = dict.size(state.connections)
-  log.debug(
-    "beacon.runtime",
-    "Broadcasting to " <> int.to_string(conn_count) <> " client(s)",
-  )
-  let patch_msg = transport.SendPatch(payload: html, clock: state.event_clock)
-  // Direct send to all local connections (fast path)
-  let _ =
-    dict.each(state.connections, fn(_conn_id, subject) {
-      process.send(subject, patch_msg)
-    })
-  // Also broadcast via PubSub for distributed subscribers
-  pubsub.broadcast("beacon:patches", patch_msg)
-}
-
-/// Send authoritative model state to a specific client connection.
-/// Only sends if serialize_model is configured.
-fn send_model_sync(
-  state: RuntimeState(model, msg),
-  conn_id: transport.ConnectionId,
-) -> Nil {
-  case state.serialize_model {
-    Some(serialize) -> {
-      case dict.get(state.connections, conn_id) {
-        Ok(subject) -> {
-          let model_json = serialize(state.model)
-          process.send(
-            subject,
-            transport.SendModelSync(
-              model_json: model_json,
-              version: state.event_clock,
-              ack_clock: state.event_clock,
-            ),
-          )
-        }
-        Error(Nil) -> Nil
-      }
-    }
-    None -> Nil
-  }
-}
 
 /// Auto-discover a model encoder from the beacon_codec module.
 /// The build tool generates beacon_codec.gleam with encode_model/1.
@@ -758,26 +776,423 @@ fn discover_model_encoder() -> Option(fn(model) -> String) {
 @external(erlang, "beacon_runtime_ffi", "try_load_codec_encoder")
 fn try_load_codec_encoder() -> Result(fn(model) -> String, Nil)
 
-/// Send authoritative model state to ALL connected clients.
-/// Used after PubSub/watcher updates where no specific conn_id triggered the change.
-fn broadcast_model_sync(state: RuntimeState(model, msg)) -> Nil {
-  case state.serialize_model {
+/// Try per-substate broadcast, fall back to full-model.
+/// Returns the new CachedModelState to store for future diffs.
+fn broadcast_with_substates(
+  state: RuntimeState(model, msg),
+  new_model: model,
+  new_model_json: Option(String),
+) -> CachedModelState {
+  // Try to load substate names — if available, use per-substate diffing
+  case try_load_substate_names() {
+    Ok(names) if names != [] -> {
+      // Load flat fields encoder
+      let flat_encoder = case try_load_flat_encoder() {
+        Ok(f) -> Some(f)
+        Error(_) -> None
+      }
+      // Build per-substate JSON map
+      let new_substate_jsons =
+        list.fold(names, dict.new(), fn(acc, name) {
+          case try_load_substate_encoder(name) {
+            Ok(encoder) -> {
+              let json = encoder(new_model)
+              dict.insert(acc, name, json)
+            }
+            Error(_) -> acc
+          }
+        })
+      // Build flat fields JSON
+      let new_flat_json = case flat_encoder {
+        Some(f) -> Some(f(new_model))
+        None -> None
+      }
+      // Get old cached substates
+      let #(old_substates, old_flat) = case state.cached_model {
+        SubstateCache(substate_jsons: old_s, flat_fields_json: old_f, ..) ->
+          #(old_s, old_f)
+        _ -> #(dict.new(), None)
+      }
+      // Diff each substate independently — skip unchanged ones
+      let substate_ops =
+        list.flat_map(names, fn(name) {
+          let new_json = case dict.get(new_substate_jsons, name) {
+            Ok(j) -> j
+            Error(_) -> "null"
+          }
+          case dict.get(old_substates, name) {
+            Ok(old_json) if old_json == new_json -> {
+              // UNCHANGED — skip diff entirely (the optimization!)
+              []
+            }
+            Ok(old_json) -> {
+              // Changed — diff just this substate (wrap in object for path context)
+              let old_wrapped = "{\"" <> name <> "\":" <> old_json <> "}"
+              let new_wrapped = "{\"" <> name <> "\":" <> new_json <> "}"
+              let ops = patch.diff(old_wrapped, new_wrapped)
+              case patch.is_empty(ops) {
+                True -> []
+                False -> [ops]
+              }
+            }
+            Error(_) -> {
+              // First time for this substate — include as replace
+              let old_wrapped = "{\"" <> name <> "\":null}"
+              let new_wrapped = "{\"" <> name <> "\":" <> new_json <> "}"
+              let ops = patch.diff(old_wrapped, new_wrapped)
+              case patch.is_empty(ops) {
+                True -> []
+                False -> [ops]
+              }
+            }
+          }
+        })
+      // Diff flat fields
+      let flat_ops = case new_flat_json, old_flat {
+        Some(new_f), Some(old_f) if new_f == old_f -> []
+        Some(new_f), Some(old_f) -> {
+          let ops = patch.diff(old_f, new_f)
+          case patch.is_empty(ops) {
+            True -> []
+            False -> [ops]
+          }
+        }
+        Some(new_f), None -> {
+          let ops = patch.diff("{}", new_f)
+          case patch.is_empty(ops) {
+            True -> []
+            False -> [ops]
+          }
+        }
+        _, _ -> []
+      }
+      // Merge all ops and broadcast
+      let all_op_strings = list.append(substate_ops, flat_ops)
+      case all_op_strings {
+        [] -> {
+          log.debug("beacon.runtime", "Substates: all unchanged, skipping broadcast")
+          Nil
+        }
+        _ -> {
+          // Merge multiple ops JSON arrays into one
+          let merged = merge_ops_json(all_op_strings)
+          log.debug("beacon.runtime", "Substates: broadcasting merged patch")
+          dict.each(state.connections, fn(_conn_id, subject) {
+            process.send(
+              subject,
+              transport.SendPatch(
+                ops_json: merged,
+                version: state.event_clock,
+                ack_clock: state.event_clock,
+              ),
+            )
+          })
+        }
+      }
+      // Return SubstateCache for next diff
+      SubstateCache(
+        full_json: new_model_json,
+        substate_jsons: new_substate_jsons,
+        flat_fields_json: new_flat_json,
+      )
+    }
+    _ -> {
+      // No substates — fall back to full-model diff
+      broadcast_model_sync_with_json(state, new_model_json)
+      case new_model_json {
+        Some(json) -> FullModelCache(json: Some(json))
+        None -> state.cached_model
+      }
+    }
+  }
+}
+
+/// Merge multiple JSON ops arrays into a single array.
+/// Each input is a JSON string like "[{...}, {...}]".
+/// Output is a single merged array.
+fn merge_ops_json(ops_list: List(String)) -> String {
+  case ops_list {
+    [] -> "[]"
+    [single] -> single
+    _ -> {
+      // Use the Erlang FFI to merge JSON arrays
+      merge_ops_json_ffi(ops_list)
+    }
+  }
+}
+
+@external(erlang, "beacon_patch_ffi", "merge_ops_json")
+fn merge_ops_json_ffi(ops_list: List(String)) -> String
+
+/// Model JSON size warning threshold: 1MB.
+const model_size_warn_bytes = 1_048_576
+
+/// Model JSON size hard limit: 5MB. Broadcasts are skipped above this.
+const model_size_max_bytes = 5_242_880
+
+/// Check model JSON size. Warn at 1MB, reject at 5MB.
+/// Returns True if the model is within bounds and safe to broadcast,
+/// False if it exceeds the hard limit and should be skipped.
+fn check_model_size(model_json: String, context: String) -> Bool {
+  let size = string.byte_size(model_json)
+  case size > model_size_max_bytes {
+    True -> {
+      log.error(
+        "beacon.runtime",
+        "Model JSON exceeds 5MB ("
+          <> int.to_string(size)
+          <> " bytes) in "
+          <> context
+          <> " — broadcast skipped to prevent OOM",
+      )
+      False
+    }
+    False -> {
+      case size > model_size_warn_bytes {
+        True -> {
+          log.warning(
+            "beacon.runtime",
+            "Model JSON is large ("
+              <> int.to_string(size)
+              <> " bytes) in "
+              <> context
+              <> " — consider reducing model size",
+          )
+          True
+        }
+        False -> True
+      }
+    }
+  }
+}
+
+/// Broadcast model state with a pre-serialized JSON string.
+/// Diffs against cached_model to send patches when possible.
+fn broadcast_model_sync_with_json(
+  state: RuntimeState(model, msg),
+  new_model_json: Option(String),
+) -> Nil {
+  case new_model_json {
+    Some(model_json) -> {
+      // Check model size before broadcasting
+      case check_model_size(model_json, "broadcast_model_sync") {
+        False -> Nil
+        True -> {
+          // Extract the old JSON from the cached model state
+          let old_json = case state.cached_model {
+            FullModelCache(json: j) -> j
+            SubstateCache(full_json: j, ..) -> j
+          }
+          case old_json {
+            Some(old_json) -> {
+              let ops_json = patch.diff(old_json, model_json)
+              case patch.is_empty(ops_json) {
+                True -> {
+                  log.debug("beacon.runtime", "Model unchanged, skipping broadcast")
+                  Nil
+                }
+                False -> {
+                  log.debug("beacon.runtime", "Broadcasting patch to all clients")
+                  dict.each(state.connections, fn(_conn_id, subject) {
+                    process.send(
+                      subject,
+                      transport.SendPatch(
+                        ops_json: ops_json,
+                        version: state.event_clock,
+                        ack_clock: state.event_clock,
+                      ),
+                    )
+                  })
+                }
+              }
+            }
+            None -> {
+              log.debug("beacon.runtime", "No previous model, sending full model_sync")
+              dict.each(state.connections, fn(_conn_id, subject) {
+                process.send(
+                  subject,
+                  transport.SendModelSync(
+                    model_json: model_json,
+                    version: state.event_clock,
+                    ack_clock: state.event_clock,
+                  ),
+                )
+              })
+            }
+          }
+        }
+      }
+    }
+    None -> {
+      // No model encoder — re-render view and send HTML mount to all clients.
+      // This is the server-rendering mode used by routed apps without per-route codecs.
+      log.debug(
+        "beacon.runtime",
+        "No model encoder — broadcasting HTML mount to all clients",
+      )
+      handler.start_render()
+      case rescue(fn() { state.model |> state.view }) {
+        Ok(vdom) -> {
+          let _ = handler.finish_render()
+          let mount_html = element.to_string(vdom)
+          dict.each(state.connections, fn(_conn_id, subject) {
+            process.send(
+              subject,
+              transport.SendMount(payload: mount_html),
+            )
+          })
+        }
+        Error(reason) -> {
+          let _ = handler.finish_render()
+          log.error("beacon.runtime", "View rendering failed in mount broadcast: " <> reason)
+          Nil
+        }
+      }
+    }
+  }
+}
+
+/// Apply client-sent patch operations to the server model.
+/// The client already ran the update locally and sends the diff.
+/// Server applies the ops to stay in sync without re-running update.
+fn apply_client_ops(
+  state: RuntimeState(model, msg),
+  ops_json: String,
+  conn_id: transport.ConnectionId,
+) -> RuntimeState(model, msg) {
+  log.info("beacon.runtime", "Applying client ops from " <> conn_id)
+  // Serialize current model to JSON
+  let serializer = case discover_model_encoder() {
+    Some(f) -> Some(f)
+    None -> state.serialize_model
+  }
+  case serializer {
     Some(serialize) -> {
-      let model_json = serialize(state.model)
-      dict.each(state.connections, fn(_conn_id, subject) {
+      let old_json = serialize(state.model)
+      // Apply the client's patch ops to produce new model JSON
+      case patch.apply_ops(old_json, ops_json) {
+        Ok(new_json) -> {
+          // Decode new model from the patched JSON
+          case discover_model_decoder() {
+            Some(decode_fn) -> {
+              case decode_fn(new_json) {
+                Ok(new_model) -> {
+                  log.info("beacon.runtime", "Client ops applied successfully")
+                  // Re-render view to keep handler registry fresh
+                  handler.start_render()
+                  let new_registry = case rescue(fn() { new_model |> state.view }) {
+                    Ok(_vdom) -> handler.finish_render()
+                    Error(reason) -> {
+                      log.error("beacon.runtime", "View rendering failed after ops: " <> reason)
+                      let _ = handler.finish_render()
+                      case state.handler_registry {
+                        Some(r) -> r
+                        None -> handler.finish_render()
+                      }
+                    }
+                  }
+                  let new_state = RuntimeState(
+                    ..state,
+                    model: new_model,
+                    handler_registry: Some(new_registry),
+                    cached_model: FullModelCache(json: Some(new_json)),
+                  )
+                  // Broadcast the same ops to other clients
+                  let _ = broadcast_ops_to_others(new_state, ops_json, conn_id)
+                  // Update dynamic subscriptions after model change
+                  update_dynamic_subscriptions(new_state)
+                }
+                Error(reason) -> {
+                  log.error(
+                    "beacon.runtime",
+                    "Failed to decode model after applying ops: " <> reason,
+                  )
+                  state
+                }
+              }
+            }
+            None -> {
+              log.warning(
+                "beacon.runtime",
+                "No model decoder — cannot apply client ops. Falling back to event processing.",
+              )
+              state
+            }
+          }
+        }
+        Error(reason) -> {
+          log.error(
+            "beacon.runtime",
+            "Failed to apply client ops: " <> reason,
+          )
+          state
+        }
+      }
+    }
+    None -> {
+      log.warning(
+        "beacon.runtime",
+        "No serializer — cannot apply client ops",
+      )
+      state
+    }
+  }
+}
+
+/// Send patch ops to all clients EXCEPT the one that sent them.
+/// The sending client already applied the ops locally (optimistic update).
+fn broadcast_ops_to_others(
+  state: RuntimeState(model, msg),
+  ops_json: String,
+  exclude_conn_id: transport.ConnectionId,
+) -> Nil {
+  dict.each(state.connections, fn(conn_id, subject) {
+    case conn_id == exclude_conn_id {
+      True -> Nil
+      False ->
         process.send(
           subject,
-          transport.SendModelSync(
-            model_json: model_json,
+          transport.SendPatch(
+            ops_json: ops_json,
             version: state.event_clock,
             ack_clock: state.event_clock,
           ),
         )
-      })
     }
-    None -> Nil
+  })
+}
+
+/// Auto-discover a model decoder from the beacon_codec module.
+/// The build tool generates beacon_codec.gleam with decode_model/1.
+fn discover_model_decoder() -> Option(fn(String) -> Result(model, String)) {
+  case try_load_codec_decoder() {
+    Ok(decoder) -> {
+      log.debug(
+        "beacon.runtime",
+        "Auto-discovered model decoder from beacon_codec",
+      )
+      Some(decoder)
+    }
+    Error(_) -> None
   }
 }
+
+@external(erlang, "beacon_runtime_ffi", "try_load_codec_decoder")
+fn try_load_codec_decoder() -> Result(fn(String) -> Result(model, String), Nil)
+
+/// Discover substate names from beacon_codec.
+@external(erlang, "beacon_runtime_ffi", "try_load_substate_names")
+fn try_load_substate_names() -> Result(List(String), Nil)
+
+/// Discover a per-substate encoder from beacon_codec.
+@external(erlang, "beacon_runtime_ffi", "try_load_substate_encoder")
+fn try_load_substate_encoder(
+  name: String,
+) -> Result(fn(model) -> String, Nil)
+
+/// Discover the flat fields encoder from beacon_codec.
+@external(erlang, "beacon_runtime_ffi", "try_load_flat_encoder")
+fn try_load_flat_encoder() -> Result(fn(model) -> String, Nil)
 
 /// Execute effects by providing a dispatch function that sends messages
 /// back to the runtime actor.
@@ -805,10 +1220,22 @@ fn run_effects_with_context(
           case dict.get(connections, cid) {
             Ok(subject) ->
               store_redirect_target(subject)
-            Error(Nil) -> Nil
+            Error(Nil) -> {
+              log.debug(
+                "beacon.runtime",
+                "Connection " <> cid <> " not found for redirect target storage",
+              )
+              Nil
+            }
           }
         }
-        option.None -> Nil
+        option.None -> {
+          log.debug(
+            "beacon.runtime",
+            "No connection context for effects (broadcast or init)",
+          )
+          Nil
+        }
       }
       let dispatch = fn(msg) {
         process.send(self, EffectDispatched(message: msg))
@@ -855,7 +1282,7 @@ pub fn connect_transport_with_ssr(
     },
     on_event: fn(conn_id, client_msg) {
       case client_msg {
-        transport.ClientEvent(name, handler_id, data, target_path, clock) -> {
+        transport.ClientEvent(name, handler_id, data, target_path, clock, ops) -> {
           process.send(
             runtime,
             ClientEventReceived(
@@ -865,10 +1292,11 @@ pub fn connect_transport_with_ssr(
               event_data: data,
               target_path: target_path,
               clock: clock,
+              ops: ops,
             ),
           )
         }
-        transport.ClientJoin(token) -> {
+        transport.ClientJoin(token, _path) -> {
           process.send(
             runtime,
             ClientJoined(conn_id: conn_id, token: token),
@@ -880,24 +1308,13 @@ pub fn connect_transport_with_ssr(
             ClientNavigated(conn_id: conn_id, path: path),
           )
         }
-        transport.ClientServerFn(name, args, call_id) -> {
-          process.send(
-            runtime,
-            ClientCalledServerFn(
-              conn_id: conn_id,
-              name: name,
-              args: args,
-              call_id: call_id,
-            ),
-          )
-        }
         transport.ClientEventBatch(events) -> {
           // Atomic batch: all events processed, single render at end.
           let event_tuples =
             list.filter_map(events, fn(evt) {
               case evt {
-                transport.ClientEvent(name, handler_id, data, target_path, clock) ->
-                  Ok(#(name, handler_id, data, target_path, clock))
+                transport.ClientEvent(name, handler_id, data, target_path, clock, ops) ->
+                  Ok(#(name, handler_id, data, target_path, clock, ops))
                 _ -> Error(Nil)
               }
             })
@@ -919,7 +1336,118 @@ pub fn connect_transport_with_ssr(
       process.send(runtime, ClientDisconnected(conn_id: conn_id))
     },
     ws_auth: option.None,
+    ssr_factory: option.None,
+    security_limits: transport.default_security_limits(),
   )
+}
+
+/// Start a runtime for a specific connection and return type-erased handler closures.
+/// This is the core helper used by both single-app and file-based routing modes.
+/// Each call spawns a new runtime actor, registers the connection, and returns:
+/// - on_event: forwards ClientMessages to the runtime
+/// - shutdown: kills the runtime process
+///
+/// Types are erased at the function boundary — the returned closures work
+/// with untyped ConnectionId + ClientMessage regardless of Model/Msg types.
+pub fn start_and_connect(
+  config: RuntimeConfig(model, msg),
+  conn_id: transport.ConnectionId,
+  transport_subject: process.Subject(transport.InternalMessage),
+) -> Result(
+  #(
+    fn(transport.ConnectionId, transport.ClientMessage) -> Nil,
+    fn() -> Nil,
+  ),
+  error.BeaconError,
+) {
+  log.info(
+    "beacon.runtime",
+    "Spawning runtime for " <> conn_id,
+  )
+  case start(config) {
+    Ok(runtime_subject) -> {
+      // Register this connection with the new runtime
+      process.send(
+        runtime_subject,
+        ClientConnected(conn_id: conn_id, subject: transport_subject),
+      )
+      // Return per-connection event and shutdown handlers
+      let on_event = fn(_cid: transport.ConnectionId, client_msg) {
+        forward_client_message(runtime_subject, conn_id, client_msg)
+      }
+      let shutdown = fn() {
+        log.info("beacon.runtime", "Shutting down runtime for " <> conn_id)
+        process.send(runtime_subject, Shutdown)
+      }
+      Ok(#(on_event, shutdown))
+    }
+    Error(err) -> {
+      log.error(
+        "beacon.runtime",
+        "Failed to spawn runtime for " <> conn_id <> ": " <> error.to_string(err),
+      )
+      Error(err)
+    }
+  }
+}
+
+/// Forward a client message to a runtime actor.
+/// Translates transport.ClientMessage variants into RuntimeMessage variants.
+fn forward_client_message(
+  runtime_subject: Subject(RuntimeMessage(msg)),
+  conn_id: transport.ConnectionId,
+  client_msg: transport.ClientMessage,
+) -> Nil {
+  case client_msg {
+    transport.ClientEvent(name, handler_id, data, target_path, clock, ops) ->
+      process.send(
+        runtime_subject,
+        ClientEventReceived(
+          conn_id: conn_id,
+          event_name: name,
+          handler_id: handler_id,
+          event_data: data,
+          target_path: target_path,
+          clock: clock,
+          ops: ops,
+        ),
+      )
+    transport.ClientJoin(token, _path) ->
+      process.send(
+        runtime_subject,
+        ClientJoined(conn_id: conn_id, token: token),
+      )
+    transport.ClientNavigate(path) ->
+      process.send(
+        runtime_subject,
+        ClientNavigated(conn_id: conn_id, path: path),
+      )
+    transport.ClientEventBatch(events) -> {
+      let event_tuples =
+        list.filter_map(events, fn(evt) {
+          case evt {
+            transport.ClientEvent(
+              name,
+              handler_id,
+              data,
+              target_path,
+              clock,
+              ops,
+            ) ->
+              Ok(#(name, handler_id, data, target_path, clock, ops))
+            _ -> Error(Nil)
+          }
+        })
+      process.send(
+        runtime_subject,
+        ClientEventBatchReceived(
+          conn_id: conn_id,
+          events: event_tuples,
+        ),
+      )
+    }
+    transport.ClientHeartbeat -> Nil
+  }
 }
 
 /// Create a TransportConfig that spawns a NEW runtime per WebSocket connection.
@@ -944,89 +1472,14 @@ pub fn connect_transport_per_connection(
       conn_id: transport.ConnectionId,
       transport_subject: process.Subject(transport.InternalMessage),
     ) {
-      // Start a fresh runtime for this connection
-      log.info(
-        "beacon.runtime",
-        "Spawning per-connection runtime for " <> conn_id,
-      )
-      case start(config) {
-        Ok(runtime_subject) -> {
-          // Register this connection with the new runtime
-          process.send(
-            runtime_subject,
-            ClientConnected(conn_id: conn_id, subject: transport_subject),
-          )
-          // Return per-connection event and disconnect handlers
-          let on_event = fn(_cid: transport.ConnectionId, client_msg) {
-            case client_msg {
-              transport.ClientEvent(name, handler_id, data, target_path, clock) ->
-                process.send(
-                  runtime_subject,
-                  ClientEventReceived(
-                    conn_id: conn_id,
-                    event_name: name,
-                    handler_id: handler_id,
-                    event_data: data,
-                    target_path: target_path,
-                    clock: clock,
-                  ),
-                )
-              transport.ClientJoin(token) ->
-                process.send(
-                  runtime_subject,
-                  ClientJoined(conn_id: conn_id, token: token),
-                )
-              transport.ClientNavigate(path) ->
-                process.send(
-                  runtime_subject,
-                  ClientNavigated(conn_id: conn_id, path: path),
-                )
-              transport.ClientServerFn(name, args, call_id) ->
-                process.send(
-                  runtime_subject,
-                  ClientCalledServerFn(
-                    conn_id: conn_id,
-                    name: name,
-                    args: args,
-                    call_id: call_id,
-                  ),
-                )
-              transport.ClientEventBatch(events) -> {
-                let event_tuples =
-                  list.filter_map(events, fn(evt) {
-                    case evt {
-                      transport.ClientEvent(
-                        name,
-                        handler_id,
-                        data,
-                        target_path,
-                        clock,
-                      ) ->
-                        Ok(#(name, handler_id, data, target_path, clock))
-                      _ -> Error(Nil)
-                    }
-                  })
-                process.send(
-                  runtime_subject,
-                  ClientEventBatchReceived(
-                    conn_id: conn_id,
-                    events: event_tuples,
-                  ),
-                )
-              }
-              transport.ClientHeartbeat -> Nil
-            }
-          }
+      case start_and_connect(config, conn_id, transport_subject) {
+        Ok(#(on_event, shutdown)) -> {
           let on_disconnect = fn(_cid: transport.ConnectionId) {
-            process.send(runtime_subject, Shutdown)
+            shutdown()
           }
           #(on_event, on_disconnect)
         }
         Error(_err) -> {
-          log.error(
-            "beacon.runtime",
-            "Failed to spawn runtime for " <> conn_id,
-          )
           // Return no-op handlers
           #(fn(_: transport.ConnectionId, _: transport.ClientMessage) { Nil }, fn(
             _: transport.ConnectionId,
@@ -1039,6 +1492,8 @@ pub fn connect_transport_per_connection(
     on_event: fn(_, _) { Nil },
     on_disconnect: fn(_) { Nil },
     ws_auth: option.None,
+    ssr_factory: option.None,
+    security_limits: transport.default_security_limits(),
   )
 }
 
@@ -1148,21 +1603,35 @@ pub fn get_redirect_target() -> option.Option(process.Subject(transport.Internal
 
 /// Attempt to recover model state from a session token.
 /// Token payload contains serialized model data.
+/// Validates both HMAC signature and token age (max_age_seconds).
 fn recover_model_from_token(
   token: String,
   secret_key: String,
   deserialize: fn(String) -> Result(model, String),
+  max_age_seconds: Int,
 ) -> Result(model, String) {
   let secret = bit_array.from_string(secret_key)
   case crypto.verify_signed_message(token, secret) {
     Ok(payload_bits) -> {
       case bit_array.to_string(payload_bits) {
         Ok(payload_str) -> {
-          // Payload is JSON: {"ts":..., "v":1, "model":"..."}
-          // Extract the "model" field
-          case extract_model_data(payload_str) {
-            Ok(model_data) -> deserialize(model_data)
-            Error(reason) -> Error(reason)
+          // Validate token age before deserializing model data
+          case validate_token_age(payload_str, max_age_seconds) {
+            Error(reason) -> {
+              log.warning(
+                "beacon.runtime",
+                "Token age validation failed: " <> reason,
+              )
+              Error(reason)
+            }
+            Ok(Nil) -> {
+              // Payload is JSON: {"ts":..., "v":1, "model":"..."}
+              // Extract the "model" field
+              case extract_model_data(payload_str) {
+                Ok(model_data) -> deserialize(model_data)
+                Error(reason) -> Error(reason)
+              }
+            }
           }
         }
         Error(Nil) -> Error("Invalid token encoding")
@@ -1183,6 +1652,41 @@ fn extract_model_data(payload: String) -> Result(String, String) {
     Ok("") -> Error("No model data in token")
     Ok(data) -> Ok(data)
     Error(_) -> Error("Failed to parse token payload")
+  }
+}
+
+/// Default maximum age for state recovery tokens: 24 hours.
+const default_token_max_age_seconds = 86_400
+
+/// Validate that a token payload has not expired.
+/// Checks the "ts" field against the current time and max_age_seconds.
+fn validate_token_age(
+  payload: String,
+  max_age_seconds: Int,
+) -> Result(Nil, String) {
+  case
+    json.parse(payload, {
+      use ts <- decode.optional_field("ts", 0, decode.int)
+      decode.success(ts)
+    })
+  {
+    Ok(0) -> Error("No timestamp in token")
+    Ok(ts) -> {
+      let now = system_time_seconds()
+      let age = now - ts
+      case age > max_age_seconds {
+        True ->
+          Error(
+            "State token expired (age: "
+            <> int.to_string(age)
+            <> "s, max: "
+            <> int.to_string(max_age_seconds)
+            <> "s)",
+          )
+        False -> Ok(Nil)
+      }
+    }
+    Error(_) -> Error("Failed to parse token timestamp")
   }
 }
 
@@ -1212,3 +1716,4 @@ fn system_time_seconds() -> Int
 import gleam/bit_array
 import gleam/crypto
 import gleam/dynamic/decode
+import gleam/string

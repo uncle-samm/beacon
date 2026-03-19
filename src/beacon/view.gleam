@@ -127,14 +127,22 @@ fn render_children(
   list.fold(children, state, fn(acc, child) { do_render(child, acc) })
 }
 
-/// Render attributes into the static buffer.
+/// Render attributes into static/dynamic parts.
+/// Event attributes (handler IDs) are STATIC — they don't change between renders.
+/// HTML attributes are DYNAMIC — their values may change (e.g., value="...", class="...").
+/// This ensures fingerprints stay stable across renders, so only changed
+/// attribute values are sent as diffs (not the entire template).
 fn render_attrs(state: RenderState, attrs: List(Attr)) -> RenderState {
   list.fold(attrs, state, fn(acc, attr) {
     case attr {
       HtmlAttr(name, value) ->
+        // Attribute VALUE is dynamic — name is static
         acc
-        |> append_static(" " <> name <> "=\"" <> escape_attr(value) <> "\"")
+        |> append_static(" " <> name <> "=\"")
+        |> add_dynamic(escape_attr(value))
+        |> append_static("\"")
       EventAttr(event_name, handler_id) ->
+        // Event handlers are static — they don't change between renders
         acc
         |> append_static(
           " data-beacon-event-"

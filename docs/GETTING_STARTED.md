@@ -105,16 +105,6 @@ beacon.app(init, update, view)
 |> beacon.start(8080)
 ```
 
-### Server Functions
-
-```gleam
-beacon.app(init, update, view)
-|> beacon.server_fn("get_data", fn(args) {
-  Ok(fetch_from_database(args))
-})
-|> beacon.start(8080)
-```
-
 ### Shared State (Stores)
 
 ```gleam
@@ -122,7 +112,8 @@ let shared = store.new("counter")
 store.put(shared, "count", 0)
 
 beacon.app_with_local(init, init_local, update, view)
-|> beacon.watch(shared, fn() { CounterUpdated })
+|> beacon.subscriptions(fn(_model) { [store.topic(shared)] })
+|> beacon.on_notify(fn(_topic) { CounterUpdated })
 |> beacon.start(8080)
 ```
 

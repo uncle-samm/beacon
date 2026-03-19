@@ -12,10 +12,15 @@
 /// ```
 
 import beacon/application
+import beacon/build
 import beacon/effect
 import beacon/element.{type Attr}
 import beacon/error
 import beacon/handler
+import beacon/router/codegen as router_codegen
+import beacon/router/manager as route_manager
+import beacon/router/scanner as router_scanner
+import beacon/static
 
 /// A node in the virtual DOM tree. Re-exported from `beacon/element`.
 pub type Node(msg) =
@@ -25,12 +30,14 @@ import beacon/middleware
 import beacon/pubsub
 import beacon/route
 import beacon/runtime
+import beacon/ssr
 import beacon/transport
 import gleam/erlang/process
-import gleam/dict
 import gleam/list
 import gleam/int
 import gleam/option.{type Option, None, Some}
+import gleam/string
+import simplifile
 
 // ===== Event Helpers =====
 // These register handlers in the per-render registry.
@@ -139,12 +146,15 @@ pub opaque type AppBuilder(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when the URL changes — produces a Msg for the update loop.
     on_route_change: Option(fn(route.Route) -> msg),
-    /// Registered server functions: name → handler(args) → Result(result, error).
-    server_fns: dict.Dict(String, fn(String) -> Result(String, String)),
     /// Dynamic subscription function: model → list of topics.
     dynamic_subscriptions: Option(fn(model) -> List(String)),
     /// Topic-aware notification handler for dynamic subscriptions.
     on_notify: Option(fn(String) -> msg),
+    /// Server-side effect handler — runs AFTER update on the server.
+    /// Used to separate pure update logic (compiles to JS) from side effects (server only).
+    on_update_effect: Option(fn(model, msg) -> effect.Effect(msg)),
+    /// Configurable security limits for the transport layer.
+    security_limits: transport.SecurityLimits,
   )
 }
 
@@ -173,14 +183,15 @@ pub fn app(
     has_local: False,
     route_patterns: [],
     on_route_change: None,
-    server_fns: dict.new(),
     dynamic_subscriptions: None,
     on_notify: None,
+    on_update_effect: None,
+    security_limits: transport.default_security_limits(),
   )
 }
 
 /// Create an app with effect-returning init/update.
-/// Use this when you need server functions, async work, or other effects.
+/// Use this when you need effects, async work, or other side effects.
 pub fn app_with_effects(
   init: fn() -> #(model, effect.Effect(msg)),
   update: fn(model, msg) -> #(model, effect.Effect(msg)),
@@ -201,9 +212,10 @@ pub fn app_with_effects(
     has_local: False,
     route_patterns: [],
     on_route_change: None,
-    server_fns: dict.new(),
     dynamic_subscriptions: None,
     on_notify: None,
+    on_update_effect: None,
+    security_limits: transport.default_security_limits(),
   )
 }
 
@@ -250,9 +262,10 @@ pub fn app_with_local(
     has_local: True,
     route_patterns: [],
     on_route_change: None,
-    server_fns: dict.new(),
     dynamic_subscriptions: None,
     on_notify: None,
+    on_update_effect: None,
+    security_limits: transport.default_security_limits(),
   )
 }
 
@@ -316,7 +329,13 @@ pub fn redirect(path: String) -> effect.Effect(msg) {
           subject,
           transport.SendNavigate(path: path),
         )
-      option.None -> Nil
+      option.None -> {
+        log.debug(
+          "beacon",
+          "No redirect target available (effect ran outside connection context)",
+        )
+        Nil
+      }
     }
   })
 }
@@ -346,23 +365,44 @@ pub fn on_notify(
   AppBuilder(..builder, on_notify: Some(handler))
 }
 
-/// Register a server function callable from the client.
-/// Server functions execute on the server and return results via WebSocket.
+/// Register a server-side effect handler.
+/// Runs AFTER update on the server — use for stores, PubSub, BEAM operations.
+/// This keeps update() pure (compilable to JS for LOCAL events).
+/// ```gleam
+/// beacon.app_with_local(init, init_local, update, view)
+/// |> beacon.on_update(fn(model, msg) {
+///   case msg {
+///     AddCard -> effect.from(fn(_) { store.put(store, "v", ...) })
+///     _ -> effect.none()
+///   }
+/// })
+/// |> beacon.start(8080)
+/// ```
+pub fn on_update(
+  builder: AppBuilder(model, msg),
+  handler: fn(model, msg) -> effect.Effect(msg),
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, on_update_effect: Some(handler))
+}
+
+/// Override security limits for the app.
+/// Use `transport.default_security_limits()` as a starting point and modify fields.
+///
+/// Example:
 /// ```gleam
 /// beacon.app(init, update, view)
-/// |> beacon.server_fn("get_posts", fn(args) {
-///   Ok(json.to_string(encode_posts(db.get_posts())))
-/// })
+/// |> beacon.security_limits(transport.SecurityLimits(
+///   ..transport.default_security_limits(),
+///   max_connections: 5000,
+///   max_events_per_second: 100,
+/// ))
+/// |> beacon.start(8080)
 /// ```
-pub fn server_fn(
+pub fn security_limits(
   builder: AppBuilder(model, msg),
-  name: String,
-  handler: fn(String) -> Result(String, String),
+  limits: transport.SecurityLimits,
 ) -> AppBuilder(model, msg) {
-  AppBuilder(
-    ..builder,
-    server_fns: dict.insert(builder.server_fns, name, handler),
-  )
+  AppBuilder(..builder, security_limits: limits)
 }
 
 /// Set the secret key for session tokens.
@@ -412,24 +452,57 @@ pub fn start(
   port: Int,
 ) -> Result(Nil, error.BeaconError) {
   log.configure()
-  // Wrap simple init/update into effect-returning versions
+  // Validate required functions before doing any work.
+  // Both init and update must be provided (either simple or effect variant).
   let wrapped_init = case builder.init_effect {
-    Some(init_fn) -> init_fn
+    Some(init_fn) -> Ok(init_fn)
     None ->
       case builder.init_simple {
-        Some(init_fn) -> fn() { #(init_fn(), effect.none()) }
-        None -> fn() { panic as "No init function provided" }
+        Some(init_fn) -> Ok(fn() { #(init_fn(), effect.none()) })
+        None -> Error(error.ConfigError(reason: "No init function provided — use beacon.app() or beacon.app_with_effects()"))
       }
   }
-  let wrapped_update = case builder.update_effect {
-    Some(update_fn) -> update_fn
+  let base_update = case builder.update_effect {
+    Some(update_fn) -> Ok(update_fn)
     None ->
       case builder.update_simple {
-        Some(update_fn) -> fn(model, msg) {
+        Some(update_fn) -> Ok(fn(model, msg) {
           #(update_fn(model, msg), effect.none())
-        }
-        None -> fn(_, _) { panic as "No update function provided" }
+        })
+        None -> Error(error.ConfigError(reason: "No update function provided — use beacon.app() or beacon.app_with_effects()"))
       }
+  }
+  // Return early if validation failed
+  case wrapped_init, base_update {
+    Error(err), _ -> {
+      log.error("beacon", "Configuration error: " <> error.to_string(err))
+      Error(err)
+    }
+    _, Error(err) -> {
+      log.error("beacon", "Configuration error: " <> error.to_string(err))
+      Error(err)
+    }
+    Ok(init_fn), Ok(update_fn) -> start_validated(builder, port, init_fn, update_fn)
+  }
+}
+
+/// Internal: start the app after validation passes.
+fn start_validated(
+  builder: AppBuilder(model, msg),
+  port: Int,
+  wrapped_init: fn() -> #(model, effect.Effect(msg)),
+  base_update: fn(model, msg) -> #(model, effect.Effect(msg)),
+) -> Result(Nil, error.BeaconError) {
+  // Auto-build client JS if not already built
+  auto_build_client_js()
+  // If on_update_effect is set, chain it after the base update
+  let wrapped_update = case builder.on_update_effect {
+    None -> base_update
+    Some(on_update_fn) -> fn(model, msg) {
+      let #(new_model, base_effect) = base_update(model, msg)
+      let extra_effect = on_update_fn(new_model, msg)
+      #(new_model, effect.batch([base_effect, extra_effect]))
+    }
   }
   let config =
     application.AppConfig(
@@ -446,9 +519,9 @@ pub fn start(
       static_dir: builder.static_dir,
       route_patterns: builder.route_patterns,
       on_route_change: builder.on_route_change,
-      server_fns: builder.server_fns,
       dynamic_subscriptions: builder.dynamic_subscriptions,
       on_notify: builder.on_notify,
+      security_limits: builder.security_limits,
     )
   case application.start(config) {
     Ok(_app) -> {
@@ -460,11 +533,264 @@ pub fn start(
   }
 }
 
+// ===== Router Builder (File-Based Routing) =====
+
+/// A router being configured. Use `router()` to create, then pipe through
+/// configuration functions, then call `start_router()`.
+///
+/// Unlike AppBuilder, there is no init/update/view — those come from route files.
+/// ```gleam
+/// beacon.router()
+/// |> beacon.router_title("My App")
+/// |> beacon.start_router(8080)
+/// ```
+pub opaque type RouterBuilder {
+  RouterBuilder(
+    title: String,
+    secret_key: String,
+    middlewares: List(middleware.Middleware),
+    static_dir: Option(String),
+    routes_dir: String,
+    security_limits: transport.SecurityLimits,
+  )
+}
+
+/// Create a new router builder for file-based routing.
+/// Route files are loaded from `src/routes/` by default.
+pub fn router() -> RouterBuilder {
+  RouterBuilder(
+    title: "Beacon",
+    secret_key: generate_secret(),
+    middlewares: [middleware.secure_headers()],
+    static_dir: None,
+    routes_dir: "src/routes",
+    security_limits: transport.default_security_limits(),
+  )
+}
+
+/// Set the page title for the router.
+pub fn router_title(
+  builder: RouterBuilder,
+  t: String,
+) -> RouterBuilder {
+  RouterBuilder(..builder, title: t)
+}
+
+/// Set the secret key for the router.
+pub fn router_secret_key(
+  builder: RouterBuilder,
+  key: String,
+) -> RouterBuilder {
+  RouterBuilder(..builder, secret_key: key)
+}
+
+/// Add a middleware to the router pipeline.
+pub fn router_middleware(
+  builder: RouterBuilder,
+  mw: middleware.Middleware,
+) -> RouterBuilder {
+  RouterBuilder(
+    ..builder,
+    middlewares: list_append(builder.middlewares, [mw]),
+  )
+}
+
+/// Enable static file serving for the router.
+pub fn router_static_dir(
+  builder: RouterBuilder,
+  dir: String,
+) -> RouterBuilder {
+  RouterBuilder(..builder, static_dir: Some(dir))
+}
+
+/// Set the routes directory (defaults to "src/routes").
+pub fn router_routes_dir(
+  builder: RouterBuilder,
+  dir: String,
+) -> RouterBuilder {
+  RouterBuilder(..builder, routes_dir: dir)
+}
+
+/// Override security limits for the router.
+/// Use `transport.default_security_limits()` as a starting point and modify fields.
+pub fn router_security_limits(
+  builder: RouterBuilder,
+  limits: transport.SecurityLimits,
+) -> RouterBuilder {
+  RouterBuilder(..builder, security_limits: limits)
+}
+
+/// Start the file-based router on the given port. Blocks forever.
+///
+/// This:
+/// 1. Auto-runs route scanner + codegen (generates dispatcher)
+/// 2. Loads the generated route_dispatcher module
+/// 3. Creates a transport with a route manager per connection
+/// 4. Starts the server
+pub fn start_router(
+  builder: RouterBuilder,
+  port: Int,
+) -> Result(Nil, error.BeaconError) {
+  log.configure()
+  log.info("beacon", "Starting file-based router on port " <> int.to_string(port))
+
+  // Step 1: Auto-run route scanner + codegen
+  auto_generate_routes(builder.routes_dir)
+
+  // Step 2: Purge any stale beacon_codec module.
+  // Routed apps have different Model/Msg per route — a global codec would be wrong.
+  // The runtime will use mount (HTML) instead of model_sync (JSON).
+  purge_stale_codec()
+
+  // Step 3: Build base client JS if not already built.
+  // For routed apps, we build ONLY the base runtime (WS, morphing, event delegation)
+  // WITHOUT app-specific codecs, since each route has different Model/Msg types.
+  auto_build_base_client_js()
+
+  // Step 3: Start PubSub
+  pubsub.start()
+
+  // Step 4: Create the dispatcher function via Erlang FFI
+  let dispatcher = fn(
+    conn_id: transport.ConnectionId,
+    transport_subject: process.Subject(transport.InternalMessage),
+    path: String,
+  ) {
+    call_start_for_route(conn_id, transport_subject, path)
+  }
+
+  // Step 5: Create SSR factory
+  let ssr_factory = fn(path: String) -> String {
+    case call_ssr_for_route(path, builder.title, builder.secret_key) {
+      Ok(page) -> page.html
+      Error(err) -> {
+        log.error(
+          "beacon",
+          "SSR render failed for path " <> path <> ": " <> error.to_string(err),
+        )
+        "<!DOCTYPE html><html><body><h1>500 Internal Server Error</h1><p>SSR render failed: "
+          <> error.to_string(err)
+          <> "</p></body></html>"
+      }
+    }
+  }
+
+  // Step 6: Create transport config with route manager factory
+  let static_cfg = case builder.static_dir {
+    Some(dir) ->
+      Some(static.StaticConfig(
+        directory: dir,
+        prefix: "/static",
+        max_age: 3600,
+      ))
+    None -> None
+  }
+
+  let transport_config =
+    transport.TransportConfig(
+      port: port,
+      page_html: None,
+      middlewares: builder.middlewares,
+      static_config: static_cfg,
+      runtime_factory: Some(fn(
+        conn_id: transport.ConnectionId,
+        transport_subject: process.Subject(transport.InternalMessage),
+      ) {
+        route_manager.start(conn_id, transport_subject, dispatcher)
+      }),
+      on_connect: fn(_, _) { Nil },
+      on_event: fn(_, _) { Nil },
+      on_disconnect: fn(_) { Nil },
+      ws_auth: None,
+      ssr_factory: Some(ssr_factory),
+      security_limits: builder.security_limits,
+    )
+
+  case transport.start(transport_config) {
+    Ok(_pid) -> {
+      log.info(
+        "beacon",
+        "Router running at http://localhost:" <> int.to_string(port),
+      )
+      application.wait_forever()
+      Ok(Nil)
+    }
+    Error(err) -> Error(err)
+  }
+}
+
+/// Auto-generate routes from src/routes/ directory.
+fn auto_generate_routes(routes_dir: String) -> Nil {
+  log.info("beacon", "Auto-generating routes from " <> routes_dir)
+  case simplifile.is_directory(routes_dir) {
+    Ok(True) -> {
+      case simplifile.create_directory_all("src/generated") {
+        Ok(Nil) -> Nil
+        Error(err) -> {
+          log.error(
+            "beacon",
+            "Failed to create src/generated: " <> string.inspect(err),
+          )
+          Nil
+        }
+      }
+      case router_scanner.scan_routes(routes_dir) {
+        Ok(routes) -> {
+          case router_codegen.generate(routes, "src/generated/routes.gleam") {
+            Ok(Nil) -> Nil
+            Error(err) -> {
+              log.error(
+                "beacon",
+                "Routes generation failed: " <> error.to_string(err),
+              )
+            }
+          }
+          case router_codegen.generate_dispatcher(routes, "src/generated/route_dispatcher.gleam") {
+            Ok(Nil) -> {
+              // Compile the generated files
+              let _ = build.run_gleam_build()
+              hot_reload_dispatcher()
+              log.info("beacon", "Route dispatcher generated and loaded")
+              Nil
+            }
+            Error(err) -> {
+              log.error(
+                "beacon",
+                "Dispatcher generation failed: " <> error.to_string(err),
+              )
+            }
+          }
+        }
+        Error(err) ->
+          log.error(
+            "beacon",
+            "Route scanning failed: " <> error.to_string(err),
+          )
+      }
+    }
+    _ -> {
+      log.warning(
+        "beacon",
+        "No routes directory found at " <> routes_dir
+          <> " — no routes to generate",
+      )
+    }
+  }
+}
+
 // === Internal ===
 
 fn generate_secret() -> String {
-  "beacon_" <> int.to_string(erlang_unique()) <> "_secret"
+  let secret = do_generate_strong_secret()
+  log.warning(
+    "beacon",
+    "Using auto-generated secret_key — tokens will be invalid after restart. Set explicit secret_key() for production.",
+  )
+  secret
 }
+
+@external(erlang, "beacon_application_ffi", "generate_strong_secret")
+fn do_generate_strong_secret() -> String
 
 fn list_append(a: List(x), b: List(x)) -> List(x) {
   do_list_append(a, b)
@@ -473,5 +799,74 @@ fn list_append(a: List(x), b: List(x)) -> List(x) {
 @external(erlang, "lists", "append")
 fn do_list_append(a: List(x), b: List(x)) -> List(x)
 
-@external(erlang, "erlang", "unique_integer")
-fn erlang_unique() -> Int
+/// Hot-reload the beacon_codec module after auto-build generates it.
+@external(erlang, "beacon_auto_build_ffi", "hot_reload_codec")
+fn hot_reload_codec() -> Nil
+
+/// Auto-build client JS and codec if not already built.
+/// Generates beacon_codec.gleam and compiles it, then builds the JS bundle.
+fn auto_build_client_js() -> Nil {
+  case simplifile.is_file("priv/static/beacon_client.manifest") {
+    Ok(True) -> {
+      log.info("beacon", "Client JS already built")
+      Nil
+    }
+    _ -> {
+      log.info("beacon", "Auto-building client JS...")
+      build.auto_build()
+      // Recompile and hot-reload the codec into the running BEAM
+      let _ = build.run_gleam_build()
+      hot_reload_codec()
+      Nil
+    }
+  }
+}
+
+/// Build the base client JS for routed apps.
+/// Unlike auto_build_client_js, this builds ONLY the base runtime
+/// (WebSocket, morphing, event delegation) WITHOUT app-specific codecs.
+/// Each route has different Model/Msg types, so a global codec would be wrong.
+fn auto_build_base_client_js() -> Nil {
+  case simplifile.is_file("priv/static/beacon_client.manifest") {
+    Ok(True) -> {
+      log.info("beacon", "Client JS already built")
+      Nil
+    }
+    _ -> {
+      log.info("beacon", "Building base client JS for router...")
+      build.build_base_client()
+      Nil
+    }
+  }
+}
+
+/// Dynamically call the generated route dispatcher's start_for_route.
+@external(erlang, "beacon_router_ffi", "call_start_for_route")
+fn call_start_for_route(
+  conn_id: transport.ConnectionId,
+  transport_subject: process.Subject(transport.InternalMessage),
+  path: String,
+) -> Result(
+  #(
+    fn(transport.ConnectionId, transport.ClientMessage) -> Nil,
+    fn() -> Nil,
+  ),
+  error.BeaconError,
+)
+
+/// Dynamically call the generated route dispatcher's ssr_for_route.
+@external(erlang, "beacon_router_ffi", "call_ssr_for_route")
+fn call_ssr_for_route(
+  path: String,
+  title: String,
+  secret_key: String,
+) -> Result(ssr.RenderedPage, error.BeaconError)
+
+/// Hot-reload the generated route dispatcher module.
+@external(erlang, "beacon_router_ffi", "hot_reload_dispatcher")
+fn hot_reload_dispatcher() -> Nil
+
+/// Purge any stale beacon_codec module from the BEAM.
+/// For routed apps, a global codec is wrong (each route has different types).
+@external(erlang, "beacon_router_ffi", "purge_stale_codec")
+fn purge_stale_codec() -> Nil

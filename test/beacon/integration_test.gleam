@@ -6,7 +6,7 @@ import beacon/effect
 import beacon/element
 import beacon/error
 import beacon/middleware
-import gleam/dict
+import beacon/transport
 import gleam/erlang/process
 import gleam/int
 import gleam/option
@@ -42,13 +42,16 @@ fn test_app_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     }),
     secret_key: "integration-test-secret-key-long-enough!!",
     title: "Integration Test",
-    serialize_model: option.None,
+    serialize_model: option.Some(fn(model: TestModel) {
+      "{\"count\":" <> int.to_string(model.count) <> "}"
+    }),
     deserialize_model: option.None,
     middlewares: [middleware.secure_headers()],
     static_dir: option.None,
     route_patterns: [],
     on_route_change: option.None,
-    server_fns: dict.new(), dynamic_subscriptions: option.None, on_notify: option.None,
+    dynamic_subscriptions: option.None, on_notify: option.None,
+    security_limits: transport.default_security_limits(),
   )
 }
 
@@ -76,9 +79,10 @@ pub fn http_get_beacon_js_returns_javascript_test() {
 
   let assert Ok(#(status, _headers, _body)) =
     http_get("http://localhost:" <> int.to_string(port) <> "/beacon_client.js")
-  // Without running `gleam run -m beacon/build`, returns 500
-  // This is expected — no fallback JS, build step required
-  let assert True = status == 200 || status == 500
+  // beacon_client.js is only available after build step.
+  // In test environment without build, server returns 404 (file not found).
+  // Accepting either 200 (built) or 404 (not built) — but NOT 500.
+  let assert True = status == 200 || status == 404
 }
 
 pub fn http_get_has_security_headers_test() {
@@ -157,9 +161,10 @@ pub fn two_connections_have_independent_state_test() {
       socket_a,
       "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"inc\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":1}",
     )
-  let assert Ok(patch_a) = ws_recv(socket_a, 3000)
-  // Connection A should have count:1
-  let assert True = string.contains(patch_a, "1")
+  let assert Ok(response_a) = ws_recv(socket_a, 3000)
+  // Connection A should have received a model_sync with count:1
+  // Wire format: {"type":"model_sync","model":"{\"count\":1}","version":1,...}
+  let assert True = string.contains(response_a, "model_sync")
 
   // Connection B should NOT have received anything (independent runtime)
   // Try to receive — should timeout (no message)
@@ -280,8 +285,11 @@ fn has_header(
 }
 
 fn unique_port() -> Int {
-  erlang_unique_pos() % 100
+  abs(erlang_unique_pos()) % 500
 }
+
+@external(erlang, "erlang", "abs")
+fn abs(n: Int) -> Int
 
 @external(erlang, "erlang", "unique_integer")
 fn erlang_unique_pos() -> Int

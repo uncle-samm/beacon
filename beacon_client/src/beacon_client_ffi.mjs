@@ -4,6 +4,7 @@
 // Local-only events produce ZERO WebSocket traffic.
 
 import { Ok, Error as GleamError } from "./gleam.mjs";
+import { diffModels, applyOps } from "./beacon_client/patch.mjs";
 
 // === State ===
 const _pd = {};
@@ -13,16 +14,29 @@ let reconnectAttempts = 0;
 let appRoot = null;
 let hydrated = false;
 let eventClock = 0;
-let cachedStatics = null;
-let cachedDynamics = [];
+
+// === Client-Side Event Rate Limiting ===
+let eventSendCount = 0;
+let eventSendWindowStart = 0;
+const MAX_EVENTS_PER_SECOND = 30;
+
+function isEventRateLimited() {
+  const now = Date.now();
+  if (now - eventSendWindowStart > 1000) {
+    eventSendCount = 0;
+    eventSendWindowStart = now;
+  }
+  eventSendCount++;
+  return eventSendCount > MAX_EVENTS_PER_SECOND;
+}
 
 // === Client-Side State (when BeaconApp is available) ===
 let clientModel = null;
 let clientLocal = null;
 let clientRegistry = null;
 let clientInitialized = false;
-let localEventBuffer = [];  // Buffered LOCAL events — replayed atomically on server before MODEL events
 let renderPending = false;  // RAF throttle: true when a render is scheduled
+let clientModelJson = null;  // Cached JSON representation for patch diffing
 
 // === Process Dictionary (handler registry storage) ===
 export function pd_set(key, value) { _pd[key] = value; return undefined; }
@@ -32,35 +46,11 @@ export function pd_get(key) {
 
 // === Client-Side Execution ===
 export function initClient() {
-  if (clientInitialized || !window.BeaconApp) return;
-  const App = window.BeaconApp;
-  if (!App.init || !App.init_local || !App.update || !App.view_to_html) return;
-
-  try {
-    clientModel = App.init();
-    clientLocal = App.init_local(clientModel);
-
-    // Build handler registry via phantom render
-    App.start_render();
-    const clientHtml = App.view_to_html(clientModel, clientLocal);
-    clientRegistry = App.finish_render();
-
-    // Verify client render matches server SSR before enabling local execution
-    const serverText = (appRoot?.textContent || "").substring(0, 30).trim();
-    const tpl = document.createElement("template");
-    tpl.innerHTML = clientHtml;
-    const clientText = tpl.content.textContent.substring(0, 30).trim();
-    console.log("[beacon] Mismatch check: client='" + clientText + "' server='" + serverText + "'");
-    if (serverText && clientText && clientText !== serverText) {
-      console.log("[beacon] Server-only mode — compiled JS is for different app");
-      return;
-    }
-
-    clientInitialized = true;
-    console.log("[beacon] Client-side execution ready");
-  } catch (e) {
-    console.error("[beacon] initClient failed:", e);
-  }
+  // State-over-the-wire: client waits for model_sync from server to initialize.
+  // The real model comes from the server — we don't use the stub init().
+  // handleModelSync will set clientModel, clientLocal, and clientInitialized.
+  if (!window.BeaconApp) return;
+  console.log("[beacon] BeaconApp loaded, waiting for model_sync...");
 }
 
 function clientRenderNow() {
@@ -102,48 +92,57 @@ function clientRenderFlush() {
 }
 
 // Handles an event locally. Returns:
-// "local" — handled client-only, don't send
-// "send" — send this single event to server
-// "batched" — already sent as part of a batch
+// {action: "local"} — LOCAL event, handled client-only, don't send to server
+// {action: "send", ops: ""} — MODEL event, send to server with no ops (no encoder)
+// {action: "send", ops: "..."} — MODEL event, send ops (JSON-encoded patch array)
 function handleEventLocally(handlerId, eventData, eventName, targetPath, clock) {
-  if (!clientInitialized) return "send";
+  if (!clientInitialized) return { action: "send", ops: "" };
   const App = window.BeaconApp;
 
+  // If update isn't available on client (impure app), send everything to server
+  if (!App.update || !App.msg_affects_model) return { action: "send", ops: "" };
+
   const result = App.resolve_handler(clientRegistry, handlerId, eventData);
-  if (!result.isOk()) return "send";
+  if (!result.isOk()) return { action: "send", ops: "" };
 
   try {
     const msg = result[0];
+    // Snapshot model JSON before update (for diffing)
+    const oldModelJson = clientModelJson;
+
     const updateResult = App.update(clientModel, clientLocal, msg);
     clientModel = updateResult[0];
     clientLocal = updateResult[1];
     clientRender();
 
     if (App.msg_affects_model(msg)) {
-      // MODEL event — flush any pending render before sending to server
-      clientRenderFlush();
-      // Send buffered LOCAL events + this event as atomic batch.
-      if (localEventBuffer.length > 0) {
-        const batch = localEventBuffer.slice();
-        batch.push({ name: eventName, handler_id: handlerId, data: eventData, target_path: targetPath, clock: clock });
-        send({ type: "event_batch", events: batch });
-        localEventBuffer = [];
-        return "batched";
+      // MODEL event — applied optimistically, now diff and send ops
+      let ops = "";
+      if (oldModelJson && App.encode_model) {
+        try {
+          // encode_model takes (model, local) to match server's model_sync format
+          const newModelJsonStr = App.encode_model(clientModel, clientLocal);
+          const newModelJson = JSON.parse(newModelJsonStr);
+          const patchOps = diffModels(oldModelJson, newModelJson);
+          if (patchOps.length > 0) {
+            ops = JSON.stringify(patchOps);
+          }
+          // Update cached JSON for future diffs
+          clientModelJson = newModelJson;
+        } catch (e) {
+          console.warn("[beacon] Model diff failed, sending without ops:", e.message);
+          ops = "";
+        }
       }
-      return "send";  // no buffer, send single event
+      return { action: "send", ops };
     } else {
-      // LOCAL event — buffer for potential replay, don't send.
-      // Cap buffer at 2000 events to prevent memory issues on very long drags.
-      // Older events are dropped — the server will still get the final MODEL state.
-      if (localEventBuffer.length < 2000) {
-        localEventBuffer.push({ name: eventName, handler_id: handlerId, data: eventData, target_path: targetPath, clock: clock });
-      }
-      return "local";
+      // LOCAL event — client-only, zero server traffic
+      return { action: "local" };
     }
   } catch (e) {
-    console.error("[beacon] Local update failed, falling back to server-only:", e);
+    console.error("[beacon] Local update crashed — disabling client execution. All events will go to server.", e);
     clientInitialized = false;
-    return "send";
+    return { action: "send", ops: "" };
   }
 }
 
@@ -165,7 +164,7 @@ function connect(wsUrl) {
     reconnectAttempts = 0;
     startHeartbeat();
     const token = appRoot ? appRoot.getAttribute("data-beacon-token") || "" : "";
-    send({ type: "join", token });
+    send({ type: "join", token, path: location.pathname + location.search });
   };
   ws.onmessage = (e) => handleMessage(e.data);
   ws.onclose = () => { stopHeartbeat(); scheduleReconnect(wsUrl); };
@@ -173,12 +172,15 @@ function connect(wsUrl) {
 }
 
 function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
+// Debug: expose WS state for testing
+window.__beaconWsState = () => ws ? ws.readyState : -1;
 function startHeartbeat() { stopHeartbeat(); heartbeatTimer = setInterval(() => send({ type: "heartbeat" }), 30000); }
 function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } }
 function scheduleReconnect(wsUrl) {
   const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+  const jitter = Math.floor(Math.random() * 1000);
   reconnectAttempts++;
-  setTimeout(() => connect(wsUrl), delay);
+  setTimeout(() => connect(wsUrl), delay + jitter);
 }
 
 export function ws_send(data) { send(JSON.parse(data)); return undefined; }
@@ -187,12 +189,15 @@ export function ws_connect(url) { connect(url); return undefined; }
 // === Message Handling ===
 function handleMessage(raw) {
   let msg;
-  try { msg = JSON.parse(raw); } catch (e) { return; }
+  // Intentional early return on parse failure: malformed messages from the server
+  // cannot be processed. We log the error and discard the message rather than
+  // crashing the entire client runtime. This is acceptable because a single
+  // corrupt frame should not take down the WS connection.
+  try { msg = JSON.parse(raw); } catch (e) { console.error("[beacon] Failed to parse server message:", e.message, raw.substring(0, 100)); return; }
   switch (msg.type) {
     case "mount": handleMount(msg.payload); break;
-    case "patch": handlePatch(msg.payload); break;
     case "model_sync": handleModelSync(msg.model, msg.version); break;
-    case "server_fn_result": handleServerFnResult(msg.call_id, msg.result, msg.ok); break;
+    case "patch": handlePatch(msg.ops, msg.version); break;
     case "navigate": handleServerNavigate(msg.path); break;
     case "reload": console.log("[beacon] Hot reload — refreshing..."); location.reload(); break;
     case "heartbeat_ack": break;
@@ -203,32 +208,12 @@ function handleMessage(raw) {
 function handleMount(payload) {
   if (!appRoot) return;
   if (hydrated) {
+    // SSR content already in DOM — just attach events and wait for model_sync
     hydrated = false;
-    try { const d = JSON.parse(payload); if (d && d.s) { cachedStatics = d.s; cachedDynamics = extractDynamics(d); } } catch (e) {}
     attachEvents();
     return;
   }
-  try {
-    const d = JSON.parse(payload);
-    if (d && d.s) { cachedStatics = d.s; cachedDynamics = extractDynamics(d); morphInnerHTML(appRoot, zipSD(cachedStatics, cachedDynamics)); attachEvents(); return; }
-  } catch (e) {}
-  morphInnerHTML(appRoot, payload);
-  attachEvents();
-}
-
-function handlePatch(payload) {
-  if (!appRoot) return;
-  try {
-    const d = JSON.parse(payload);
-    if (Array.isArray(d)) { applyPatches(d); return; }
-    if (d && d.s) { cachedStatics = d.s; cachedDynamics = extractDynamics(d); morphInnerHTML(appRoot, zipSD(cachedStatics, cachedDynamics)); attachEvents(); return; }
-    if (d && cachedStatics) {
-      for (const k in d) { if (k !== "s") { const idx = parseInt(k, 10); if (!isNaN(idx)) cachedDynamics[idx] = d[k]; } }
-      morphInnerHTML(appRoot, zipSD(cachedStatics, cachedDynamics));
-      attachEvents();
-      return;
-    }
-  } catch (e) {}
+  // Plain HTML from server — morph into DOM
   morphInnerHTML(appRoot, payload);
   attachEvents();
 }
@@ -243,19 +228,78 @@ function handleModelSync(modelJson, version) {
     if (result.isOk()) {
       clientModel = result[0];
 
-      // Re-enable local execution if it was disabled by a failure
-      if (!clientInitialized && clientLocal !== null) {
-        clientInitialized = true;
-        console.log("[beacon] Local execution re-enabled after model sync");
+      // Cache JSON representation for future patch diffing
+      try { clientModelJson = JSON.parse(modelJson); } catch (e) { console.error("[beacon] Failed to parse cached model JSON:", e.message); clientModelJson = null; }
+
+      // Decode Local state if available
+      if (App.decode_local) {
+        const localResult = App.decode_local(modelJson);
+        if (localResult.isOk()) {
+          clientLocal = localResult[0];
+        }
       }
 
-      if (clientInitialized) {
-        clientRender();
+      // Initialize client-side execution on first model_sync if not already done
+      if (!clientInitialized) {
+        if (!clientLocal && App.init_local) {
+          clientLocal = App.init_local(clientModel);
+        }
+        if (!clientLocal) clientLocal = null;
+        clientInitialized = true;
+        console.log("[beacon] Client-side execution ready (from model_sync)");
       }
+
+      // Use synchronous render to ensure DOM updates immediately
+      // (requestAnimationFrame may not fire in background tabs)
+      clientRenderNow();
       console.log("[beacon] Model synced v" + version);
     }
   } catch (e) {
     console.error("[beacon] Model sync decode failed:", e);
+  }
+}
+
+function handlePatch(opsJson, version) {
+  if (!window.BeaconApp) return;
+  const App = window.BeaconApp;
+  if (!App.decode_model || !clientModelJson) {
+    // No cached model to patch — request full sync
+    console.warn("[beacon] Patch received but no cached model, ignoring");
+    return;
+  }
+
+  try {
+    // Parse the ops (server sends them as a JSON string)
+    const ops = typeof opsJson === "string" ? JSON.parse(opsJson) : opsJson;
+    if (!Array.isArray(ops) || ops.length === 0) return;
+
+    // Apply patch operations to cached JSON model
+    const newModelJson = applyOps(clientModelJson, ops);
+    clientModelJson = newModelJson;
+
+    // Re-encode to string and decode to Gleam model
+    const newModelStr = JSON.stringify(newModelJson);
+    const result = App.decode_model(newModelStr);
+    if (result.isOk()) {
+      clientModel = result[0];
+
+      // Decode Local state if available
+      if (App.decode_local) {
+        const localResult = App.decode_local(newModelStr);
+        if (localResult.isOk()) {
+          clientLocal = localResult[0];
+        }
+      }
+
+      clientRenderNow();
+      console.log("[beacon] Patch applied v" + version + " (" + ops.length + " ops)");
+    } else {
+      console.error("[beacon] Patch decode failed, requesting full sync");
+      clientModelJson = null;
+    }
+  } catch (e) {
+    console.error("[beacon] Patch apply failed:", e);
+    clientModelJson = null;
   }
 }
 
@@ -268,42 +312,6 @@ function handleServerNavigate(path) {
 }
 
 // === Rendered Format ===
-function extractDynamics(data) { const r = []; let i = 0; while (data.hasOwnProperty(String(i))) { r.push(data[String(i)]); i++; } return r; }
-function zipSD(s, d) { let h = ""; for (let i = 0; i < s.length; i++) { h += s[i]; if (i < d.length) h += d[i]; } return h; }
-
-// === Patch Application ===
-function applyPatches(patches) { for (const p of patches) applyPatch(p); attachEvents(); }
-function applyPatch(p) {
-  const node = resolveNode(p.path);
-  if (!node) return;
-  switch (p.op) {
-    case "replace_text": node.textContent = p.content; break;
-    case "replace_node": { const nn = createNode(p.node); if (node.parentNode) node.parentNode.replaceChild(nn, node); break; }
-    case "insert_child": { const nc = createNode(p.node); node.insertBefore(nc, node.childNodes[p.index] || null); break; }
-    case "remove_child": { const ch = node.childNodes[p.index]; if (ch) node.removeChild(ch); break; }
-    case "set_attr": if (node.setAttribute) node.setAttribute(p.name, p.value); break;
-    case "remove_attr": if (node.removeAttribute) node.removeAttribute(p.name); break;
-    case "set_event": if (node.setAttribute) node.setAttribute("data-beacon-event-" + p.event, p.handler); break;
-    case "remove_event": if (node.removeAttribute) node.removeAttribute("data-beacon-event-" + p.event); break;
-  }
-}
-
-function resolveNode(path) {
-  let n = appRoot;
-  for (let i = 0; i < path.length; i++) { if (!n || path[i] >= n.childNodes.length) return null; n = n.childNodes[path[i]]; }
-  return n;
-}
-
-function createNode(j) {
-  if (j.t === "text") return document.createTextNode(j.c);
-  if (j.t === "el") {
-    const el = document.createElement(j.tag);
-    if (j.a) for (const a of j.a) { if (a.t === "attr") el.setAttribute(a.n, a.v); else if (a.t === "event") el.setAttribute("data-beacon-event-" + a.n, a.h); }
-    if (j.ch) for (const c of j.ch) el.appendChild(createNode(c));
-    return el;
-  }
-  return document.createTextNode("");
-}
 
 // === DOM Morphing ===
 export function morph_html(container, html) { morphInnerHTML(container, html); return undefined; }
@@ -337,7 +345,7 @@ function morphInnerHTML(container, html) {
       restored.focus();
       // Restore cursor position
       if (typeof selStart === "number" && restored.setSelectionRange) {
-        try { restored.setSelectionRange(selStart, selEnd); } catch(e) {}
+        try { restored.setSelectionRange(selStart, selEnd); } catch(e) { console.warn("[beacon] setSelectionRange failed:", e.message); }
       }
       // Restore value if morph overwrote it (server might be behind client)
       if (focusedValue !== undefined && restored.value !== focusedValue) {
@@ -376,21 +384,39 @@ function sameNode(a, b) { if (a.nodeType !== b.nodeType) return false; if (a.nod
 function findMatch(s, t) { let c = s, k = 5; while (c && k > 0) { if (sameNode(c, t)) return c; c = c.nextSibling; k--; } return null; }
 
 // === Event Delegation ===
+
+// Helper: dispatch an event through local handling and/or server.
+// Builds the wire message with optional ops for patch-based sync.
+function dispatchEvent(eventName, hid, data, tp) {
+  eventClock++;
+  if (clientInitialized) {
+    const r = handleEventLocally(hid, data, eventName, tp, eventClock);
+    if (r.action === "send") {
+      if (isEventRateLimited()) {
+        console.warn("[beacon] Event rate limited (>" + MAX_EVENTS_PER_SECOND + "/s)");
+        return;
+      }
+      const msg = { type: "event", name: eventName, handler_id: hid, data, target_path: tp, clock: eventClock };
+      if (r.ops) msg.ops = r.ops;
+      send(msg);
+    }
+  } else {
+    if (isEventRateLimited()) {
+      console.warn("[beacon] Event rate limited (>" + MAX_EVENTS_PER_SECOND + "/s)");
+      return;
+    }
+    send({ type: "event", name: eventName, handler_id: hid, data, target_path: tp, clock: eventClock });
+  }
+}
+
 function attachEvents() {
   if (!appRoot) return;
   appRoot.onclick = (e) => {
     let t = e.target;
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-click")) {
-        e.preventDefault(); eventClock++;
-        const hid = t.getAttribute("data-beacon-event-click");
-        const tp = getPath(t);
-        if (clientInitialized) {
-          const r = handleEventLocally(hid, "{}", "click", tp, eventClock);
-          if (r === "send") send({ type: "event", name: "click", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
-        } else {
-          send({ type: "event", name: "click", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
-        }
+        e.preventDefault();
+        dispatchEvent("click", t.getAttribute("data-beacon-event-click"), "{}", getPath(t));
         return;
       }
       t = t.parentNode;
@@ -400,16 +426,9 @@ function attachEvents() {
     let t = e.target;
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-input")) {
-        eventClock++;
         const hid = t.getAttribute("data-beacon-event-input");
         const data = JSON.stringify({ value: t.value || "" });
-        const tp = getPath(t);
-        if (clientInitialized) {
-          const r = handleEventLocally(hid, data, "input", tp, eventClock);
-          if (r === "send") send({ type: "event", name: "input", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        } else {
-          send({ type: "event", name: "input", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        }
+        dispatchEvent("input", hid, data, getPath(t));
         return;
       }
       t = t.parentNode;
@@ -419,15 +438,8 @@ function attachEvents() {
     let t = e.target;
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-submit")) {
-        e.preventDefault(); eventClock++;
-        const hid = t.getAttribute("data-beacon-event-submit");
-        const tp = getPath(t);
-        if (clientInitialized) {
-          const r = handleEventLocally(hid, "{}", "submit", tp, eventClock);
-          if (r === "send") send({ type: "event", name: "submit", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
-        } else {
-          send({ type: "event", name: "submit", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
-        }
+        e.preventDefault();
+        dispatchEvent("submit", t.getAttribute("data-beacon-event-submit"), "{}", getPath(t));
         return;
       }
       t = t.parentNode;
@@ -437,19 +449,11 @@ function attachEvents() {
     let t = e.target;
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-mousedown")) {
-        eventClock++;
         const hid = t.getAttribute("data-beacon-event-mousedown");
         const rect = t.getBoundingClientRect();
         const x = Math.round(e.clientX - rect.left);
         const y = Math.round(e.clientY - rect.top);
-        const data = JSON.stringify({ value: x + "," + y });
-        const tp = getPath(t);
-        if (clientInitialized) {
-          const r = handleEventLocally(hid, data, "mousedown", tp, eventClock);
-          if (r === "send") send({ type: "event", name: "mousedown", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        } else {
-          send({ type: "event", name: "mousedown", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        }
+        dispatchEvent("mousedown", hid, JSON.stringify({ value: x + "," + y }), getPath(t));
         return;
       }
       t = t.parentNode;
@@ -459,15 +463,7 @@ function attachEvents() {
     let t = e.target;
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-mouseup")) {
-        eventClock++;
-        const hid = t.getAttribute("data-beacon-event-mouseup");
-        const tp = getPath(t);
-        if (clientInitialized) {
-          const r = handleEventLocally(hid, "{}", "mouseup", tp, eventClock);
-          if (r === "send") send({ type: "event", name: "mouseup", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
-        } else {
-          send({ type: "event", name: "mouseup", handler_id: hid, data: "{}", target_path: tp, clock: eventClock });
-        }
+        dispatchEvent("mouseup", t.getAttribute("data-beacon-event-mouseup"), "{}", getPath(t));
         return;
       }
       t = t.parentNode;
@@ -477,19 +473,11 @@ function attachEvents() {
     let t = e.target;
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-mousemove")) {
-        eventClock++;
         const hid = t.getAttribute("data-beacon-event-mousemove");
         const rect = t.getBoundingClientRect();
         const x = Math.round(e.clientX - rect.left);
         const y = Math.round(e.clientY - rect.top);
-        const data = JSON.stringify({ value: x + "," + y });
-        const tp = getPath(t);
-        if (clientInitialized) {
-          const r = handleEventLocally(hid, data, "mousemove", tp, eventClock);
-          if (r === "send") send({ type: "event", name: "mousemove", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        } else {
-          send({ type: "event", name: "mousemove", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        }
+        dispatchEvent("mousemove", hid, JSON.stringify({ value: x + "," + y }), getPath(t));
         return;
       }
       t = t.parentNode;
@@ -503,17 +491,8 @@ function attachEvents() {
         const dragId = t.getAttribute("data-drag-id") || "";
         e.dataTransfer.setData("text/plain", dragId);
         e.dataTransfer.effectAllowed = "move";
-        // Add visual feedback
         setTimeout(() => { t.style.opacity = "0.4"; }, 0);
-        eventClock++;
-        const data = JSON.stringify({ value: dragId });
-        const tp = getPath(t);
-        if (clientInitialized) {
-          const r = handleEventLocally(hid, data, "dragstart", tp, eventClock);
-          if (r === "send") send({ type: "event", name: "dragstart", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        } else {
-          send({ type: "event", name: "dragstart", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        }
+        dispatchEvent("dragstart", hid, JSON.stringify({ value: dragId }), getPath(t));
         return;
       }
       t = t.parentNode;
@@ -557,16 +536,7 @@ function attachEvents() {
         e.preventDefault();
         t.style.outline = "";
         const dragId = e.dataTransfer.getData("text/plain");
-        eventClock++;
-        const hid = t.getAttribute("data-beacon-event-drop");
-        const data = JSON.stringify({ value: dragId });
-        const tp = getPath(t);
-        if (clientInitialized) {
-          const r = handleEventLocally(hid, data, "drop", tp, eventClock);
-          if (r === "send") send({ type: "event", name: "drop", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        } else {
-          send({ type: "event", name: "drop", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        }
+        dispatchEvent("drop", t.getAttribute("data-beacon-event-drop"), JSON.stringify({ value: dragId }), getPath(t));
         return;
       }
       t = t.parentNode;
@@ -576,16 +546,7 @@ function attachEvents() {
     let t = e.target;
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-keydown")) {
-        eventClock++;
-        const hid = t.getAttribute("data-beacon-event-keydown");
-        const data = JSON.stringify({ value: e.key });
-        const tp = getPath(t);
-        if (clientInitialized) {
-          const r = handleEventLocally(hid, data, "keydown", tp, eventClock);
-          if (r === "send") send({ type: "event", name: "keydown", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        } else {
-          send({ type: "event", name: "keydown", handler_id: hid, data: data, target_path: tp, clock: eventClock });
-        }
+        dispatchEvent("keydown", t.getAttribute("data-beacon-event-keydown"), JSON.stringify({ value: e.key }), getPath(t));
         return;
       }
       t = t.parentNode;
@@ -597,25 +558,6 @@ function getPath(node) {
   const parts = []; let c = node;
   while (c && c !== appRoot) { const p = c.parentNode; if (p) { const ch = p.childNodes; for (let i = 0; i < ch.length; i++) if (ch[i] === c) { parts.unshift(i); break; } } c = c.parentNode; }
   return parts.join(".");
-}
-
-// === Server Functions ===
-const pendingServerFns = {};
-let serverFnCounter = 0;
-
-export function call_server_fn(name, args, callback) {
-  const callId = "sf" + (serverFnCounter++);
-  pendingServerFns[callId] = callback;
-  send({ type: "server_fn", name: name, args: args, call_id: callId });
-  return undefined;
-}
-
-function handleServerFnResult(callId, result, ok) {
-  const cb = pendingServerFns[callId];
-  if (cb) {
-    delete pendingServerFns[callId];
-    cb(result, ok);
-  }
 }
 
 // === SPA Navigation ===

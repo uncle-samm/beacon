@@ -3,7 +3,7 @@ import beacon/effect
 import beacon/element
 import beacon/error
 import beacon/middleware as beacon_middleware
-import gleam/dict
+import beacon/transport
 import gleam/erlang/process
 import gleam/int
 
@@ -41,7 +41,8 @@ fn test_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     static_dir: option.None,
     route_patterns: [],
     on_route_change: option.None,
-    server_fns: dict.new(), dynamic_subscriptions: option.None, on_notify: option.None,
+    dynamic_subscriptions: option.None, on_notify: option.None,
+    security_limits: transport.default_security_limits(),
   )
 }
 
@@ -68,8 +69,11 @@ pub fn application_returns_supervisor_pid_test() {
 }
 
 fn unique_port_offset() -> Int {
-  erlang_unique_pos() % 100
+  abs(erlang_unique_pos()) % 500
 }
+
+@external(erlang, "erlang", "abs")
+fn abs(n: Int) -> Int
 
 pub fn application_with_middleware_starts_test() {
   let port = 9400 + unique_port_offset()

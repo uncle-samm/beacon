@@ -17,7 +17,7 @@ pub type RouteDefinition {
   RouteDefinition(
     /// Path segments for this route (e.g., ["blog", ":slug"]).
     path_segments: List(String),
-    /// The module name (e.g., "routes/blog/[slug]").
+    /// The module name (e.g., "routes/blog/_slug").
     module_name: String,
     /// The source file path.
     file_path: String,
@@ -27,6 +27,22 @@ pub type RouteDefinition {
     has_action: Bool,
     /// Whether the module exports a `view` function.
     has_view: Bool,
+    /// Whether the module exports an `init` function.
+    has_init: Bool,
+    /// Whether the module exports an `update` function.
+    has_update: Bool,
+    /// Whether the module defines a `Model` custom type.
+    has_model: Bool,
+    /// Whether the module defines a `Msg` custom type.
+    has_msg: Bool,
+    /// Whether the module defines a `Local` custom type.
+    has_local: Bool,
+    /// Whether the `init` function takes a params argument (Dict(String, String)).
+    init_takes_params: Bool,
+    /// Whether the module exports a `guard` function.
+    has_guard: Bool,
+    /// Whether the module exports an `on_update` function (server-side effects).
+    has_on_update: Bool,
   )
 }
 
@@ -134,15 +150,51 @@ fn scan_file(
           let segments = file_path_to_segments(file_path, base_dir)
           let module_name = file_path_to_module_name(file_path, base_dir)
           let public_fns = extract_public_function_names(module)
+          let public_types = extract_public_type_names(module)
+          let init_params = detect_init_arity(module)
 
-          Ok(RouteDefinition(
+          let route = RouteDefinition(
             path_segments: segments,
             module_name: module_name,
             file_path: file_path,
             has_loader: list.contains(public_fns, "loader"),
             has_action: list.contains(public_fns, "action"),
             has_view: list.contains(public_fns, "view"),
-          ))
+            has_init: list.contains(public_fns, "init"),
+            has_update: list.contains(public_fns, "update"),
+            has_model: list.contains(public_types, "Model"),
+            has_msg: list.contains(public_types, "Msg"),
+            has_local: list.contains(public_types, "Local"),
+            init_takes_params: init_params,
+            has_guard: list.contains(public_fns, "guard"),
+            has_on_update: list.contains(public_fns, "on_update"),
+          )
+
+          // Validate minimum requirements for a route file
+          case route.has_view {
+            True -> {
+              log.debug(
+                "beacon.router.scanner",
+                "Valid route: " <> module_name
+                  <> " (init=" <> bool_to_string(route.has_init)
+                  <> ", update=" <> bool_to_string(route.has_update)
+                  <> ", model=" <> bool_to_string(route.has_model)
+                  <> ", local=" <> bool_to_string(route.has_local)
+                  <> ", params=" <> bool_to_string(route.init_takes_params)
+                  <> ")",
+              )
+              Ok(route)
+            }
+            False -> {
+              log.warning(
+                "beacon.router.scanner",
+                "Route file " <> file_path <> " missing required `view` function",
+              )
+              Error(error.RouterError(
+                reason: "Route file missing `view` function: " <> file_path,
+              ))
+            }
+          }
         }
         Error(parse_err) -> {
           log.error(
@@ -176,8 +228,32 @@ pub fn extract_public_function_names(module: glance.Module) -> List(String) {
   })
 }
 
+/// Extract names of all public custom types from a parsed module.
+pub fn extract_public_type_names(module: glance.Module) -> List(String) {
+  list.filter_map(module.custom_types, fn(def) {
+    let ct = def.definition
+    case ct.publicity {
+      glance.Public -> Ok(ct.name)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+/// Detect whether the `init` function takes parameters.
+/// If init has 1+ arguments, it takes params (e.g., Dict(String, String)).
+fn detect_init_arity(module: glance.Module) -> Bool {
+  list.any(module.functions, fn(def) {
+    let func = def.definition
+    case func.publicity, func.name {
+      glance.Public, "init" ->
+        func.parameters != []
+      _, _ -> False
+    }
+  })
+}
+
 /// Convert a file path relative to the routes directory into URL path segments.
-/// e.g., "src/routes/blog/[slug].gleam" with base "src/routes" → ["blog", ":slug"]
+/// e.g., "src/routes/blog/_slug.gleam" with base "src/routes" → ["blog", ":slug"]
 /// e.g., "src/routes/index.gleam" with base "src/routes" → []
 pub fn file_path_to_segments(
   file_path: String,
@@ -196,7 +272,7 @@ pub fn file_path_to_segments(
       case part {
         // "index" is the root of its directory — not a segment
         "index" -> Error(Nil)
-        // Dynamic segments: [slug] → :slug
+        // Dynamic segments: [slug] → :slug, _slug → :slug
         _ -> Ok(parse_segment(part))
       }
     })
@@ -205,7 +281,7 @@ pub fn file_path_to_segments(
 }
 
 /// Convert a file path to a Gleam module name.
-/// e.g., "src/routes/blog/[slug].gleam" → "routes/blog/[slug]"
+/// e.g., "src/routes/blog/_slug.gleam" → "blog/_slug"
 pub fn file_path_to_module_name(
   file_path: String,
   base_dir: String,
@@ -215,6 +291,8 @@ pub fn file_path_to_module_name(
 }
 
 /// Parse a path segment, converting [param] to :param.
+/// Note: Gleam module names cannot start with underscore, so dynamic
+/// segments must use the [bracket] convention or be configured explicitly.
 pub fn parse_segment(segment: String) -> String {
   case string.starts_with(segment, "["), string.ends_with(segment, "]") {
     True, True -> {
@@ -242,6 +320,13 @@ fn remove_suffix(s: String, suffix: String) -> String {
   case string.ends_with(s, suffix) {
     True -> string.drop_end(s, string.length(suffix))
     False -> s
+  }
+}
+
+fn bool_to_string(b: Bool) -> String {
+  case b {
+    True -> "true"
+    False -> "false"
   }
 }
 

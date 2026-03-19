@@ -43,16 +43,19 @@ pub type ClientMessage {
     /// Monotonic event clock value for ordering and acknowledgment.
     /// Reference: LiveView 1.1 event clocking.
     clock: Int,
+    /// JSON-encoded patch operations from client-side model diff.
+    /// When present, server applies these ops instead of running update.
+    /// Empty string "" means no ops (server runs update as normal).
+    ops: String,
   )
   /// Client sends a heartbeat to keep the connection alive.
   ClientHeartbeat
   /// Client is requesting initial state after connecting.
-  /// Includes an optional session token for state recovery.
-  ClientJoin(token: String)
+  /// Includes an optional session token for state recovery
+  /// and the current URL path for route-aware apps.
+  ClientJoin(token: String, path: String)
   /// Client navigated to a new URL path (SPA navigation).
   ClientNavigate(path: String)
-  /// Client calls a server function by name.
-  ClientServerFn(name: String, args: String, call_id: String)
   /// Batch of events: LOCAL events replayed + MODEL event at the end.
   /// Sent when a MODEL event fires after LOCAL events accumulated state.
   ClientEventBatch(events: List(ClientMessage))
@@ -60,21 +63,18 @@ pub type ClientMessage {
 
 /// Messages sent from the server to the client (browser).
 pub type ServerMessage {
-  /// Initial mount: full rendered content sent on first connect.
+  /// Initial mount: SSR HTML for first paint.
   ServerMount(payload: String)
-  /// Incremental update: only the changed parts (patches).
-  /// Includes the clock value of the event that triggered this update,
-  /// so the client can acknowledge and unlock DOM regions.
-  ServerPatch(payload: String, clock: Int)
   /// Server acknowledges a heartbeat.
   ServerHeartbeatAck
   /// Server-initiated error message.
   ServerError(reason: String)
   /// Authoritative Model state from server.
-  /// Client takes this as ground truth, keeps its Local state.
+  /// Client renders the view locally from this state.
   ServerModelSync(model_json: String, version: Int, ack_clock: Int)
-  /// Server function result.
-  ServerFnResult(call_id: String, result: String, ok: Bool)
+  /// Incremental model patch — only changed fields.
+  /// Client applies ops to its cached model JSON instead of replacing entirely.
+  ServerPatch(ops_json: String, version: Int, ack_clock: Int)
   /// Server-initiated navigation (redirect).
   ServerNavigate(path: String)
   /// Dev mode: tell browser to reload.
@@ -85,19 +85,38 @@ pub type ServerMessage {
 /// These come either from the WebSocket (client) or from
 /// other BEAM processes (e.g. the runtime pushing patches).
 pub type InternalMessage {
-  /// A patch needs to be sent to the client.
-  /// Includes the event clock value for client acknowledgment.
-  SendPatch(payload: String, clock: Int)
   /// A mount payload needs to be sent to the client.
   SendMount(payload: String)
   /// An error needs to be sent to the client.
   SendError(reason: String)
   /// Send authoritative Model state to the client.
   SendModelSync(model_json: String, version: Int, ack_clock: Int)
-  /// Send server function result to the client.
-  SendServerFnResult(call_id: String, result: String, ok: Bool)
+  /// Send incremental model patch to the client.
+  SendPatch(ops_json: String, version: Int, ack_clock: Int)
   /// Send navigation redirect to the client.
   SendNavigate(path: String)
+}
+
+/// Configurable security limits for the transport layer.
+/// All fields have sensible defaults via `default_security_limits()`.
+pub type SecurityLimits {
+  SecurityLimits(
+    /// Maximum WebSocket message size in bytes. Default: 65536 (64KB).
+    max_message_bytes: Int,
+    /// Maximum events per second per connection. Default: 50.
+    max_events_per_second: Int,
+    /// Maximum concurrent WebSocket connections globally. Default: 10000.
+    max_connections: Int,
+  )
+}
+
+/// Sensible default security limits.
+pub fn default_security_limits() -> SecurityLimits {
+  SecurityLimits(
+    max_message_bytes: 65_536,
+    max_events_per_second: 50,
+    max_connections: 10_000,
+  )
 }
 
 /// State held by each WebSocket connection actor.
@@ -111,6 +130,12 @@ pub type ConnectionState {
     on_event: fn(ConnectionId, ClientMessage) -> Nil,
     /// Callback invoked when this connection closes (per-connection).
     on_close: fn(ConnectionId) -> Nil,
+    /// Rate limiting: count of events in current 1-second window.
+    event_count: Int,
+    /// Rate limiting: start of current window (monotonic native time units).
+    rate_window_start: Int,
+    /// Security limits for this connection (copied from TransportConfig at init).
+    security_limits: SecurityLimits,
   )
 }
 
@@ -147,6 +172,13 @@ pub type TransportConfig {
     /// Optional: WebSocket authentication function.
     /// If set, runs before upgrade — returns Ok to allow, Error to reject with 401.
     ws_auth: Option(fn(Request(mist.Connection)) -> Result(Nil, String)),
+    /// Optional: SSR factory for route-aware server-side rendering.
+    /// Given a path, returns the HTML string for that route.
+    /// When set, HTTP requests use this instead of page_html.
+    ssr_factory: Option(fn(String) -> String),
+    /// Configurable security limits (message size, rate limiting, max connections).
+    /// Defaults to `default_security_limits()`.
+    security_limits: SecurityLimits,
   )
 }
 
@@ -164,6 +196,20 @@ fn erlang_monotonic_time() -> Int
 @external(erlang, "erlang", "unique_integer")
 fn erlang_unique_integer() -> Int
 
+// --- Connection tracker FFI (global connection count via ETS) ---
+
+@external(erlang, "beacon_connection_tracker_ffi", "init")
+pub fn connection_tracker_init() -> Nil
+
+@external(erlang, "beacon_connection_tracker_ffi", "increment")
+fn connection_tracker_increment() -> Int
+
+@external(erlang, "beacon_connection_tracker_ffi", "decrement")
+fn connection_tracker_decrement() -> Int
+
+@external(erlang, "beacon_connection_tracker_ffi", "count")
+fn connection_tracker_count() -> Int
+
 /// Encode a ServerMessage to JSON string for sending over the wire.
 pub fn encode_server_message(msg: ServerMessage) -> String {
   case msg {
@@ -171,13 +217,6 @@ pub fn encode_server_message(msg: ServerMessage) -> String {
       json.object([
         #("type", json.string("mount")),
         #("payload", json.string(payload)),
-      ])
-      |> json.to_string
-    ServerPatch(payload, clock) ->
-      json.object([
-        #("type", json.string("patch")),
-        #("payload", json.string(payload)),
-        #("clock", json.int(clock)),
       ])
       |> json.to_string
     ServerHeartbeatAck ->
@@ -197,12 +236,13 @@ pub fn encode_server_message(msg: ServerMessage) -> String {
         #("ack_clock", json.int(ack_clock)),
       ])
       |> json.to_string
-    ServerFnResult(call_id, result, ok) ->
+    ServerPatch(ops_json, version, ack_clock) ->
+      // ops_json is already a JSON-encoded array string — embed it raw
       json.object([
-        #("type", json.string("server_fn_result")),
-        #("call_id", json.string(call_id)),
-        #("result", json.string(result)),
-        #("ok", json.bool(ok)),
+        #("type", json.string("patch")),
+        #("ops", json.string(ops_json)),
+        #("version", json.int(version)),
+        #("ack_clock", json.int(ack_clock)),
       ])
       |> json.to_string
     ServerNavigate(path) ->
@@ -229,28 +269,25 @@ fn client_message_decoder() -> decode.Decoder(ClientMessage) {
       use data <- decode.field("data", decode.string)
       use target_path <- decode.field("target_path", decode.string)
       use clock <- decode.optional_field("clock", 0, decode.int)
+      use ops <- decode.optional_field("ops", "", decode.string)
       decode.success(ClientEvent(
         name: name,
         handler_id: handler_id,
         data: data,
         target_path: target_path,
         clock: clock,
+        ops: ops,
       ))
     }
     "heartbeat" -> decode.success(ClientHeartbeat)
     "join" -> {
       use token <- decode.optional_field("token", "", decode.string)
-      decode.success(ClientJoin(token: token))
+      use path <- decode.optional_field("path", "/", decode.string)
+      decode.success(ClientJoin(token: token, path: path))
     }
     "navigate" -> {
       use path <- decode.field("path", decode.string)
       decode.success(ClientNavigate(path: path))
-    }
-    "server_fn" -> {
-      use name <- decode.field("name", decode.string)
-      use args <- decode.optional_field("args", "{}", decode.string)
-      use call_id <- decode.field("call_id", decode.string)
-      decode.success(ClientServerFn(name: name, args: args, call_id: call_id))
     }
     "event_batch" -> {
       // Decode array of events — each follows the "event" format
@@ -260,12 +297,14 @@ fn client_message_decoder() -> decode.Decoder(ClientMessage) {
         use data <- decode.field("data", decode.string)
         use target_path <- decode.optional_field("target_path", "", decode.string)
         use clock <- decode.optional_field("clock", 0, decode.int)
+        use ops <- decode.optional_field("ops", "", decode.string)
         decode.success(ClientEvent(
           name: name,
           handler_id: handler_id,
           data: data,
           target_path: target_path,
           clock: clock,
+          ops: ops,
         ))
       }
       use events <- decode.field("events", decode.list(event_decoder))
@@ -294,6 +333,18 @@ pub fn decode_client_message(
   }
 }
 
+/// Return the type name of a client message for safe logging.
+/// Does not include payload data which may be sensitive.
+fn client_message_type(msg: ClientMessage) -> String {
+  case msg {
+    ClientEvent(name: name, ..) -> "event:" <> name
+    ClientHeartbeat -> "heartbeat"
+    ClientJoin(..) -> "join"
+    ClientNavigate(path: path) -> "navigate:" <> path
+    ClientEventBatch(..) -> "event_batch"
+  }
+}
+
 /// Send a ServerMessage over a WebSocket connection.
 /// Logs errors but does not crash — the connection may have closed.
 fn send_message(
@@ -319,25 +370,108 @@ fn send_message(
   }
 }
 
+/// One second in native time units (nanoseconds on most BEAM VMs).
+/// Used for rate limiting window calculations.
+const one_second_native = 1_000_000_000
+
+/// Check per-connection rate limit: max 50 events per 1-second window.
+/// Returns the updated state and whether the event was rate limited.
+fn check_rate_limit(state: ConnectionState) -> #(ConnectionState, Bool) {
+  let now = erlang_monotonic_time()
+  // If more than 1 second has passed, reset the window
+  let #(count, window_start) = case
+    now - state.rate_window_start > one_second_native
+  {
+    True -> #(0, now)
+    False -> #(state.event_count, state.rate_window_start)
+  }
+  let new_count = count + 1
+  let new_state =
+    ConnectionState(
+      ..state,
+      event_count: new_count,
+      rate_window_start: window_start,
+    )
+  case new_count > state.security_limits.max_events_per_second {
+    True -> #(new_state, True)
+    False -> #(new_state, False)
+  }
+}
+
 /// Handle an incoming WebSocket text frame.
-/// Decodes the message and dispatches to the appropriate handler.
+/// Rejects oversized messages, then decodes and dispatches to the appropriate handler.
 fn handle_text_message(
+  state: ConnectionState,
+  text: String,
+) -> mist.Next(ConnectionState, InternalMessage) {
+  // Reject oversized messages to prevent resource exhaustion
+  let size = string.byte_size(text)
+  case size > state.security_limits.max_message_bytes {
+    True -> {
+      log.warning(
+        "beacon.transport",
+        "Oversized message from "
+          <> state.id
+          <> " ("
+          <> int.to_string(size)
+          <> " bytes) — rejected",
+      )
+      send_message(
+        state.connection,
+        state.id,
+        ServerError(reason: "Message too large"),
+      )
+      mist.continue(state)
+    }
+    False -> handle_text_message_decode(state, text)
+  }
+}
+
+/// Decode and dispatch a validated text message.
+/// Applies per-connection rate limiting to non-heartbeat messages.
+fn handle_text_message_decode(
   state: ConnectionState,
   text: String,
 ) -> mist.Next(ConnectionState, InternalMessage) {
   case decode_client_message(text) {
     Ok(ClientHeartbeat) -> {
+      // Heartbeats are exempt from rate limiting
       log.debug("beacon.transport", "Heartbeat from " <> state.id)
       send_message(state.connection, state.id, ServerHeartbeatAck)
       mist.continue(state)
     }
     Ok(msg) -> {
-      log.debug(
-        "beacon.transport",
-        "Event from " <> state.id <> ": " <> string.inspect(msg),
-      )
-      state.on_event(state.id, msg)
-      mist.continue(state)
+      // Check rate limit before dispatching
+      let #(new_state, rate_limited) = check_rate_limit(state)
+      case rate_limited {
+        True -> {
+          log.warning(
+            "beacon.transport",
+            "Rate limited connection "
+              <> state.id
+              <> " ("
+              <> int.to_string(new_state.event_count)
+              <> " events/sec)",
+          )
+          send_message(
+            new_state.connection,
+            new_state.id,
+            ServerError(reason: "Rate limited"),
+          )
+          mist.continue(new_state)
+        }
+        False -> {
+          log.debug(
+            "beacon.transport",
+            "Event from "
+              <> new_state.id
+              <> ": "
+              <> client_message_type(msg),
+          )
+          new_state.on_event(new_state.id, msg)
+          mist.continue(new_state)
+        }
+      }
     }
     Error(err) -> {
       let err_str = error.to_string(err)
@@ -402,10 +536,12 @@ pub fn create_handler(
                   )
                 {
                   Ok(resp) -> resp
-                  Error(Nil) -> serve_page(config.page_html)
+                  Error(Nil) ->
+                    serve_page_or_ssr(config.page_html, config.ssr_factory, req.path)
                 }
               }
-              None -> serve_page(config.page_html)
+              None ->
+                serve_page_or_ssr(config.page_html, config.ssr_factory, req.path)
             }
           }
         }
@@ -419,25 +555,103 @@ pub fn create_handler(
   }
 }
 
+/// Check that the Origin header (if present) matches the server's host.
+/// This prevents cross-site WebSocket hijacking (CSWSH).
+/// If no Origin header is present, the request is allowed (non-browser clients, same-origin).
+fn check_origin(req: Request(mist.Connection)) -> Result(Nil, String) {
+  case request.get_header(req, "origin") {
+    // No origin header — allow (non-browser clients, same-origin)
+    Error(Nil) -> Ok(Nil)
+    Ok(origin) -> {
+      let origin_host = extract_host_from_origin(origin)
+      let request_host = case request.get_header(req, "host") {
+        Ok(h) -> h
+        Error(Nil) -> ""
+      }
+      // Compare: origin host must match request host
+      case origin_host == request_host || origin_host == "" {
+        True -> Ok(Nil)
+        False -> {
+          log.warning(
+            "beacon.transport",
+            "Origin mismatch: origin=" <> origin <> " host=" <> request_host,
+          )
+          Error("Origin mismatch")
+        }
+      }
+    }
+  }
+}
+
+/// Extract the host portion from an origin URL.
+/// e.g. "http://localhost:8080" -> "localhost:8080"
+/// e.g. "https://example.com" -> "example.com"
+fn extract_host_from_origin(origin: String) -> String {
+  // Strip protocol prefix (e.g. "http://", "https://")
+  let without_protocol = case string.split(origin, "://") {
+    [_, rest] -> rest
+    _ -> origin
+  }
+  // Take everything before the first /
+  case string.split(without_protocol, "/") {
+    [host, ..] -> host
+    _ -> without_protocol
+  }
+}
+
 /// Handle a WebSocket upgrade request.
+/// Checks global connection limit, then origin (CSWSH prevention), then auth, then upgrades.
 fn handle_websocket(
   req: Request(mist.Connection),
   config: TransportConfig,
 ) -> response.Response(mist.ResponseData) {
-  // Check WebSocket auth if configured
-  let auth_ok = case config.ws_auth {
-    Some(auth_fn) -> auth_fn(req)
-    None -> Ok(Nil)
-  }
-  case auth_ok {
-    Error(reason) -> {
-      log.warning("beacon.transport", "WS auth rejected: " <> reason)
-      response.new(401)
+  // Check global connection limit first — prevents process exhaustion
+  let current_count = connection_tracker_count()
+  case current_count >= config.security_limits.max_connections {
+    True -> {
+      log.warning(
+        "beacon.transport",
+        "Global connection limit reached ("
+          <> int.to_string(current_count)
+          <> "/"
+          <> int.to_string(config.security_limits.max_connections)
+          <> ") — rejecting new connection",
+      )
+      response.new(503)
       |> response.set_body(
-        mist.Bytes(bytes_tree.from_string("Unauthorized: " <> reason)),
+        mist.Bytes(bytes_tree.from_string("Too many connections")),
       )
     }
-    Ok(Nil) -> handle_websocket_upgrade(req, config)
+    False -> {
+      // Check origin — prevents cross-site WebSocket hijacking
+      case check_origin(req) {
+        Error(reason) -> {
+          response.new(403)
+          |> response.set_body(
+            mist.Bytes(bytes_tree.from_string("Forbidden: " <> reason)),
+          )
+        }
+        Ok(Nil) -> {
+          // Then check WebSocket auth if configured
+          let auth_ok = case config.ws_auth {
+            Some(auth_fn) -> auth_fn(req)
+            None -> Ok(Nil)
+          }
+          case auth_ok {
+            Error(reason) -> {
+              log.warning("beacon.transport", "WS auth rejected: " <> reason)
+              response.new(401)
+              |> response.set_body(
+                mist.Bytes(
+                  bytes_tree.from_string("Unauthorized: " <> reason),
+                ),
+              )
+            }
+            Ok(Nil) -> handle_websocket_upgrade(req, config)
+          }
+        }
+      }
+    }
   }
 }
 
@@ -471,14 +685,6 @@ fn handle_websocket_upgrade(
         }
         mist.Custom(internal_msg) -> {
           case internal_msg {
-            SendPatch(payload, clock) -> {
-              send_message(
-                state.connection,
-                state.id,
-                ServerPatch(payload: payload, clock: clock),
-              )
-              mist.continue(state)
-            }
             SendMount(payload) -> {
               send_message(
                 state.connection,
@@ -507,14 +713,14 @@ fn handle_websocket_upgrade(
               )
               mist.continue(state)
             }
-            SendServerFnResult(call_id, result, ok) -> {
+            SendPatch(ops_json, version, ack_clock) -> {
               send_message(
                 state.connection,
                 state.id,
-                ServerFnResult(
-                  call_id: call_id,
-                  result: result,
-                  ok: ok,
+                ServerPatch(
+                  ops_json: ops_json,
+                  version: version,
+                  ack_clock: ack_clock,
                 ),
               )
               mist.continue(state)
@@ -554,32 +760,51 @@ fn handle_websocket_upgrade(
             #(on_event, on_disconnect)
           }
         }
+      // Track global connection count
+      let conn_count = connection_tracker_increment()
+      log.debug(
+        "beacon.transport",
+        "Global connections: " <> int.to_string(conn_count),
+      )
       let state =
         ConnectionState(
           id: conn_id,
           connection: conn,
           on_event: conn_on_event,
           on_close: conn_on_close,
+          event_count: 0,
+          rate_window_start: 0,
+          security_limits: config.security_limits,
         )
       pubsub.subscribe("beacon:patches:" <> conn_id)
       #(state, Some(selector))
     },
     on_close: fn(state) {
       log.info("beacon.transport", "Connection closed (cleanup): " <> state.id)
+      let conn_count = connection_tracker_decrement()
+      log.debug(
+        "beacon.transport",
+        "Global connections after close: " <> int.to_string(conn_count),
+      )
       pubsub.unsubscribe("beacon:patches:" <> state.id)
       state.on_close(state.id)
     },
   )
 }
 
-/// Serve the HTML page. Uses SSR-rendered HTML if available,
-/// otherwise falls back to a minimal page with empty app root.
-fn serve_page(
+/// Serve the HTML page. Checks: ssr_factory (route-aware), page_html (static SSR),
+/// then default page.
+fn serve_page_or_ssr(
   page_html: option.Option(String),
+  ssr_factory: option.Option(fn(String) -> String),
+  path: String,
 ) -> response.Response(mist.ResponseData) {
-  let html = case page_html {
-    option.Some(rendered) -> rendered
-    option.None -> default_page_html()
+  let html = case ssr_factory {
+    option.Some(factory) -> factory(path)
+    option.None -> case page_html {
+      option.Some(rendered) -> rendered
+      option.None -> default_page_html()
+    }
   }
   response.new(200)
   |> response.set_header("content-type", "text/html; charset=utf-8")
@@ -606,31 +831,40 @@ fn default_page_html() -> String {
 fn get_client_js_filename() -> String {
   case simplifile.read("priv/static/beacon_client.manifest") {
     Ok(name) -> string.trim(name)
-    Error(_) -> {
-      log.warning(
+    Error(err) -> {
+      log.error(
         "beacon.transport",
-        "No beacon_client.manifest — run `gleam run -m beacon/build`",
+        "FATAL: No beacon_client.manifest found: "
+          <> string.inspect(err)
+          <> " — the client JS was not built. Run `gleam run -m beacon/build` first.",
       )
-      "beacon_client.js"
+      // No fallback — return a name that will 404 with a clear error
+      "MISSING_CLIENT_JS_RUN_BEACON_BUILD"
     }
   }
 }
 
 /// Serve the compiled Gleam-to-JS client runtime bundle.
-/// Requires `gleam run -m beacon/build` to have been run first.
 fn serve_client_js() -> response.Response(mist.ResponseData) {
-  let filename = case simplifile.read("priv/static/beacon_client.manifest") {
-    Ok(name) -> string.trim(name)
+  case simplifile.read("priv/static/beacon_client.manifest") {
+    Ok(name) -> serve_js_file("priv/static/" <> string.trim(name))
     Error(err) -> {
       log.error(
         "beacon.transport",
-        "No beacon_client.manifest: " <> string.inspect(err)
-          <> " — run `gleam run -m beacon/build`",
+        "FATAL: No beacon_client.manifest: "
+          <> string.inspect(err)
+          <> " — client JS not built. Run `gleam run -m beacon/build`.",
       )
-      "beacon_client_missing.js"
+      response.new(500)
+      |> response.set_body(
+        mist.Bytes(
+          bytes_tree.from_string(
+            "Client JS not built. Run `gleam run -m beacon/build` first.",
+          ),
+        ),
+      )
     }
   }
-  serve_js_file("priv/static/" <> filename)
 }
 
 fn serve_hashed_client_js(

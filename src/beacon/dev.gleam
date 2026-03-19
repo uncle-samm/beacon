@@ -83,7 +83,10 @@ fn handle_recompile() -> Nil {
         Error(reason) -> log.warning("beacon.dev", "Client JS rebuild failed: " <> reason)
       }
       // Notify browsers to reload
-      notify_browser_reload()
+      case notify_browser_reload() {
+        Ok(Nil) -> Nil
+        Error(reason) -> log.warning("beacon.dev", "Browser reload notification failed: " <> reason)
+      }
     }
     Error(reason) ->
       log.error("beacon.dev", "Recompile failed: " <> reason)
@@ -158,4 +161,4 @@ fn start_native_watcher(dirs: List(String)) -> Result(Nil, String)
 fn poll_native_watcher() -> Bool
 
 @external(erlang, "beacon_dev_ffi", "notify_browser_reload")
-fn notify_browser_reload() -> Nil
+fn notify_browser_reload() -> Result(Nil, String)

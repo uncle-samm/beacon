@@ -1,8 +1,12 @@
 /// Glance-based code analyzer for the build tool.
 /// Parses user source code and classifies Msg variants.
+/// Also validates purity and extracts pure code for JS compilation.
 
+import beacon/log
 import glance
 import gleam/list
+import gleam/option
+import gleam/string
 
 /// A field in a Model or Local type.
 pub type TypeField {
@@ -13,6 +17,10 @@ pub type TypeField {
     type_name: String,
     /// For generic types like List(Stroke), the inner type name.
     inner_type: String,
+    /// Module qualifier for the type (e.g., "auth" for auth.AuthState). Empty = local.
+    module: String,
+    /// Module qualifier for the inner type (e.g., "card" for List(card.Card)). Empty = local.
+    inner_module: String,
   )
 }
 
@@ -23,6 +31,47 @@ pub type CustomTypeInfo {
     name: String,
     /// The type's fields.
     fields: List(TypeField),
+    /// Module this type comes from (e.g., "auth"). Empty = local to the app module.
+    module: String,
+  )
+}
+
+/// A substate — a Model field whose type is a custom record type.
+/// The framework tracks and diffs these independently for efficiency.
+/// When a substate's JSON hasn't changed, its diff is skipped entirely.
+pub type SubstateInfo {
+  SubstateInfo(
+    /// The field name in Model (e.g., "cards").
+    field_name: String,
+    /// The type name (e.g., "Card" for List(Card), or "Settings" for Settings).
+    type_name: String,
+    /// Whether this is a List of the type (true) or a single instance (false).
+    is_list: Bool,
+    /// Module this type comes from (e.g., "auth"). Empty = local.
+    module: String,
+  )
+}
+
+/// An enum type — custom type with multiple variants, no fields (e.g., Column { Todo; Doing; Done }).
+/// Encoded as strings in JSON, decoded back to the enum type.
+pub type EnumTypeInfo {
+  EnumTypeInfo(
+    /// The type name (e.g., "Column").
+    name: String,
+    /// The variant names (e.g., ["Todo", "Doing", "Done"]).
+    variants: List(String),
+    /// Module this type comes from (e.g., "auth"). Empty = local.
+    module: String,
+  )
+}
+
+/// An imported module resolved from user source imports.
+pub type ImportedModule {
+  ImportedModule(
+    /// The module path as used in the import (e.g., "domains/auth").
+    module_path: String,
+    /// The alias used to reference it (e.g., "auth" for `import domains/auth`).
+    alias: String,
   )
 }
 
@@ -41,6 +90,12 @@ pub type Analysis {
     has_direct_update: Bool,
     /// All custom types found in the module (for nested decoder generation).
     custom_types: List(CustomTypeInfo),
+    /// Enum types — custom types with multiple variants, no fields.
+    enum_types: List(EnumTypeInfo),
+    /// Substates — Model fields that are custom record types, tracked independently.
+    substates: List(SubstateInfo),
+    /// External modules imported by the user app (for multi-file analysis).
+    imported_modules: List(ImportedModule),
   )
 }
 
@@ -97,9 +152,75 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
               let fields = extract_fields(def.definition)
               case fields {
                 [] -> Error(Nil)
-                _ -> Ok(CustomTypeInfo(name: name, fields: fields))
+                _ -> Ok(CustomTypeInfo(name: name, fields: fields, module: ""))
               }
             }
+          }
+        })
+
+      // Extract enum types (multiple variants, no fields — e.g., Column { Todo; Doing; Done })
+      let enum_types =
+        list.filter_map(module.custom_types, fn(def) {
+          let ct = def.definition
+          // Skip Model, Local, Msg
+          case ct.name == "Model" || ct.name == "Local" || ct.name == "Msg" {
+            True -> Error(Nil)
+            False -> {
+              // An enum type has multiple variants, ALL with zero fields
+              let all_fieldless =
+                list.all(ct.variants, fn(v) {
+                  list.is_empty(v.fields)
+                })
+              case all_fieldless && list.length(ct.variants) >= 2 {
+                True -> {
+                  let variant_names = list.map(ct.variants, fn(v) { v.name })
+                  Ok(EnumTypeInfo(
+                    name: ct.name,
+                    variants: variant_names,
+                    module: "",
+                  ))
+                }
+                False -> Error(Nil)
+              }
+            }
+          }
+        })
+
+      // Detect substates: Model fields whose types are custom record types.
+      // These are tracked independently for efficient per-substate diffing.
+      let substates =
+        list.filter_map(model_fields, fn(f) {
+          case f.type_name {
+            "List" ->
+              case
+                list.find(custom_types, fn(ct) {
+                  ct.name == f.inner_type && ct.module == f.inner_module
+                })
+              {
+                Ok(_) ->
+                  Ok(SubstateInfo(
+                    field_name: f.name,
+                    type_name: f.inner_type,
+                    is_list: True,
+                    module: f.inner_module,
+                  ))
+                Error(_) -> Error(Nil)
+              }
+            _ ->
+              case
+                list.find(custom_types, fn(ct) {
+                  ct.name == f.type_name && ct.module == f.module
+                })
+              {
+                Ok(_) ->
+                  Ok(SubstateInfo(
+                    field_name: f.name,
+                    type_name: f.type_name,
+                    is_list: False,
+                    module: f.module,
+                  ))
+                Error(_) -> Error(Nil)
+              }
           }
         })
 
@@ -113,6 +234,9 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
             has_direct_init: has_direct_init,
             has_direct_update: has_direct_update,
             custom_types: custom_types,
+            enum_types: enum_types,
+            substates: substates,
+            imported_modules: [],
           ))
         }
         Error(r), _ -> Error(r)
@@ -120,6 +244,139 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
       }
     }
     Error(_) -> Error("Failed to parse source")
+  }
+}
+
+/// Analyze a multi-file app: main source + external module sources.
+/// Each external source is a #(alias, module_path, source_text) triple where:
+/// - alias is the module qualifier (e.g., "auth" for `import domains/auth`)
+/// - module_path is the import path (e.g., "domains/auth")
+/// - source_text is the file contents
+/// Extracts types from external modules and merges them into the analysis.
+pub fn analyze_multi(
+  source: String,
+  external_sources: List(#(String, String, String)),
+) -> Result(Analysis, String) {
+  case analyze(source) {
+    Error(reason) -> Error(reason)
+    Ok(analysis) -> {
+      // Parse each external source and extract types tagged with the module alias
+      let #(ext_custom_types, ext_enum_types, imported_modules) =
+        list.fold(external_sources, #([], [], []), fn(acc, ext) {
+          let #(alias, module_path, ext_source) = ext
+          case glance.module(ext_source) {
+            Error(_) -> acc
+            Ok(ext_module) -> {
+              let #(cts, ets, ims) = acc
+              let im =
+                ImportedModule(
+                  module_path: module_path,
+                  alias: alias,
+                )
+              let ext_cts =
+                list.filter_map(ext_module.custom_types, fn(def) {
+                  let ct = def.definition
+                  // Skip non-public types
+                  case ct.publicity {
+                    glance.Public -> {
+                      let fields = extract_fields(ct)
+                      case fields {
+                        [] -> Error(Nil)
+                        _ ->
+                          Ok(CustomTypeInfo(
+                            name: ct.name,
+                            fields: fields,
+                            module: alias,
+                          ))
+                      }
+                    }
+                    _ -> Error(Nil)
+                  }
+                })
+              let ext_ets =
+                list.filter_map(ext_module.custom_types, fn(def) {
+                  let ct = def.definition
+                  case ct.publicity {
+                    glance.Public -> {
+                      let all_fieldless =
+                        list.all(ct.variants, fn(v) {
+                          list.is_empty(v.fields)
+                        })
+                      case all_fieldless && list.length(ct.variants) >= 2 {
+                        True -> {
+                          let variant_names =
+                            list.map(ct.variants, fn(v) { v.name })
+                          Ok(EnumTypeInfo(
+                            name: ct.name,
+                            variants: variant_names,
+                            module: alias,
+                          ))
+                        }
+                        False -> Error(Nil)
+                      }
+                    }
+                    _ -> Error(Nil)
+                  }
+                })
+              #(
+                list.append(cts, ext_cts),
+                list.append(ets, ext_ets),
+                [im, ..ims],
+              )
+            }
+          }
+        })
+
+      // Merge external types into analysis
+      let all_custom_types =
+        list.append(analysis.custom_types, ext_custom_types)
+      let all_enum_types = list.append(analysis.enum_types, ext_enum_types)
+
+      // Re-detect substates with the full type set (including external types)
+      let substates =
+        list.filter_map(analysis.model_fields, fn(f) {
+          case f.type_name {
+            "List" ->
+              case
+                list.find(all_custom_types, fn(ct) {
+                  ct.name == f.inner_type && ct.module == f.inner_module
+                })
+              {
+                Ok(_) ->
+                  Ok(SubstateInfo(
+                    field_name: f.name,
+                    type_name: f.inner_type,
+                    is_list: True,
+                    module: f.inner_module,
+                  ))
+                Error(_) -> Error(Nil)
+              }
+            _ ->
+              case
+                list.find(all_custom_types, fn(ct) {
+                  ct.name == f.type_name && ct.module == f.module
+                })
+              {
+                Ok(_) ->
+                  Ok(SubstateInfo(
+                    field_name: f.name,
+                    type_name: f.type_name,
+                    is_list: False,
+                    module: f.module,
+                  ))
+                Error(_) -> Error(Nil)
+              }
+          }
+        })
+
+      Ok(Analysis(
+        ..analysis,
+        custom_types: all_custom_types,
+        enum_types: all_enum_types,
+        substates: substates,
+        imported_modules: imported_modules,
+      ))
+    }
   }
 }
 
@@ -160,16 +417,46 @@ fn extract_fields(custom_type: glance.CustomType) -> List(TypeField) {
       list.filter_map(variant.fields, fn(field) {
         case field {
           glance.LabelledVariantField(item: field_type, label: name) -> {
-            let #(type_name, inner) = case field_type {
-              glance.NamedType(name: n, parameters: params, ..) ->
+            let #(type_name, inner, mod_val, inner_mod_val) = case field_type {
+              glance.NamedType(name: n, module: mod, parameters: params, ..) ->
                 case params {
-                  [glance.NamedType(name: inner_name, ..)] ->
-                    #(n, inner_name)
-                  _ -> #(n, "")
+                  [glance.NamedType(name: inner_name, module: inner_mod, ..)] -> {
+                    let m = case mod {
+                      option.Some(m) -> m
+                      option.None -> {
+                        log.debug("beacon.build.analyzer", "No module qualifier for type field '" <> name <> "'")
+                        ""
+                      }
+                    }
+                    let im = case inner_mod {
+                      option.Some(im) -> im
+                      option.None -> {
+                        log.debug("beacon.build.analyzer", "No inner module qualifier for type field '" <> name <> "'")
+                        ""
+                      }
+                    }
+                    #(n, inner_name, m, im)
+                  }
+                  _ -> {
+                    let m = case mod {
+                      option.Some(m) -> m
+                      option.None -> {
+                        log.debug("beacon.build.analyzer", "No module qualifier for type field '" <> name <> "'")
+                        ""
+                      }
+                    }
+                    #(n, "", m, "")
+                  }
                 }
-              _ -> #("Unknown", "")
+              _ -> #("Unknown", "", "", "")
             }
-            Ok(TypeField(name: name, type_name: type_name, inner_type: inner))
+            Ok(TypeField(
+              name: name,
+              type_name: type_name,
+              inner_type: inner,
+              module: mod_val,
+              inner_module: inner_mod_val,
+            ))
           }
           _ -> Error(Nil)
         }
@@ -329,3 +616,305 @@ fn expression_constructs_new(
     _ -> True
   }
 }
+
+// ===== Purity Validation =====
+// Walks the Glance AST to verify a module is safe to compile to JavaScript.
+// No regex — all checks are proper AST analysis.
+
+/// A purity violation found during AST analysis.
+pub type PurityError {
+  /// Module imports a server-only module.
+  ServerImport(module_path: String)
+  /// Function has @external(erlang, ...) annotation.
+  ErlangExternal(function_name: String)
+}
+
+/// Validate that a source module is pure Gleam (safe to compile to JS).
+/// Walks the Glance AST — no regex, no string matching on source.
+///
+/// Returns Ok(Nil) if the module is pure, or Error with a clear message.
+pub fn validate_purity(source: String) -> Result(Nil, String) {
+  case glance.module(source) {
+    Error(_) -> Error("Failed to parse source for purity validation")
+    Ok(module) -> {
+      let errors = find_purity_errors(module)
+      case errors {
+        [] -> Ok(Nil)
+        _ -> Error(format_purity_errors(errors))
+      }
+    }
+  }
+}
+
+/// Walk the AST and collect all purity violations.
+fn find_purity_errors(module: glance.Module) -> List(PurityError) {
+  let import_errors = check_imports(module)
+  let external_errors = check_externals(module)
+  list.append(import_errors, external_errors)
+}
+
+/// Check all imports for server-only modules.
+fn check_imports(module: glance.Module) -> List(PurityError) {
+  list.filter_map(module.imports, fn(def) {
+    let import_ = def.definition
+    case is_server_only_import(import_.module) {
+      True -> Ok(ServerImport(module_path: import_.module))
+      False -> Error(Nil)
+    }
+  })
+}
+
+/// Check if an import is safe for JS compilation.
+/// Uses an allowlist — only known-pure modules are kept.
+fn is_server_only_import(module_path: String) -> Bool {
+  !is_safe_import(module_path)
+}
+
+/// Allowlist of imports safe for JS compilation.
+fn is_safe_import(module_path: String) -> Bool {
+  // Known server-only modules — explicit blocklist
+  case is_known_server_import(module_path) {
+    True -> False
+    False ->
+      // beacon framework modules that are pure Gleam
+      module_path == "beacon"
+      || module_path == "beacon/html"
+      || module_path == "beacon/element"
+      // gleam stdlib — all pure (except erlang/otp, caught above)
+      || string.starts_with(module_path, "gleam/")
+      // User domain modules — assumed pure (will be validated individually)
+      || is_user_module(module_path)
+  }
+}
+
+/// Check if a module path is a known server-only import.
+fn is_known_server_import(module_path: String) -> Bool {
+  string.starts_with(module_path, "gleam/erlang")
+  || string.starts_with(module_path, "gleam/otp")
+  || string.starts_with(module_path, "gleam/http")
+  || module_path == "mist"
+  || string.starts_with(module_path, "mist/")
+  || { string.starts_with(module_path, "beacon/")
+  && module_path != "beacon/html"
+  && module_path != "beacon/element" }
+}
+
+/// Check if a module path looks like a user-defined module.
+/// User modules don't start with known framework/stdlib prefixes.
+fn is_user_module(module_path: String) -> Bool {
+  !string.starts_with(module_path, "gleam/")
+  && !string.starts_with(module_path, "beacon")
+  && !string.starts_with(module_path, "mist")
+  && !string.starts_with(module_path, "wisp")
+  && !string.starts_with(module_path, "simplifile")
+  && !string.starts_with(module_path, "glance")
+}
+
+/// Check all function definitions for @external(erlang, ...) annotations.
+fn check_externals(module: glance.Module) -> List(PurityError) {
+  list.filter_map(module.functions, fn(def) {
+    let has_erlang_external =
+      list.any(def.attributes, fn(attr) {
+        case attr {
+          glance.Attribute(name: "external", arguments: [first, ..]) ->
+            is_erlang_target(first)
+          _ -> False
+        }
+      })
+    case has_erlang_external {
+      True -> Ok(ErlangExternal(function_name: def.definition.name))
+      False -> Error(Nil)
+    }
+  })
+}
+
+/// Check if an expression represents the "erlang" target atom.
+fn is_erlang_target(expr: glance.Expression) -> Bool {
+  case expr {
+    glance.Variable(name: "erlang", ..) -> True
+    glance.String(value: "erlang", ..) -> True
+    _ -> False
+  }
+}
+
+/// Format purity errors into a clear, actionable message.
+fn format_purity_errors(errors: List(PurityError)) -> String {
+  let messages =
+    list.map(errors, fn(err) {
+      case err {
+        ServerImport(path) ->
+          "  - imports server-only module '" <> path <> "'"
+        ErlangExternal(name) ->
+          "  - function '" <> name <> "' has @external(erlang, ...) annotation"
+      }
+    })
+  "Module is not pure Gleam (cannot compile to JS for LOCAL events):\n"
+  <> string.join(messages, "\n")
+  <> "\n\nTo fix: move server-only code (stores, effects, PubSub) to on_update()."
+}
+
+// ===== AST Extraction + Source Emission =====
+// Extracts pure types/functions from user source using Glance AST byte offsets.
+// No source reconstruction — slices original source text using Span positions.
+// This preserves exact formatting and is reliable without glance_printer.
+
+/// Names of server-only functions to skip during extraction.
+/// For state-over-the-wire, the client only needs view + types + helpers.
+/// update runs on the server — not compiled to JS.
+const server_only_functions = [
+  "start", "main", "on_update", "make_update", "make_init",
+  "make_on_update",
+]
+
+/// Names of functions that MUST be extracted even if they reference server code.
+/// view is always needed. init/init_local may fail to compile if they use
+/// server-only code — the entry point generates stubs for those.
+const always_extract_functions = [
+  "view",
+]
+
+/// Extract pure client code from a source module.
+/// Returns the extracted Gleam source string containing only:
+/// - Safe imports (beacon, beacon/html, beacon/element, gleam/*)
+/// - All type definitions (Model, Local, Msg, custom types)
+/// - Pure functions (init, init_local, update, view, helpers)
+///
+/// Skips: server-only imports, @external(erlang) functions, start/main/on_update.
+/// The source must pass validate_purity() first.
+pub fn extract_client_source(source: String) -> Result(String, String) {
+  case glance.module(source) {
+    Error(_) -> Error("Failed to parse source for extraction")
+    Ok(module) -> {
+      let source_bytes = string_to_bytes(source)
+
+      // Collect safe imports
+      let import_texts =
+        list.filter_map(module.imports, fn(def) {
+          let import_ = def.definition
+          case is_server_only_import(import_.module) {
+            True -> Error(Nil)
+            False -> Ok(slice_source(source_bytes, import_.location))
+          }
+        })
+
+      // Collect all type definitions (Model, Local, Msg, custom types)
+      let type_texts =
+        list.map(module.custom_types, fn(def) {
+          slice_source(source_bytes, def.definition.location)
+        })
+
+      // Collect type aliases
+      let alias_texts =
+        list.map(module.type_aliases, fn(def) {
+          slice_source(source_bytes, def.definition.location)
+        })
+
+      // Collect pure functions (skip server-only, skip @external(erlang),
+      // skip functions that reference server-only APIs in their body)
+      let function_texts =
+        list.filter_map(module.functions, fn(def) {
+          let func = def.definition
+          // Skip server-only functions by name
+          case list.contains(server_only_functions, func.name) {
+            True -> Error(Nil)
+            False -> {
+              // Skip functions with @external(erlang) annotations
+              let has_erlang_external =
+                list.any(def.attributes, fn(attr) {
+                  case attr {
+                    glance.Attribute(name: "external", arguments: [first, ..]) ->
+                      is_erlang_target(first)
+                    _ -> False
+                  }
+                })
+              case has_erlang_external {
+                True -> Error(Nil)
+                False -> {
+                  let func_text = slice_source(source_bytes, func.location)
+                  // Always extract init/init_local/view — client needs them
+                  case list.contains(always_extract_functions, func.name) {
+                    True -> Ok(func_text)
+                    False ->
+                      // Skip if the body references server-only modules
+                      case function_references_server_code(func_text) {
+                        True -> Error(Nil)
+                        False -> Ok(func_text)
+                      }
+                  }
+                }
+              }
+            }
+          }
+        })
+
+      // Collect constants
+      let constant_texts =
+        list.map(module.constants, fn(def) {
+          slice_source(source_bytes, def.definition.location)
+        })
+
+      // Assemble the client module
+      let parts =
+        list.flatten([
+          import_texts,
+          [""],
+          type_texts,
+          alias_texts,
+          [""],
+          constant_texts,
+          [""],
+          function_texts,
+        ])
+        |> list.filter(fn(s) { !string.is_empty(string.trim(s)) })
+
+      Ok(string.join(parts, "\n\n"))
+    }
+  }
+}
+
+/// Check if a function body references server-only code.
+/// Checks if the function text references any module that was skipped
+/// from the safe imports list, or uses known server-only patterns.
+fn function_references_server_code(func_text: String) -> Bool {
+  // Check for common server-only module references
+  string.contains(func_text, "store.")
+  || string.contains(func_text, "effect.")
+  || string.contains(func_text, "pubsub.")
+  || string.contains(func_text, "process.")
+  || string.contains(func_text, "mist.")
+  || string.contains(func_text, "request.")
+  || string.contains(func_text, "response.")
+  || string.contains(func_text, "middleware.")
+  || string.contains(func_text, "bytes_tree.")
+  || string.contains(func_text, "message.user(")
+  || string.contains(func_text, "message.assistant(")
+  || string.contains(func_text, "agent.new(")
+  || string.contains(func_text, "run.generate(")
+  || string.contains(func_text, "run.stream(")
+  || string.contains(func_text, "envoy.get(")
+  || string.contains(func_text, "openrouter.")
+  || string.contains(func_text, "Agent(")
+  // Known server-only function calls
+  || string.contains(func_text, "unique_int(")
+  || string.contains(func_text, "abs_int(")
+  || string.contains(func_text, "timer.sleep")
+  || string.contains(func_text, "sleep(")
+}
+
+/// Slice a portion of the source using byte offsets from a Span.
+fn slice_source(source_bytes: List(Int), span: glance.Span) -> String {
+  let glance.Span(start: start, end: end) = span
+  source_bytes
+  |> list.drop(start)
+  |> list.take(end - start)
+  |> bytes_to_string()
+}
+
+/// Convert a string to a list of byte values.
+/// We need this because Glance Span uses byte offsets, not character offsets.
+@external(erlang, "beacon_build_ffi", "string_to_bytes")
+fn string_to_bytes(s: String) -> List(Int)
+
+/// Convert a list of byte values back to a string.
+@external(erlang, "beacon_build_ffi", "bytes_to_string")
+fn bytes_to_string(bytes: List(Int)) -> String
