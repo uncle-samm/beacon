@@ -752,3 +752,214 @@ pub fn view(model: Model) { model }
 "
   let assert Ok(Nil) = analyzer.validate_purity(source)
 }
+
+// === Constant Leak Prevention Tests ===
+
+pub fn server_attr_constant_not_extracted_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Increment }
+
+@server
+const secret_key = \"sk_live_abc123\"
+
+pub fn view(model: Model) { model }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert False = string.contains(extracted, "secret_key")
+  let assert False = string.contains(extracted, "sk_live_abc123")
+}
+
+pub fn server_module_constant_not_extracted_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Increment }
+
+const db_config = process.self()
+
+pub fn view(model: Model) { model }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert False = string.contains(extracted, "db_config")
+}
+
+pub fn referenced_constant_is_extracted_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Increment }
+
+const max_count = 100
+
+pub fn view(model: Model) { max_count }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert True = string.contains(extracted, "max_count")
+  let assert True = string.contains(extracted, "100")
+}
+
+pub fn unreferenced_constant_not_extracted_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Increment }
+
+const unused_value = 42
+
+pub fn view(model: Model) { model }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert False = string.contains(extracted, "unused_value")
+}
+
+// === Server Type Tests ===
+
+pub fn detects_server_type_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Server { Server(api_key: String) }
+pub type Msg { Increment }
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Increment -> Model(count: model.count + 1) }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = analysis.has_server
+  let assert True = list.length(analysis.server_fields) == 1
+  let assert Ok(field) = list.first(analysis.server_fields)
+  let assert True = field.name == "api_key"
+}
+
+pub fn no_server_type_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Increment }
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Increment -> model }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert False = analysis.has_server
+  let assert True = analysis.server_fields == []
+}
+
+pub fn server_type_not_in_extracted_client_source_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Server { Server(api_key: String, db_conn: String) }
+pub type Msg { Increment }
+pub fn view(model: Model) { model }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert True = string.contains(extracted, "pub type Model")
+  let assert False = string.contains(extracted, "Server")
+  let assert False = string.contains(extracted, "api_key")
+  let assert False = string.contains(extracted, "db_conn")
+}
+
+pub fn init_server_not_in_extracted_client_source_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Server { Server(key: String) }
+pub type Msg { Increment }
+
+fn init_server() { Server(key: \"secret\") }
+
+pub fn view(model: Model) { model }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert False = string.contains(extracted, "init_server")
+}
+
+// === Computed Field Tests ===
+
+pub fn detects_computed_fields_test() {
+  let source =
+    "
+pub type Model { Model(items: List(Int), tax_rate: Float) }
+pub type Msg { AddItem }
+
+@computed
+pub fn subtotal(model: Model) -> Int {
+  0
+}
+
+@computed
+pub fn total(model: Model) -> Int {
+  0
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { AddItem -> model }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = list.length(analysis.computed_fields) == 2
+  let names = list.map(analysis.computed_fields, fn(c) { c.name })
+  let assert True = list.contains(names, "subtotal")
+  let assert True = list.contains(names, "total")
+}
+
+pub fn computed_field_return_type_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Increment }
+
+@computed
+pub fn display_count(model: Model) -> String {
+  \"count\"
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Increment -> model }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = list.length(analysis.computed_fields) == 1
+  let assert Ok(field) = list.first(analysis.computed_fields)
+  let assert True = field.name == "display_count"
+  let assert True = field.return_type == "String"
+}
+
+pub fn computed_function_not_in_extracted_client_source_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Increment }
+
+@computed
+pub fn doubled(model: Model) -> Int {
+  model.count * 2
+}
+
+pub fn view(model: Model) { model }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert False = string.contains(extracted, "doubled")
+  let assert False = string.contains(extracted, "@computed")
+}
+
+pub fn non_computed_function_still_extracted_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Increment }
+
+fn helper(x: Int) -> Int { x + 1 }
+
+pub fn view(model: Model) { helper(model.count) }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert True = string.contains(extracted, "helper")
+}

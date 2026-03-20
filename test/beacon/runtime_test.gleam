@@ -827,3 +827,64 @@ pub fn patch_content_correct_after_many_increments_test() {
   let assert True = string.contains(last_patch, "/count")
 }
 
+// === Server Type Tests ===
+
+pub fn server_state_not_in_model_sync_test() {
+  // Simulate the pattern from app_with_server:
+  // Model + Server wrapped as #(Model, Server), serializer only encodes Model part
+  let config =
+    runtime.RuntimeConfig(
+      init: fn() {
+        // Combined: #(Model, Server) — server state is api_key
+        #(#(CounterModel(count: 0), "secret_api_key"), effect.none())
+      },
+      update: fn(combined, msg) {
+        let #(model, server) = combined
+        case msg {
+          Increment -> #(#(CounterModel(count: model.count + 1), server), effect.none())
+          _ -> #(#(model, server), effect.none())
+        }
+      },
+      view: fn(combined) {
+        // View only uses model part — server part is never accessed
+        let #(model, _server) = combined
+        element.el("div", [], [element.text(int.to_string(model.count))])
+      },
+      decode_event: option.Some(counter_decode_event),
+      // Serializer only encodes the Model part, NOT the server state
+      serialize_model: option.Some(fn(combined: #(CounterModel, String)) {
+        let #(model, _server) = combined
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
+      deserialize_model: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
+    )
+  let assert Ok(subject) = runtime.start(config)
+  let transport_subject = process.new_subject()
+
+  process.send(subject, runtime.ClientConnected(conn_id: "server_conn", subject: transport_subject))
+  process.sleep(20)
+  process.send(subject, runtime.ClientJoined(conn_id: "server_conn", token: ""))
+  process.sleep(100)
+
+  // Collect ALL messages from join (mount + model_sync)
+  let msgs = drain_messages(transport_subject, [])
+  // Find model_sync message — it should contain count but NOT api_key
+  let model_syncs = list.filter_map(msgs, fn(m) {
+    case m {
+      transport.SendModelSync(model_json: json, ..) -> Ok(json)
+      _ -> Error(Nil)
+    }
+  })
+  // Should have at least one model_sync (sent on join when serialize_model is set)
+  let assert True = list.length(model_syncs) >= 1
+  // NONE of them should contain the server secret
+  list.each(model_syncs, fn(json) {
+    let assert False = string.contains(json, "secret_api_key")
+    let assert True = string.contains(json, "count")
+  })
+}
+

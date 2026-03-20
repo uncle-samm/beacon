@@ -269,6 +269,62 @@ pub fn app_with_local(
   )
 }
 
+/// Create an app with private server-side state.
+/// `init` returns the shared Model. `init_server` returns server-only state.
+/// `update` receives both Model and Server, returns both plus effects.
+/// `view` receives only Model — Server is never accessible in the view.
+///
+/// Server state is NEVER serialized, NEVER sent to client, NEVER in the JS bundle.
+/// Gleam's type system enforces this at compile time.
+///
+/// ```gleam
+/// beacon.app_with_server(init, init_server, update, view) |> beacon.start(8080)
+/// ```
+pub fn app_with_server(
+  init: fn() -> model,
+  init_server: fn() -> server,
+  update: fn(model, server, msg) -> #(model, server, effect.Effect(msg)),
+  view: fn(model) -> Node(msg),
+) -> AppBuilder(#(model, server), msg) {
+  // Wrap into a combined model: #(model, server)
+  // The runtime sees #(model, server) as a single "model" but only the
+  // model part is serialized/sent to client (via model_encoder wrapping).
+  let combined_init = fn() {
+    let model = init()
+    let server = init_server()
+    #(model, server)
+  }
+  let combined_update = fn(combined: #(model, server), msg: msg) {
+    let #(model, server) = combined
+    let #(new_model, new_server, effects) = update(model, server, msg)
+    #(#(new_model, new_server), effects)
+  }
+  let combined_view = fn(combined: #(model, server)) {
+    let #(model, _server) = combined
+    view(model)
+  }
+  AppBuilder(
+    init_simple: None,
+    init_effect: Some(fn() { #(combined_init(), effect.none()) }),
+    update_simple: None,
+    update_effect: Some(combined_update),
+    view: combined_view,
+    title: "Beacon",
+    secret_key: generate_secret(),
+    middlewares: [middleware.secure_headers()],
+    static_dir: None,
+    serialize_model: None,
+    deserialize_model: None,
+    has_local: False,
+    route_patterns: [],
+    on_route_change: None,
+    dynamic_subscriptions: None,
+    on_notify: None,
+    on_update_effect: None,
+    security_limits: transport.default_security_limits(),
+  )
+}
+
 /// Set the page title.
 pub fn title(
   builder: AppBuilder(model, msg),

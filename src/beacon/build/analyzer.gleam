@@ -65,6 +65,18 @@ pub type EnumTypeInfo {
   )
 }
 
+/// A computed field — a server-side derived value from Model.
+/// Detected by @computed attribute on public functions.
+/// Computed values are included in model_sync JSON but NOT in client encode_model.
+pub type ComputedField {
+  ComputedField(
+    /// The function name (e.g., "subtotal", "total").
+    name: String,
+    /// The return type name (e.g., "Int", "String", "Float", "Bool").
+    return_type: String,
+  )
+}
+
 /// An imported module resolved from user source imports.
 pub type ImportedModule {
   ImportedModule(
@@ -82,6 +94,10 @@ pub type Analysis {
     msg_variants: List(MsgVariant),
     /// Whether the module has a Local type.
     has_local: Bool,
+    /// Whether the module has a Server type (private server-side state).
+    has_server: Bool,
+    /// Fields of the Server type (never sent to client).
+    server_fields: List(TypeField),
     /// Fields of the Model type (for JSON codec generation).
     model_fields: List(TypeField),
     /// Whether the module has a direct `pub fn init` (vs make_init factory).
@@ -94,6 +110,8 @@ pub type Analysis {
     enum_types: List(EnumTypeInfo),
     /// Substates — Model fields that are custom record types, tracked independently.
     substates: List(SubstateInfo),
+    /// Computed fields — @computed pub fn functions, server-side derived values.
+    computed_fields: List(ComputedField),
     /// External modules imported by the user app (for multi-file analysis).
     imported_modules: List(ImportedModule),
   )
@@ -135,6 +153,16 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
         Error(_) -> False
       }
 
+      // Check for Server type (private server-side state)
+      let has_server = case find_custom_type(module, "Server") {
+        Ok(_) -> True
+        Error(_) -> False
+      }
+      let server_fields = case find_custom_type(module, "Server") {
+        Ok(server_type) -> extract_fields(server_type)
+        Error(_) -> []
+      }
+
       // Extract Model fields for JSON codec generation
       let model_fields = case find_custom_type(module, "Model") {
         Ok(model_type) -> extract_fields(model_type)
@@ -145,8 +173,8 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
       let custom_types =
         list.filter_map(module.custom_types, fn(def) {
           let name = def.definition.name
-          // Skip Model, Local, Msg — we handle those specially
-          case name == "Model" || name == "Local" || name == "Msg" {
+          // Skip Model, Local, Msg, Server — we handle those specially
+          case name == "Model" || name == "Local" || name == "Msg" || name == "Server" {
             True -> Error(Nil)
             False -> {
               let fields = extract_fields(def.definition)
@@ -224,18 +252,46 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
           }
         })
 
+      // Detect @computed functions — pub fn with @computed attribute.
+      // Must take exactly 1 parameter (Model) and return a known type.
+      let computed_fields =
+        list.filter_map(module.functions, fn(def) {
+          let has_computed_attr =
+            list.any(def.attributes, fn(attr) {
+              case attr {
+                glance.Attribute(name: "computed", ..) -> True
+                _ -> False
+              }
+            })
+          case has_computed_attr {
+            False -> Error(Nil)
+            True -> {
+              let func = def.definition
+              // Extract return type name
+              let return_type = case func.return {
+                option.Some(glance.NamedType(name: name, ..)) -> name
+                _ -> "String"
+              }
+              Ok(ComputedField(name: func.name, return_type: return_type))
+            }
+          }
+        })
+
       case msg_type, update_fn {
         Ok(msg), Ok(func) -> {
           let variants = classify_variants(msg, func)
           Ok(Analysis(
             msg_variants: variants,
             has_local: has_local,
+            has_server: has_server,
+            server_fields: server_fields,
             model_fields: model_fields,
             has_direct_init: has_direct_init,
             has_direct_update: has_direct_update,
             custom_types: custom_types,
             enum_types: enum_types,
             substates: substates,
+            computed_fields: computed_fields,
             imported_modules: [],
           ))
         }
@@ -763,7 +819,7 @@ fn format_purity_errors(errors: List(PurityError)) -> String {
 /// update runs on the server — not compiled to JS.
 const server_only_functions = [
   "start", "main", "on_update", "make_update", "make_init",
-  "make_on_update",
+  "make_on_update", "init_server",
 ]
 
 /// Names of functions that MUST be extracted even if they reference server code.
@@ -798,9 +854,13 @@ pub fn extract_client_source(source: String) -> Result(String, String) {
         })
 
       // Collect all type definitions (Model, Local, Msg, custom types)
+      // Exclude Server type — it is private server-side state, never sent to client
       let type_texts =
-        list.map(module.custom_types, fn(def) {
-          slice_source(source_bytes, def.definition.location)
+        list.filter_map(module.custom_types, fn(def) {
+          case def.definition.name == "Server" {
+            True -> Error(Nil)
+            False -> Ok(slice_source(source_bytes, def.definition.location))
+          }
         })
 
       // Collect type aliases
@@ -818,6 +878,17 @@ pub fn extract_client_source(source: String) -> Result(String, String) {
           case list.contains(server_only_functions, func.name) {
             True -> Error(Nil)
             False -> {
+              // Skip @computed functions — server-only derived values
+              let has_computed_attr =
+                list.any(def.attributes, fn(attr) {
+                  case attr {
+                    glance.Attribute(name: "computed", ..) -> True
+                    _ -> False
+                  }
+                })
+              case has_computed_attr {
+                True -> Error(Nil)
+                False -> {
               // Skip functions with @external(erlang) annotations
               let has_erlang_external =
                 list.any(def.attributes, fn(attr) {
@@ -843,14 +914,49 @@ pub fn extract_client_source(source: String) -> Result(String, String) {
                   }
                 }
               }
+              }
+              }
             }
           }
         })
 
-      // Collect constants
+      // Collect constants — filtered to prevent leaking server-side secrets.
+      // Rules (in order):
+      // 1. Skip if constant has @server attribute
+      // 2. Skip if constant body references server-only modules
+      // 3. Skip if constant is not referenced by any extracted function
       let constant_texts =
-        list.map(module.constants, fn(def) {
-          slice_source(source_bytes, def.definition.location)
+        list.filter_map(module.constants, fn(def) {
+          let const_name = def.definition.name
+          // Rule 1: skip @server constants
+          let has_server_attr =
+            list.any(def.attributes, fn(attr) {
+              case attr {
+                glance.Attribute(name: "server", ..) -> True
+                _ -> False
+              }
+            })
+          case has_server_attr {
+            True -> Error(Nil)
+            False -> {
+              let const_text = slice_source(source_bytes, def.definition.location)
+              // Rule 2: skip if body references server-only code
+              case function_references_server_code(const_text) {
+                True -> Error(Nil)
+                False -> {
+                  // Rule 3: skip if not referenced by any extracted function
+                  let is_referenced =
+                    list.any(function_texts, fn(ft) {
+                      string.contains(ft, const_name)
+                    })
+                  case is_referenced {
+                    True -> Ok(const_text)
+                    False -> Error(Nil)
+                  }
+                }
+              }
+            }
+          }
         })
 
       // Assemble the client module

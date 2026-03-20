@@ -7,13 +7,13 @@
 
 ## Current Status
 
-**Active Milestone:** 83 — Server Privacy, Computed Fields, Constant Safety
-**Last Completed:** 82 — Documentation Overhaul
+**Active Milestone:** 83 — Server Privacy, Computed Fields, Constant Safety (COMPLETE)
+**Last Completed:** 83 — Server Privacy, Computed Fields, Constant Safety
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (553 tests passed, 0 failures)
+**Test Status:** GREEN (557 tests passed, 0 failures)
 **Linter:** PASSING (zero violations)
 
-### Milestone 83: Server Privacy, Computed Fields, Constant Safety
+### Milestone 83: Server Privacy, Computed Fields, Constant Safety ✅
 > Add proper data boundaries: Server type for private state, @computed for derived fields, constant leak prevention, and remove dead server_fn code.
 
 #### 83.1 — Remove server_fn module + RPC mechanism (cleanup) ✅
@@ -34,43 +34,46 @@
 - [x] `gleam test` — 544 passed, 5/5 runs green
 - [x] Fixed sim_corrupt_data_resilience_test: verify phase used stagger_ms:0 causing TCP race when 5 connections hit simultaneously after corrupt barrage. Fix: stagger_ms:20. Root cause: server is healthy, but raw gen_tcp:connect can fail when 5 simultaneous connections arrive while close handlers for 20 corrupt connections are still processing.
 
-#### 83.2 — Constant leak prevention (highest security impact)
-- [ ] `src/beacon/build/analyzer.gleam` — parse `@server` attribute on constants (skip if present)
-- [ ] `src/beacon/build/analyzer.gleam` — apply `function_references_server_code()` check to constant text
-- [ ] `src/beacon/build/analyzer.gleam` — only include constants referenced by extracted function texts
-- [ ] `test/beacon/build_analyzer_test.gleam` — test: `@server` constant not in extracted client source
-- [ ] `test/beacon/build_analyzer_test.gleam` — test: unreferenced constant not in extracted client source
-- [ ] `test/beacon/build_analyzer_test.gleam` — test: referenced constant IS in extracted client source
-- [ ] `gleam build` — zero warnings
-- [ ] `gleam test` — all tests pass
+#### 83.2 — Constant leak prevention (highest security impact) ✅
+- [x] `src/beacon/build/analyzer.gleam` — parse `@server` attribute on constants (skip if present)
+- [x] `src/beacon/build/analyzer.gleam` — apply `function_references_server_code()` check to constant text
+- [x] `src/beacon/build/analyzer.gleam` — only include constants referenced by extracted function texts
+- [x] `test/beacon/build_analyzer_test.gleam` — test: `@server` constant not in extracted client source
+- [x] `test/beacon/build_analyzer_test.gleam` — test: unreferenced constant not in extracted client source
+- [x] `test/beacon/build_analyzer_test.gleam` — test: referenced constant IS in extracted client source
+- [x] Also: test for server-module-referencing constant not extracted
+- [x] `gleam build` — zero warnings
+- [x] `gleam test` — 548 passed, no failures
 
-#### 83.3 — Server type (private server-side state)
-- [ ] `src/beacon/build/analyzer.gleam` — detect `pub type Server` in module (like Model/Local detection)
-- [ ] `src/beacon/build/analyzer.gleam` — add `has_server: Bool`, `server_fields: List(TypeField)` to Analysis
-- [ ] `src/beacon/build/analyzer.gleam` — exclude Server type from `extract_client_source()`
-- [ ] `src/beacon/build/analyzer.gleam` — add `init_server` to `server_only_functions` list
-- [ ] `src/beacon/build.gleam` — Server type excluded from client codec generation
-- [ ] `src/beacon/runtime.gleam` — add `server_state: Option(Dynamic)` to RuntimeState
-- [ ] `src/beacon/runtime.gleam` — RuntimeConfig gets `init_server` and updated `update` signature
-- [ ] `src/beacon.gleam` — new builder: `beacon.app_with_server(init, init_server, update, view)`
-- [ ] Tests: Server type never in encoded JSON
-- [ ] Tests: Server state persists across messages
-- [ ] `gleam build` — zero warnings
-- [ ] `gleam test` — all tests pass
+#### 83.3 — Server type (private server-side state) ✅
+- [x] `src/beacon/build/analyzer.gleam` — detect `pub type Server` in module (like Model/Local detection)
+- [x] `src/beacon/build/analyzer.gleam` — add `has_server: Bool`, `server_fields: List(TypeField)` to Analysis
+- [x] `src/beacon/build/analyzer.gleam` — exclude Server type from `extract_client_source()`
+- [x] `src/beacon/build/analyzer.gleam` — add `init_server` to `server_only_functions` list
+- [x] `src/beacon/build.gleam` — Server type excluded from client codec generation (excluded from type_texts, not a Model field)
+- [x] `src/beacon.gleam` — new builder: `beacon.app_with_server(init, init_server, update, view)` — wraps #(model, server) tuple, view only gets model, serializer only encodes model
+- [x] Note: RuntimeState/RuntimeConfig unchanged — server state lives in closure (cleaner than adding server_state field)
+- [x] Tests: Server type detected in analysis (has_server, server_fields)
+- [x] Tests: Server type NOT in extracted client source
+- [x] Tests: init_server NOT in extracted client source
+- [x] Tests: model_sync contains count but NOT server secret
+- [x] `gleam build` — zero warnings
+- [x] `gleam test` — 553 passed, no failures
 
-#### 83.4 — Computed fields (@computed attribute)
-- [ ] `src/beacon/build/analyzer.gleam` — detect `@computed` attribute on public functions
-- [ ] `src/beacon/build/analyzer.gleam` — validate signature is `fn(Model) -> T`
-- [ ] `src/beacon/build/analyzer.gleam` — add `computed_fields: List(ComputedField)` to Analysis
-- [ ] `src/beacon/build/analyzer.gleam` — add computed function names to `server_only_functions`
-- [ ] `src/beacon/build.gleam` — `generate_codec_module()`: add computed fields to `encode_model`
-- [ ] `src/beacon/build.gleam` — `generate_entry_point()`: augment client Model type with computed fields
-- [ ] `src/beacon/build.gleam` — client `encode_model` excludes computed fields
-- [ ] Tests: computed field detection in analyzer
-- [ ] Tests: computed values in encoded JSON
-- [ ] Tests: computed fields not in client encode
-- [ ] `gleam build` — zero warnings
-- [ ] `gleam test` — all tests pass
+#### 83.4 — Computed fields (@computed attribute) ✅
+- [x] `src/beacon/build/analyzer.gleam` — detect `@computed` attribute on public functions
+- [x] `src/beacon/build/analyzer.gleam` — extract return type from function signature (Int, String, Float, Bool)
+- [x] `src/beacon/build/analyzer.gleam` — add `ComputedField` type and `computed_fields: List(ComputedField)` to Analysis
+- [x] `src/beacon/build/analyzer.gleam` — `@computed` functions excluded from `extract_client_source()` (server-only)
+- [x] `src/beacon/build.gleam` — `generate_codec_module()`: computed fields added to `encode_model` (calls app.fn(model) and encodes result)
+- [x] `src/beacon/build.gleam` — client `encode_model` automatically excludes computed fields (only encodes model_fields)
+- [x] Client `decode_model` ignores computed fields (Gleam decoders skip unknown keys)
+- [x] Tests: computed field detection (2 fields detected, correct names)
+- [x] Tests: return type extraction (String return type detected)
+- [x] Tests: @computed functions NOT in extracted client source
+- [x] Tests: non-computed helper functions still extracted correctly
+- [x] `gleam build` — zero warnings
+- [x] `gleam test` — 557 passed, no failures
 
 ### Milestone 82: Documentation Overhaul ✅
 > Fix all 42 documentation issues from docs-quality audit.

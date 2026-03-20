@@ -1384,7 +1384,19 @@ fn generate_codec_module(
     False -> #(module_name <> ".Model", "  let model = state\n")
   }
 
-  let all_field_encoders = list.append(model_field_encoders, local_field_encoders)
+  // Computed field encoders — @computed functions called server-side, results included in model_sync
+  let computed_field_encoders =
+    list.map(analysis.computed_fields, fn(cf) {
+      let encoder = case cf.return_type {
+        "Int" -> "json.int(" <> module_name <> "." <> cf.name <> "(model))"
+        "Float" -> "json.float(" <> module_name <> "." <> cf.name <> "(model))"
+        "Bool" -> "json.bool(" <> module_name <> "." <> cf.name <> "(model))"
+        _ -> "json.string(" <> module_name <> "." <> cf.name <> "(model))"
+      }
+      "    #(\"" <> cf.name <> "\", " <> encoder <> ")"
+    })
+
+  let all_field_encoders = list.flatten([model_field_encoders, local_field_encoders, computed_field_encoders])
 
   // Generate server-side custom type decoders (for decode_model)
   let server_custom_decoders =
