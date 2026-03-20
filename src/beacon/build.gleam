@@ -80,7 +80,14 @@ fn resolve_external_sources(
   base_dir: String,
 ) -> List(#(String, String, String)) {
   case glance.module(source) {
-    Error(_) -> []
+    Error(_) -> {
+      log.warning(
+        "beacon.build",
+        "Failed to parse source for external module resolution in "
+          <> base_dir,
+      )
+      []
+    }
     Ok(module) -> {
       list.filter_map(module.imports, fn(def) {
         let import_ = def.definition
@@ -125,7 +132,13 @@ fn resolve_external_sources(
                 Ok(#(alias, mod_path, ext_source))
               }
               Error(_) -> {
-                // File doesn't exist — might be a hex package, skip silently
+                // File doesn't exist — might be a hex package
+                log.debug(
+                  "beacon.build",
+                  "Could not read external module file for "
+                    <> mod_path
+                    <> " — likely a hex package, skipping",
+                )
                 Error(Nil)
               }
             }
@@ -682,7 +695,17 @@ fn generate_entry_point(
                 [] -> prefix <> ".Unknown"
               }
             }
-            Error(_) -> "todo"
+            Error(_) -> {
+              log.error(
+                "beacon.build",
+                "Unknown type '"
+                  <> f.type_name
+                  <> "' for field '"
+                  <> f.name
+                  <> "' — no enum found, defaulting to json.null in init stub",
+              )
+              "json.null"
+            }
           }
       }
       f.name <> ": " <> default_val
@@ -770,7 +793,13 @@ pub fn encode_model(model: app.Model, _local: Nil) -> String {
     True -> {
       let local_fields = case find_local_fields(source) {
         Ok(fields) -> fields
-        Error(_) -> []
+        Error(_) -> {
+          log.debug(
+            "beacon.build",
+            "Could not extract Local fields from source — using empty field list for encoder",
+          )
+          []
+        }
       }
       // Build local field encoders using the same infrastructure as model fields
       // Need to create a temporary analysis-like context for Local fields
@@ -988,7 +1017,13 @@ fn generate_local_decoder(
     True -> {
       let local_fields = case find_local_fields(source) {
         Ok(fields) -> fields
-        Error(_) -> []
+        Error(_) -> {
+          log.debug(
+            "beacon.build",
+            "Could not extract Local fields from source — using empty field list for local decoder",
+          )
+          []
+        }
       }
       let decode_fields =
         list.map(local_fields, fn(f) {
@@ -1366,7 +1401,13 @@ fn generate_codec_module(
     True -> {
       let local_fields = case find_local_fields(source) {
         Ok(fields) -> fields
-        Error(_) -> []
+        Error(_) -> {
+          log.debug(
+            "beacon.build",
+            "Could not extract Local fields from source — using empty field list for server encoder",
+          )
+          []
+        }
       }
       list.map(local_fields, fn(f) {
         let encoder = generate_server_field_encoder("local", f, analysis)
@@ -1622,7 +1663,13 @@ fn generate_server_decode_model(
       // Also decode Local fields and return the tuple #(Model, Local)
       let local_fields = case find_local_fields(source) {
         Ok(fields) -> fields
-        Error(_) -> []
+        Error(_) -> {
+          log.debug(
+            "beacon.build",
+            "Could not extract Local fields from source — using empty field list for server decoder",
+          )
+          []
+        }
       }
       let local_decode_fields =
         list.map(local_fields, fn(f) {

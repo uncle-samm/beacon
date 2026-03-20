@@ -229,7 +229,7 @@ function handleModelSync(modelJson, version) {
       clientModel = result[0];
 
       // Cache JSON representation for future patch diffing
-      try { clientModelJson = JSON.parse(modelJson); } catch (e) { console.error("[beacon] Failed to parse cached model JSON:", e.message); clientModelJson = null; }
+      try { clientModelJson = JSON.parse(modelJson); } catch (e) { console.error("[beacon] Failed to parse cached model JSON:", e.message); console.warn("[beacon] Client patching disabled until next successful model_sync — JSON cache is null"); clientModelJson = null; }
 
       // Decode Local state if available
       if (App.decode_local) {
@@ -295,10 +295,12 @@ function handlePatch(opsJson, version) {
       console.log("[beacon] Patch applied v" + version + " (" + ops.length + " ops)");
     } else {
       console.error("[beacon] Patch decode failed, requesting full sync");
+      console.warn("[beacon] Client-server desync detected: patch decode failed, disabling client patching until next model_sync");
       clientModelJson = null;
     }
   } catch (e) {
     console.error("[beacon] Patch apply failed:", e);
+    console.warn("[beacon] Client-server desync detected: patch apply exception, disabling client patching until next model_sync");
     clientModelJson = null;
   }
 }

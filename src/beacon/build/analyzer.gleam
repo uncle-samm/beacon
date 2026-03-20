@@ -160,13 +160,25 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
       }
       let server_fields = case find_custom_type(module, "Server") {
         Ok(server_type) -> extract_fields(server_type)
-        Error(_) -> []
+        Error(_) -> {
+          log.debug(
+            "beacon.analyzer",
+            "No Server type found — server-side private state not used",
+          )
+          []
+        }
       }
 
       // Extract Model fields for JSON codec generation
       let model_fields = case find_custom_type(module, "Model") {
         Ok(model_type) -> extract_fields(model_type)
-        Error(_) -> []
+        Error(_) -> {
+          log.debug(
+            "beacon.analyzer",
+            "No Model type found — this module may not be an app component",
+          )
+          []
+        }
       }
 
       // Extract ALL custom types for nested decoder generation
