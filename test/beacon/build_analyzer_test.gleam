@@ -755,19 +755,18 @@ pub fn view(model: Model) { model }
 
 // === Constant Leak Prevention Tests ===
 
-pub fn server_attr_constant_not_extracted_test() {
+pub fn server_prefix_constant_not_extracted_test() {
   let source =
     "
 pub type Model { Model(count: Int) }
 pub type Msg { Increment }
 
-@server
-const secret_key = \"sk_live_abc123\"
+const server_api_key = \"sk_live_abc123\"
 
 pub fn view(model: Model) { model }
 "
   let assert Ok(extracted) = analyzer.extract_client_source(source)
-  let assert False = string.contains(extracted, "secret_key")
+  let assert False = string.contains(extracted, "server_api_key")
   let assert False = string.contains(extracted, "sk_live_abc123")
 }
 
@@ -880,19 +879,19 @@ pub fn view(model: Model) { model }
 }
 
 // === Computed Field Tests ===
+// Computed fields are detected by signature: pub fn(Model) -> T
+// (not view/update/init, not returning Node)
 
-pub fn detects_computed_fields_test() {
+pub fn detects_computed_fields_by_signature_test() {
   let source =
     "
 pub type Model { Model(items: List(Int), tax_rate: Float) }
 pub type Msg { AddItem }
 
-@computed
 pub fn subtotal(model: Model) -> Int {
   0
 }
 
-@computed
 pub fn total(model: Model) -> Int {
   0
 }
@@ -915,7 +914,6 @@ pub fn computed_field_return_type_test() {
 pub type Model { Model(count: Int) }
 pub type Msg { Increment }
 
-@computed
 pub fn display_count(model: Model) -> String {
   \"count\"
 }
@@ -938,7 +936,6 @@ pub fn computed_function_not_in_extracted_client_source_test() {
 pub type Model { Model(count: Int) }
 pub type Msg { Increment }
 
-@computed
 pub fn doubled(model: Model) -> Int {
   model.count * 2
 }
@@ -946,11 +943,45 @@ pub fn doubled(model: Model) -> Int {
 pub fn view(model: Model) { model }
 "
   let assert Ok(extracted) = analyzer.extract_client_source(source)
-  let assert False = string.contains(extracted, "doubled")
-  let assert False = string.contains(extracted, "@computed")
+  let assert False = string.contains(extracted, "fn doubled")
 }
 
-pub fn non_computed_function_still_extracted_test() {
+pub fn view_not_detected_as_computed_test() {
+  let source =
+    "
+import beacon
+pub type Model { Model(count: Int) }
+pub type Msg { Increment }
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Increment -> model }
+}
+pub fn view(model: Model) -> beacon.Node(Msg) { beacon.text(\"hi\") }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  // view takes Model but returns Node — should NOT be computed
+  let names = list.map(analysis.computed_fields, fn(c) { c.name })
+  let assert False = list.contains(names, "view")
+}
+
+pub fn private_fn_not_computed_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Increment }
+
+fn helper(model: Model) -> Int { model.count + 1 }
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Increment -> model }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  // Private fn(Model) -> T is NOT computed (not pub)
+  let assert True = analysis.computed_fields == []
+}
+
+pub fn non_computed_helper_still_extracted_test() {
   let source =
     "
 pub type Model { Model(count: Int) }

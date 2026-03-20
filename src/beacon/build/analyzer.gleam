@@ -252,28 +252,46 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
           }
         })
 
-      // Detect @computed functions — pub fn with @computed attribute.
-      // Must take exactly 1 parameter (Model) and return a known type.
+      // Detect computed fields — pub fn that takes exactly 1 param of type Model
+      // and returns a known type. Excludes view (returns Node), update (takes 2+ params),
+      // init (takes 0 params), and server_only_functions.
+      let computed_excluded = ["view", "init", "init_local", "init_server",
+        "update", "start", "main", "on_update", "make_update", "make_init",
+        "make_on_update"]
       let computed_fields =
         list.filter_map(module.functions, fn(def) {
-          let has_computed_attr =
-            list.any(def.attributes, fn(attr) {
-              case attr {
-                glance.Attribute(name: "computed", ..) -> True
-                _ -> False
+          let func = def.definition
+          // Must be public
+          case func.publicity {
+            glance.Public -> {
+              // Must not be in excluded list
+              case list.contains(computed_excluded, func.name) {
+                True -> Error(Nil)
+                False -> {
+                  // Must take exactly 1 parameter of type Model
+                  case func.parameters {
+                    [glance.FunctionParameter(type_: option.Some(glance.NamedType(name: "Model", ..)), ..)] -> {
+                      // Extract return type — must not be Node (that's view)
+                      let return_type = case func.return {
+                        option.Some(glance.NamedType(name: name, ..)) ->
+                          case name {
+                            // Node return = view-like, not computed
+                            "Node" -> Error(Nil)
+                            _ -> Ok(name)
+                          }
+                        _ -> Ok("String")
+                      }
+                      case return_type {
+                        Ok(rt) -> Ok(ComputedField(name: func.name, return_type: rt))
+                        Error(Nil) -> Error(Nil)
+                      }
+                    }
+                    _ -> Error(Nil)
+                  }
+                }
               }
-            })
-          case has_computed_attr {
-            False -> Error(Nil)
-            True -> {
-              let func = def.definition
-              // Extract return type name
-              let return_type = case func.return {
-                option.Some(glance.NamedType(name: name, ..)) -> name
-                _ -> "String"
-              }
-              Ok(ComputedField(name: func.name, return_type: return_type))
             }
+            _ -> Error(Nil)
           }
         })
 
@@ -826,7 +844,7 @@ const server_only_functions = [
 /// view is always needed. init/init_local may fail to compile if they use
 /// server-only code — the entry point generates stubs for those.
 const always_extract_functions = [
-  "view",
+  "view", "init_local",
 ]
 
 /// Extract pure client code from a source module.
@@ -878,43 +896,44 @@ pub fn extract_client_source(source: String) -> Result(String, String) {
           case list.contains(server_only_functions, func.name) {
             True -> Error(Nil)
             False -> {
-              // Skip @computed functions — server-only derived values
-              let has_computed_attr =
-                list.any(def.attributes, fn(attr) {
-                  case attr {
-                    glance.Attribute(name: "computed", ..) -> True
-                    _ -> False
-                  }
-                })
-              case has_computed_attr {
-                True -> Error(Nil)
+              let func_text = slice_source(source_bytes, func.location)
+              // Always extract view/init/init_local — client needs them
+              case list.contains(always_extract_functions, func.name) {
+                True -> Ok(func_text)
                 False -> {
-              // Skip functions with @external(erlang) annotations
-              let has_erlang_external =
-                list.any(def.attributes, fn(attr) {
-                  case attr {
-                    glance.Attribute(name: "external", arguments: [first, ..]) ->
-                      is_erlang_target(first)
-                    _ -> False
-                  }
-                })
-              case has_erlang_external {
-                True -> Error(Nil)
-                False -> {
-                  let func_text = slice_source(source_bytes, func.location)
-                  // Always extract init/init_local/view — client needs them
-                  case list.contains(always_extract_functions, func.name) {
-                    True -> Ok(func_text)
-                    False ->
-                      // Skip if the body references server-only modules
-                      case function_references_server_code(func_text) {
-                        True -> Error(Nil)
-                        False -> Ok(func_text)
+                  // Skip computed fields — pub fn(Model) -> T (not Node return)
+                  let is_computed = case func.publicity, func.parameters {
+                    glance.Public, [glance.FunctionParameter(type_: option.Some(glance.NamedType(name: "Model", ..)), ..)] ->
+                      case func.return {
+                        option.Some(glance.NamedType(name: "Node", ..)) -> False
+                        _ -> True
                       }
+                    _, _ -> False
+                  }
+                  case is_computed {
+                    True -> Error(Nil)
+                    False -> {
+                      // Skip functions with @external(erlang) annotations
+                      let has_erlang_external =
+                        list.any(def.attributes, fn(attr) {
+                          case attr {
+                            glance.Attribute(name: "external", arguments: [first, ..]) ->
+                              is_erlang_target(first)
+                            _ -> False
+                          }
+                        })
+                      case has_erlang_external {
+                        True -> Error(Nil)
+                        False ->
+                          // Skip if the body references server-only modules
+                          case function_references_server_code(func_text) {
+                            True -> Error(Nil)
+                            False -> Ok(func_text)
+                          }
+                      }
+                    }
                   }
                 }
-              }
-              }
               }
             }
           }
@@ -922,21 +941,14 @@ pub fn extract_client_source(source: String) -> Result(String, String) {
 
       // Collect constants — filtered to prevent leaking server-side secrets.
       // Rules (in order):
-      // 1. Skip if constant has @server attribute
+      // 1. Skip if constant name starts with "server_" (server-only by convention)
       // 2. Skip if constant body references server-only modules
       // 3. Skip if constant is not referenced by any extracted function
       let constant_texts =
         list.filter_map(module.constants, fn(def) {
           let const_name = def.definition.name
-          // Rule 1: skip @server constants
-          let has_server_attr =
-            list.any(def.attributes, fn(attr) {
-              case attr {
-                glance.Attribute(name: "server", ..) -> True
-                _ -> False
-              }
-            })
-          case has_server_attr {
+          // Rule 1: skip server_ prefixed constants
+          case string.starts_with(const_name, "server_") {
             True -> Error(Nil)
             False -> {
               let const_text = slice_source(source_bytes, def.definition.location)
