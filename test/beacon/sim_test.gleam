@@ -430,16 +430,59 @@ pub fn sim_corrupt_data_resilience_test() {
   metrics.destroy(mt2)
 }
 
-// ===== Connection Churn DoS Test =====
-// KNOWN ISSUE: Mist returns HTTP 500 during extreme connection churn
-// (rapid WebSocket connect/disconnect cycles). This is a Mist-level
-// bug — Beacon's runtime and transport handle the load correctly, but
-// Mist's internal state gets corrupted when connections close rapidly.
-// Client-side retry (exponential backoff) mitigates the issue.
-// TODO: Upstream to Mist when reproducible case is isolated.
+// ===== Mist Thundering Herd Regression Test =====
+// This test proves that Mist returns HTTP 500 when multiple WebSocket
+// connections arrive simultaneously after connection churn.
+// It uses NO client retry — raw single-attempt connects.
 //
-// To re-enable: uncomment and adjust cleanup delay as needed.
-// The connection_churn scenario is available in scenario.gleam.
+// EXPECTED TO FAIL until Mist is replaced with our own transport.
+// When this test starts passing, Mist (or our replacement) handles
+// thundering herd correctly and the TODO can be removed.
+//
+// To run: rename to add _test suffix (currently excluded from test runner).
+// The test spawns 20 corrupt connections, waits, then tries 5 raw
+// simultaneous connections with NO retry. At least 1 will get HTTP 500.
+
+pub fn mist_thundering_herd_regression() {
+  let port = test_app.unique_port()
+  let assert Ok(_app) = test_app.start_counter_app(port)
+  process.sleep(200)
+
+  // Phase 1: 20 connections sending corrupt data
+  let mt = metrics.new()
+  let _result =
+    pool.run(pool.PoolConfig(
+      concurrency: 20,
+      host: "localhost",
+      port: port,
+      scenario: scenario.corrupt(),
+      stagger_ms: 10,
+      metrics: mt,
+    ))
+
+  // 2 second cleanup (same as the original test)
+  process.sleep(2000)
+
+  // Phase 2: 5 simultaneous full WS sessions — NO retry
+  // Each: connect, join, wait for mount, disconnect.
+  // Uses no-retry pool to test raw server availability.
+  let mt2 = metrics.new()
+  let verify =
+    pool.run_no_retry(pool.PoolConfig(
+      concurrency: 5,
+      host: "localhost",
+      port: port,
+      scenario: scenario.counter(3),
+      stagger_ms: 0,
+      metrics: mt2,
+    ))
+
+  metrics.destroy(mt)
+  metrics.destroy(mt2)
+
+  // ALL 5 must succeed without retry — this is what we want from our transport
+  let assert True = verify.succeeded == 5
+}
 
 // ===== Patch Efficiency Test =====
 

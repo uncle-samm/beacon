@@ -64,6 +64,125 @@ pub fn run(config: PoolConfig) -> PoolResult {
   )
 }
 
+/// Run the pool with NO client retry — raw single-attempt WebSocket connects.
+/// Used to test server availability without client-side mitigation.
+pub fn run_no_retry(config: PoolConfig) -> PoolResult {
+  let start = metrics.now_us()
+  let result_subject = process.new_subject()
+
+  spawn_workers_no_retry(
+    config.concurrency,
+    config,
+    result_subject,
+    0,
+  )
+
+  let #(succeeded, failed) =
+    collect_results(result_subject, config.concurrency, 0, 0)
+
+  let duration_us = metrics.now_us() - start
+  PoolResult(
+    total: config.concurrency,
+    succeeded: succeeded,
+    failed: failed,
+    duration_ms: duration_us / 1000,
+  )
+}
+
+fn spawn_workers_no_retry(
+  remaining: Int,
+  config: PoolConfig,
+  result_subject: process.Subject(Bool),
+  idx: Int,
+) -> Nil {
+  case remaining {
+    0 -> Nil
+    _ -> {
+      let metrics_table = config.metrics
+      let host = config.host
+      let port = config.port
+      let actions = config.scenario.actions
+
+      process.spawn(fn() {
+        let ok = execute_scenario_no_retry(host, port, actions, metrics_table)
+        process.send(result_subject, ok)
+      })
+
+      case config.stagger_ms > 0 {
+        True -> process.sleep(config.stagger_ms)
+        False -> Nil
+      }
+
+      spawn_workers_no_retry(remaining - 1, config, result_subject, idx + 1)
+    }
+  }
+}
+
+fn execute_scenario_no_retry(
+  host: String,
+  port: Int,
+  actions: List(Action),
+  metrics_table: MetricsTable,
+) -> Bool {
+  execute_actions_no_retry(host, port, actions, metrics_table, option_none())
+}
+
+fn execute_actions_no_retry(
+  host: String,
+  port: Int,
+  actions: List(Action),
+  mt: MetricsTable,
+  socket: Option(WsSocket),
+) -> Bool {
+  case actions {
+    [] -> {
+      case socket {
+        Some(s) -> { ws_close(s)
+          Nil }
+        None -> Nil
+      }
+      True
+    }
+    [action, ..rest] -> {
+      case execute_action_no_retry(host, port, action, mt, socket) {
+        Ok(new_socket) ->
+          execute_actions_no_retry(host, port, rest, mt, new_socket)
+        Error(_reason) -> {
+          case socket {
+            Some(s) -> { ws_close(s)
+          Nil }
+            None -> Nil
+          }
+          False
+        }
+      }
+    }
+  }
+}
+
+fn execute_action_no_retry(
+  host: String,
+  port: Int,
+  action: Action,
+  mt: MetricsTable,
+  socket: Option(WsSocket),
+) -> Result(Option(WsSocket), String) {
+  case action {
+    Connect -> {
+      metrics.increment(mt, "connections_opened")
+      case ws_connect_no_retry(host, port) {
+        Ok(s) -> Ok(Some(s))
+        Error(reason) -> {
+          metrics.increment(mt, "connections_failed")
+          Error(reason)
+        }
+      }
+    }
+    // All other actions are the same — delegate to execute_action
+    _ -> execute_action(host, port, action, mt, socket)
+  }
+}
+
 fn spawn_workers(
   remaining: Int,
   config: PoolConfig,
@@ -391,6 +510,9 @@ fn option_none() -> Option(a) {
 
 @external(erlang, "beacon_http_client_ffi", "ws_connect")
 fn ws_connect(host: String, port: Int) -> Result(WsSocket, String)
+
+@external(erlang, "beacon_http_client_ffi", "ws_connect_no_retry")
+fn ws_connect_no_retry(host: String, port: Int) -> Result(WsSocket, String)
 
 @external(erlang, "beacon_http_client_ffi", "ws_send")
 fn ws_send(socket: WsSocket, payload: String) -> Result(Nil, String)

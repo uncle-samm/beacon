@@ -1,5 +1,5 @@
 -module(beacon_http_client_ffi).
--export([start_httpc/0, http_get/1, ws_connect/2, ws_send/2, ws_recv/2, ws_close/1]).
+-export([start_httpc/0, http_get/1, ws_connect/2, ws_connect_no_retry/2, ws_send/2, ws_recv/2, ws_close/1]).
 
 %% Start the inets application (required for httpc).
 start_httpc() ->
@@ -62,6 +62,39 @@ maybe_retry(_Host, _Port, Attempt, Reason) when Attempt >= 3 ->
 maybe_retry(Host, Port, Attempt, _Reason) ->
     timer:sleep(Attempt * 200),
     ws_connect(Host, Port, Attempt + 1).
+
+%% Single-attempt WebSocket connect — NO retry.
+%% Used to test raw server availability without client-side mitigation.
+ws_connect_no_retry(Host, Port) ->
+    HostStr = binary_to_list(Host),
+    case gen_tcp:connect(HostStr, Port, [binary, {active, false}, {packet, raw}], 5000) of
+        {ok, Socket} ->
+            Key = base64:encode(crypto:strong_rand_bytes(16)),
+            Req = iolist_to_binary([
+                <<"GET /ws HTTP/1.1\r\n">>,
+                <<"Host: ">>, Host, <<"\r\n">>,
+                <<"Upgrade: websocket\r\n">>,
+                <<"Connection: Upgrade\r\n">>,
+                <<"Sec-WebSocket-Key: ">>, Key, <<"\r\n">>,
+                <<"Sec-WebSocket-Version: 13\r\n">>,
+                <<"\r\n">>
+            ]),
+            ok = gen_tcp:send(Socket, Req),
+            case gen_tcp:recv(Socket, 0, 5000) of
+                {ok, Response} ->
+                    case binary:match(Response, <<"101">>) of
+                        {_, _} -> {ok, Socket};
+                        nomatch ->
+                            gen_tcp:close(Socket),
+                            {error, <<"upgrade_failed">>}
+                    end;
+                {error, Reason} ->
+                    gen_tcp:close(Socket),
+                    {error, list_to_binary(io_lib:format("~p", [Reason]))}
+            end;
+        {error, Reason} ->
+            {error, list_to_binary(io_lib:format("~p", [Reason]))}
+    end.
 
 %% Send a WebSocket text frame. Returns {ok, nil} or {error, Reason}.
 ws_send(Socket, Payload) ->
