@@ -994,3 +994,217 @@ pub fn view(model: Model) { helper(model.count) }
   let assert Ok(extracted) = analyzer.extract_client_source(source)
   let assert True = string.contains(extracted, "helper")
 }
+
+// === Build Integration / Leak Prevention Tests ===
+// End-to-end tests that verify no secrets leak through extract_client_source.
+// Tests edge cases: ordering, multiple constants, mixed server/client, etc.
+
+pub fn full_privacy_demo_extraction_test() {
+  // Mirrors the privacy_demo example — all features at once
+  let source =
+    "
+import beacon
+import beacon/html
+import gleam/int
+import gleam/list
+
+const server_api_key = \"sk_live_abc\"
+const server_db_url = \"postgres://secret\"
+const app_title = \"My App\"
+const unused_value = 99
+
+pub type Model { Model(count: Int, name: String) }
+pub type Server { Server(key: String) }
+pub type Item { Item(price: Int) }
+pub type Msg { Inc }
+
+pub fn init() -> Model { Model(count: 0, name: \"\") }
+pub fn init_server() -> Server { Server(key: server_api_key) }
+
+pub fn subtotal(model: Model) -> Int { model.count }
+pub fn total(model: Model) -> Int { model.count + 1 }
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Inc -> Model(..model, count: model.count + 1) }
+}
+pub fn view(model: Model) -> beacon.Node(Msg) {
+  html.div([], [html.text(app_title)])
+}
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  // Server secrets: MUST NOT be in client source
+  let assert False = string.contains(extracted, "server_api_key")
+  let assert False = string.contains(extracted, "sk_live_abc")
+  let assert False = string.contains(extracted, "server_db_url")
+  let assert False = string.contains(extracted, "postgres://secret")
+  // Server type: MUST NOT be in client source
+  let assert False = string.contains(extracted, "pub type Server")
+  let assert False = string.contains(extracted, "init_server")
+  // Computed functions: MUST NOT be in client source
+  let assert False = string.contains(extracted, "fn subtotal")
+  let assert False = string.contains(extracted, "fn total")
+  // Unreferenced constant: MUST NOT be in client source
+  let assert False = string.contains(extracted, "unused_value")
+  // Client-safe content: MUST be in client source
+  let assert True = string.contains(extracted, "pub type Model")
+  let assert True = string.contains(extracted, "pub type Msg")
+  let assert True = string.contains(extracted, "pub fn view")
+  let assert True = string.contains(extracted, "app_title")
+}
+
+pub fn multiple_server_constants_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Inc }
+
+const server_stripe_key = \"sk_live\"
+const server_openai_key = \"sk-abc\"
+const server_db_password = \"hunter2\"
+const color = \"#ff0000\"
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Inc -> model }
+}
+pub fn view(model: Model) { color }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert False = string.contains(extracted, "server_stripe_key")
+  let assert False = string.contains(extracted, "server_openai_key")
+  let assert False = string.contains(extracted, "server_db_password")
+  let assert False = string.contains(extracted, "hunter2")
+  // color IS referenced by view
+  let assert True = string.contains(extracted, "color")
+  let assert True = string.contains(extracted, "#ff0000")
+}
+
+pub fn constant_referenced_by_helper_not_view_test() {
+  // Constant used by a pure helper that IS extracted — should be included
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Inc }
+
+const max_value = 999
+
+fn clamp(x: Int) -> Int { max_value }
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Inc -> model }
+}
+pub fn view(model: Model) { clamp(model.count) }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  // clamp is a pure helper used by view — extracted
+  let assert True = string.contains(extracted, "clamp")
+  // max_value is referenced by clamp — extracted
+  let assert True = string.contains(extracted, "max_value")
+}
+
+pub fn computed_with_various_return_types_test() {
+  let source =
+    "
+pub type Model { Model(count: Int, name: String, active: Bool, rate: Float) }
+pub type Msg { Inc }
+
+pub fn doubled(model: Model) -> Int { model.count * 2 }
+pub fn label(model: Model) -> String { model.name }
+pub fn is_valid(model: Model) -> Bool { model.active }
+pub fn adjusted_rate(model: Model) -> Float { model.rate }
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Inc -> model }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = list.length(analysis.computed_fields) == 4
+  // Verify return types
+  let find_type = fn(name) {
+    case list.find(analysis.computed_fields, fn(c) { c.name == name }) {
+      Ok(c) -> c.return_type
+      Error(_) -> ""
+    }
+  }
+  let assert True = find_type("doubled") == "Int"
+  let assert True = find_type("label") == "String"
+  let assert True = find_type("is_valid") == "Bool"
+  let assert True = find_type("adjusted_rate") == "Float"
+}
+
+pub fn update_not_computed_despite_model_param_test() {
+  // update takes Model but also takes Msg — NOT computed
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Inc }
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Inc -> model }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let names = list.map(analysis.computed_fields, fn(c) { c.name })
+  let assert False = list.contains(names, "update")
+}
+
+pub fn server_constant_definition_excluded_even_if_referenced_test() {
+  // server_ prefix ALWAYS excludes the constant DEFINITION from extraction.
+  // The view may still reference the name (which will fail JS compilation
+  // since the constant won't exist) — but the SECRET VALUE never leaks.
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Inc }
+
+const server_secret = \"leaked?\"
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Inc -> model }
+}
+pub fn view(model: Model) { server_secret }
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  // The constant DEFINITION (with the secret value) is excluded
+  let assert False = string.contains(extracted, "leaked?")
+  // The constant DEFINITION line itself is excluded
+  let assert False = string.contains(extracted, "const server_secret")
+  // The view references it by name — that's OK, it'll fail JS compilation
+  // (the name appears in view source, but the value is never in the bundle)
+  let assert True = string.contains(extracted, "pub fn view")
+}
+
+pub fn server_type_fields_never_in_analysis_custom_types_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Server { Server(api_key: String, db: String) }
+pub type Msg { Inc }
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Inc -> model }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  // Server should NOT appear in custom_types (it's handled separately)
+  let type_names = list.map(analysis.custom_types, fn(ct) { ct.name })
+  let assert False = list.contains(type_names, "Server")
+  // But has_server should be true
+  let assert True = analysis.has_server
+  let assert True = list.length(analysis.server_fields) == 2
+}
+
+pub fn empty_model_no_computed_test() {
+  // Edge case: Model with no fields
+  let source =
+    "
+pub type Model { Model }
+pub type Msg { Inc }
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg { Inc -> model }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = analysis.computed_fields == []
+}
