@@ -238,7 +238,7 @@ fn build_enhanced_bundle(
     Error(reason) -> Error("Source extraction failed: " <> reason)
     Ok(client_source) -> {
       // Step 2: Create temp JS project structure
-      let _ = run_command("rm -rf " <> dir <> " 2>/dev/null")
+      let _ = run_command("rm -rf '" <> dir <> "' 2>/dev/null")
       case create_build_directories(dir) {
         Error(reason) -> Error("Directory setup failed: " <> reason)
         Ok(Nil) -> {
@@ -321,7 +321,7 @@ fn build_enhanced_bundle(
 
       // Step 8: Compile JS project
       let compile_result =
-        run_command("cd " <> dir <> " && gleam build 2>&1")
+        run_command("cd '" <> dir <> "' && gleam build 2>&1")
       case string.contains(compile_result, "Compiled in") {
         False ->
           Error("JS compilation failed:\n" <> compile_result)
@@ -345,7 +345,7 @@ fn build_enhanced_bundle(
 
           let result =
             run_command(
-              "cd " <> dir <> " && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/" <> filename <> " --minify 2>&1",
+              "cd '" <> dir <> "' && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/" <> filename <> " --minify 2>&1",
             )
           case string.contains(result, "Done") || string.contains(result, ".js") {
             True -> {
@@ -1080,16 +1080,16 @@ pub fn build_base_client() -> Nil {
   let bc_js = beacon_root <> "/beacon_client/build/dev/javascript"
 
   // Clean
-  let _ = run_command("rm -rf " <> dir <> " 2>/dev/null")
-  let _ = run_command("mkdir -p " <> dir)
+  let _ = run_command("rm -rf '" <> dir <> "' 2>/dev/null")
+  let _ = run_command("mkdir -p '" <> dir <> "'")
 
   // Ensure beacon_client is built (JS target)
   let bc_build_result =
-    run_command("cd " <> beacon_root <> "/beacon_client && gleam build --target javascript 2>&1")
+    run_command("cd '" <> beacon_root <> "/beacon_client' && gleam build --target javascript 2>&1")
   log.debug("beacon.build", "beacon_client build: " <> bc_build_result)
 
   // Resolve absolute path for the entry point import
-  let abs_bc_js = run_command("cd " <> bc_js <> " && pwd")
+  let abs_bc_js = run_command("cd '" <> bc_js <> "' && pwd")
   let abs_bc_path = string.trim(abs_bc_js)
 
   // Create entry point — just import the client module.
@@ -1120,7 +1120,7 @@ pub fn build_base_client() -> Nil {
           let _ = run_command("rm -f priv/static/beacon_client_*.js 2>/dev/null")
           let result =
             run_command(
-              "cd " <> dir <> " && npx esbuild entry.mjs --bundle --format=iife --outfile=../../priv/static/" <> filename <> " --minify 2>&1",
+              "cd '" <> dir <> "' && npx esbuild entry.mjs --bundle --format=iife --outfile=../../priv/static/" <> filename <> " --minify 2>&1",
             )
           case string.contains(result, "Done") || string.contains(result, ".js") {
             True -> {

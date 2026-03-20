@@ -136,7 +136,10 @@ native_watcher_available() ->
 %% Start a native file watcher process. Returns a port.
 %% On macOS: uses fswatch. On Linux: uses inotifywait.
 start_native_watcher(Dirs) ->
-    DirStr = lists:join(" ", [binary_to_list(D) || D <- Dirs]),
+    %% SECURITY: Wrap each directory path in single quotes to prevent shell injection.
+    %% Directory paths come from developer configuration, not user input, but quoting
+    %% prevents breakage from paths with spaces or special characters.
+    DirStr = lists:join(" ", ["'" ++ binary_to_list(D) ++ "'" || D <- Dirs]),
     Cmd = case os:type() of
         {unix, darwin} ->
             "fswatch -1 --include '\\.gleam$' --exclude '.*' " ++ DirStr;

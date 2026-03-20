@@ -46,6 +46,7 @@ pub type ClientMessage {
     /// JSON-encoded patch operations from client-side model diff.
     /// When present, server applies these ops instead of running update.
     /// Empty string "" means no ops (server runs update as normal).
+    /// Size is bounded by max_message_bytes in SecurityLimits (default 64KB).
     ops: String,
   )
   /// Client sends a heartbeat to keep the connection alive.
@@ -136,6 +137,10 @@ pub type ConnectionState {
     rate_window_start: Int,
     /// Security limits for this connection (copied from TransportConfig at init).
     security_limits: SecurityLimits,
+    /// Heartbeat rate limiting: count in current 1-second window.
+    heartbeat_count: Int,
+    /// Heartbeat rate limiting: start of current window (monotonic native time units).
+    heartbeat_window_start: Int,
   )
 }
 
@@ -335,6 +340,9 @@ pub fn decode_client_message(
 
 /// Return the type name of a client message for safe logging.
 /// Does not include payload data which may be sensitive.
+/// NOTE: Debug-level logging elsewhere in the transport may include message
+/// metadata (connection IDs, event names, paths). Ensure debug logging is
+/// disabled in production to avoid leaking potentially sensitive data.
 fn client_message_type(msg: ClientMessage) -> String {
   case msg {
     ClientEvent(name: name, ..) -> "event:" <> name
@@ -373,6 +381,10 @@ fn send_message(
 /// One second in native time units (nanoseconds on most BEAM VMs).
 /// Used for rate limiting window calculations.
 const one_second_native = 1_000_000_000
+
+/// Maximum heartbeats per second. Heartbeats beyond this are silently dropped
+/// (no ack sent) to prevent heartbeat flooding.
+const max_heartbeats_per_second = 2
 
 /// Check per-connection rate limit: max 50 events per 1-second window.
 /// Returns the updated state and whether the event was rate limited.
@@ -427,6 +439,29 @@ fn handle_text_message(
   }
 }
 
+/// Check heartbeat rate limit: max 2 per second.
+/// Returns the updated state and whether the heartbeat was rate limited.
+fn check_heartbeat_rate(state: ConnectionState) -> #(ConnectionState, Bool) {
+  let now = erlang_monotonic_time()
+  let #(count, window_start) = case
+    now - state.heartbeat_window_start > one_second_native
+  {
+    True -> #(0, now)
+    False -> #(state.heartbeat_count, state.heartbeat_window_start)
+  }
+  let new_count = count + 1
+  let new_state =
+    ConnectionState(
+      ..state,
+      heartbeat_count: new_count,
+      heartbeat_window_start: window_start,
+    )
+  case new_count > max_heartbeats_per_second {
+    True -> #(new_state, True)
+    False -> #(new_state, False)
+  }
+}
+
 /// Decode and dispatch a validated text message.
 /// Applies per-connection rate limiting to non-heartbeat messages.
 fn handle_text_message_decode(
@@ -435,10 +470,19 @@ fn handle_text_message_decode(
 ) -> mist.Next(ConnectionState, InternalMessage) {
   case decode_client_message(text) {
     Ok(ClientHeartbeat) -> {
-      // Heartbeats are exempt from rate limiting
-      log.debug("beacon.transport", "Heartbeat from " <> state.id)
-      send_message(state.connection, state.id, ServerHeartbeatAck)
-      mist.continue(state)
+      // Rate-limit heartbeats: max 2 per second to prevent flooding
+      let #(new_state, hb_limited) = check_heartbeat_rate(state)
+      case hb_limited {
+        True -> {
+          log.debug("beacon.transport", "Heartbeat rate limited for " <> state.id)
+          mist.continue(new_state)
+        }
+        False -> {
+          log.debug("beacon.transport", "Heartbeat from " <> state.id)
+          send_message(new_state.connection, new_state.id, ServerHeartbeatAck)
+          mist.continue(new_state)
+        }
+      }
     }
     Ok(msg) -> {
       // Check rate limit before dispatching
@@ -558,6 +602,11 @@ pub fn create_handler(
 /// Check that the Origin header (if present) matches the server's host.
 /// This prevents cross-site WebSocket hijacking (CSWSH).
 /// If no Origin header is present, the request is allowed (non-browser clients, same-origin).
+///
+/// SECURITY: Origin validation is the primary CSRF defense for WebSocket connections.
+/// Unlike HTTP requests, WebSocket upgrades cannot use CSRF tokens because the browser
+/// sends the upgrade request automatically. The same-origin policy combined with this
+/// origin check is the standard defense (same approach as Phoenix LiveView).
 fn check_origin(req: Request(mist.Connection)) -> Result(Nil, String) {
   case request.get_header(req, "origin") {
     // No origin header — allow (non-browser clients, same-origin)
@@ -568,8 +617,9 @@ fn check_origin(req: Request(mist.Connection)) -> Result(Nil, String) {
         Ok(h) -> h
         Error(Nil) -> ""
       }
-      // Compare: origin host must match request host
-      case origin_host == request_host || origin_host == "" {
+      // Compare: origin host must match request host.
+      // An empty origin host is NOT allowed — it would bypass the check.
+      case origin_host == request_host {
         True -> Ok(Nil)
         False -> {
           log.warning(
@@ -775,6 +825,8 @@ fn handle_websocket_upgrade(
           event_count: 0,
           rate_window_start: 0,
           security_limits: config.security_limits,
+          heartbeat_count: 0,
+          heartbeat_window_start: 0,
         )
       pubsub.subscribe("beacon:patches:" <> conn_id)
       #(state, Some(selector))
@@ -913,6 +965,16 @@ pub fn start(
     "beacon.transport",
     "Starting on port " <> int.to_string(config.port),
   )
+  // Warn if no WebSocket authentication is configured
+  case config.ws_auth {
+    None ->
+      log.warning(
+        "beacon.transport",
+        "No ws_auth configured — WebSocket connections are unauthenticated. "
+          <> "Set ws_auth in TransportConfig to require authentication on upgrade.",
+      )
+    Some(_) -> Nil
+  }
   let handler = create_handler(config)
   let result =
     mist.new(handler)

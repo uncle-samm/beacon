@@ -1,6 +1,11 @@
 -module(beacon_build_ffi).
 -export([run_command/1, string_to_bytes/1, bytes_to_string/1]).
 
+%% SECURITY: os:cmd runs commands via the system shell. All directory paths
+%% concatenated into commands MUST be wrapped in single quotes on the caller side
+%% (build.gleam) to prevent shell injection. Gleam project paths are controlled
+%% by the developer (not user input), but quoting prevents accidental breakage
+%% from paths with spaces or special characters.
 run_command(Cmd) ->
     Result = os:cmd(binary_to_list(Cmd)),
     unicode:characters_to_binary(Result).

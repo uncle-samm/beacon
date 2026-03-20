@@ -1,6 +1,13 @@
 -module(beacon_store_ffi).
 -export([new_list_store/1, append/3, get_all/2, delete_key/2]).
 
+%% SECURITY: Atom creation constraint.
+%% Store names come from developer code at compile time, not from runtime user input.
+%% The validate_atom_name/1 guard restricts names to alphanumeric/underscore/hyphen
+%% (max 255 bytes), which bounds the atom table impact. Each distinct store name
+%% creates exactly one atom. If runtime-controlled names are ever needed, switch
+%% to binary_to_existing_atom or use an ETS-backed registry instead.
+
 new_list_store(Name) ->
     case validate_atom_name(Name) of
         ok ->

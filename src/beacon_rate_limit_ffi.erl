@@ -1,6 +1,11 @@
 -module(beacon_rate_limit_ffi).
 -export([new_table/1, increment/2, delete_key/2]).
 
+%% SECURITY: Atom creation constraint.
+%% Rate limiter names come from developer code at compile time, not from runtime
+%% user input. The validate_atom_name/1 guard restricts names to alphanumeric/
+%% underscore/hyphen (max 255 bytes). Each distinct limiter creates one atom.
+
 new_table(Name) ->
     case validate_atom_name(Name) of
         ok ->

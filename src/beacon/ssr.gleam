@@ -143,13 +143,23 @@ pub fn create_session_token(secret_key: String) -> String {
   crypto.sign_message(message, secret, crypto.Sha256)
 }
 
+/// Maximum token lifetime: 24 hours. Any max_age_seconds above this is capped.
+/// Prevents misconfiguration from creating long-lived tokens.
+const max_token_lifetime_seconds = 86_400
+
 /// Verify a session token and extract the payload.
 /// Returns Ok(timestamp) if valid, Error otherwise.
+/// max_age_seconds is capped at 24 hours (86400s) to prevent long-lived tokens.
 pub fn verify_session_token(
   token: String,
   secret_key: String,
   max_age_seconds: Int,
 ) -> Result(Int, String) {
+  // Cap the max age to prevent misconfigured long-lived tokens
+  let capped_max_age = case max_age_seconds > max_token_lifetime_seconds {
+    True -> max_token_lifetime_seconds
+    False -> max_age_seconds
+  }
   let secret = bit_array.from_string(secret_key)
   case crypto.verify_signed_message(token, secret) {
     Ok(payload_bits) -> {
@@ -159,7 +169,7 @@ pub fn verify_session_token(
             Ok(timestamp) -> {
               let now = erlang_system_time_seconds()
               let age = now - timestamp
-              case age > max_age_seconds {
+              case age > capped_max_age {
                 True -> Error("Session token expired")
                 False -> Ok(timestamp)
               }
@@ -206,6 +216,11 @@ fn build_html_document(
     ".counter{text-align:center}",
     "</style>",
     "</head><body>",
+    // TODO: The session token is embedded in a data attribute, which is readable
+    // by any JS on the page (XSS risk). The proper fix is to use an HTTP-only cookie
+    // for the session token, which requires refactoring the WebSocket join flow.
+    // Mitigations: token has a short max_age (capped at 24h), is cryptographically
+    // signed, and CSP restricts script sources to 'self'.
     "<div id=\"beacon-app\" data-beacon-token=\"",
     session_token,
     "\">",

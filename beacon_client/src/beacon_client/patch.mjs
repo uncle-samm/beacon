@@ -137,6 +137,9 @@ function deepEqual(a, b) {
  * @param {Array} ops - Array of patch operations
  * @returns {*} - The patched model
  */
+// Keys that must never be set via patch operations to prevent prototype pollution.
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 export function applyOps(model, ops) {
   let result = model;
   for (let i = 0; i < ops.length; i++) {
@@ -167,6 +170,11 @@ function applyOp(model, op) {
   }
 
   const lastKey = segments[segments.length - 1];
+
+  // Guard against prototype pollution — never allow setting dangerous keys
+  if (UNSAFE_KEYS.has(lastKey)) {
+    return model;
+  }
 
   switch (op.op) {
     case "replace":

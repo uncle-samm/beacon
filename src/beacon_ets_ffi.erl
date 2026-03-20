@@ -1,6 +1,11 @@
 -module(beacon_ets_ffi).
 -export([new_table/1, put/3, get/2, delete/2, count/1]).
 
+%% SECURITY: Atom creation constraint.
+%% Table names come from developer code at compile time, not from runtime user input.
+%% The validate_atom_name/1 guard restricts names to alphanumeric/underscore/hyphen
+%% (max 255 bytes). Each distinct table creates one atom.
+
 %% Create a new ETS table. Returns the table reference.
 %% Using `set` type with `public` access so any process can read/write.
 new_table(Name) ->

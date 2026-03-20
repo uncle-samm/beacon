@@ -1,6 +1,11 @@
 -module(beacon_csrf_ffi).
 -export([new_store/1, put_token/3, get_token/2, delete_token/2]).
 
+%% SECURITY: Atom creation constraint.
+%% CSRF store names come from developer code at compile time, not from runtime
+%% user input. The validate_atom_name/1 guard restricts names to alphanumeric/
+%% underscore/hyphen (max 255 bytes). Each distinct store creates one atom.
+
 new_store(Name) ->
     case validate_atom_name(Name) of
         ok ->

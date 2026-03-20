@@ -103,6 +103,12 @@ try_load_substate_encoder(Name) ->
 %% Validate that a name is safe for atom conversion.
 %% Max 255 bytes, alphanumeric + underscore + hyphen only (no spaces, no special chars).
 %% This prevents atom table exhaustion from arbitrary user-controlled input.
+%%
+%% SECURITY: Atom creation constraint.
+%% Substate names come from the generated beacon_codec module (compile-time analysis
+%% of user type definitions), not from runtime user input. The set of atoms created
+%% is bounded by the number of model fields in the user's app. The validate check
+%% is a defense-in-depth measure.
 validate_atom_name(Name) when byte_size(Name) > 255 ->
     {error, <<"Name too long (max 255 bytes)">>};
 validate_atom_name(Name) ->

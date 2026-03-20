@@ -1,6 +1,11 @@
 -module(beacon_chat_ffi).
 -export([new_store/1, append_message/3, get_messages/2]).
 
+%% SECURITY: Atom creation constraint.
+%% Chat store names come from developer code at compile time, not from runtime
+%% user input. The validate_atom_name/1 guard restricts names to alphanumeric/
+%% underscore/hyphen (max 255 bytes). Each distinct store creates one atom.
+
 %% Create a new ETS table for storing chat messages.
 %% Uses a bag (allows multiple entries per key = room name).
 new_store(Name) ->

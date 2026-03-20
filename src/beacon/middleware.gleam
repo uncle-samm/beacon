@@ -130,6 +130,12 @@ pub fn cors(config: CorsConfig) -> Middleware {
 
 /// Security headers middleware — sets common security headers.
 /// Reference: OWASP secure headers project.
+///
+/// TODO: Add per-request CSP nonce generation for script-src. Currently uses
+/// script-src 'self' which is decent protection but a nonce would allow removing
+/// 'unsafe-inline' from style-src and provide stronger XSS protection. This
+/// requires threading a nonce value through the request context to the SSR
+/// template so that <script> tags include nonce="..." attributes.
 pub fn secure_headers() -> Middleware {
   fn(
     req: Request(mist.Connection),

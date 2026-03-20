@@ -1,6 +1,11 @@
 -module(beacon_session_ffi).
 -export([session_ets_new/1, session_ets_put/3, session_ets_get/2, session_ets_delete/2, generate_session_id/0]).
 
+%% SECURITY: Atom creation constraint.
+%% Session store names come from developer code at compile time, not from runtime
+%% user input. The validate_atom_name/1 guard restricts names to alphanumeric/
+%% underscore/hyphen (max 255 bytes). Each distinct store creates one atom.
+
 session_ets_new(Name) ->
     case validate_atom_name(Name) of
         ok ->
