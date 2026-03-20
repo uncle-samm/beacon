@@ -2,6 +2,7 @@ import beacon/transport
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
+import gleam/string
 
 // --- ServerMessage encoding tests ---
 
@@ -190,7 +191,10 @@ pub fn decode_event_with_ops_test() {
     clock: 1,
     ops: ops,
   )) = transport.decode_client_message(raw)
-  let assert True = ops != ""
+  // Verify ops is valid JSON patch format, not just non-empty
+  let assert True = string.contains(ops, "replace")
+  let assert True = string.contains(ops, "/count")
+  let assert True = string.contains(ops, "1")
 }
 
 pub fn decode_event_without_ops_test() {
@@ -204,6 +208,33 @@ pub fn decode_event_without_ops_test() {
     clock: 1,
     ops: "",
   )) = transport.decode_client_message(raw)
+}
+
+// --- Malformed JSON edge cases ---
+
+pub fn decode_empty_payload_test() {
+  // Empty string is not valid JSON — must fail with error
+  let assert Error(_) = transport.decode_client_message("")
+}
+
+pub fn decode_event_with_null_fields_test() {
+  // JSON with null values where strings are expected — must fail
+  let raw = "{\"type\":\"event\",\"name\":null,\"data\":null,\"target_path\":null}"
+  let assert Error(_) = transport.decode_client_message(raw)
+}
+
+pub fn decode_oversized_type_field_test() {
+  // Very long type string — must fail (unknown type) but not crash
+  let long_type = repeat_a(500)
+  let raw = "{\"type\":\"" <> long_type <> "\"}"
+  let assert Error(_) = transport.decode_client_message(raw)
+}
+
+fn repeat_a(n: Int) -> String {
+  case n <= 0 {
+    True -> ""
+    False -> "A" <> repeat_a(n - 1)
+  }
 }
 
 // --- Round-trip test ---

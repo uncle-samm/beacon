@@ -203,8 +203,8 @@ pub fn runtime_sends_model_sync_on_event_test() {
   })
   let has_update = list.any(msgs, fn(m) {
     case m {
-      transport.SendModelSync(model_json: json, ..) -> string.contains(json, "1")
-      transport.SendPatch(ops_json: json, ..) -> string.contains(json, "1")
+      transport.SendModelSync(model_json: json, ..) -> string.contains(json, "\"count\":1")
+      transport.SendPatch(ops_json: json, ..) -> string.contains(json, "/count")
       _ -> False
     }
   })
@@ -335,7 +335,9 @@ pub fn runtime_effect_dispatches_message_test() {
     |> process.select(transport_subject)
 
   // We might get multiple messages (patch from effect + mount from join)
-  // Drain all and find a mount message containing "42" (the effect dispatched SetCount(42))
+  // Drain all and find a message proving SetCount(42) was applied.
+  // Mount renders the view (text "42"), model_sync contains JSON with count,
+  // patches contain /count path.
   let first_msg = process.selector_receive(selector, 500)
   let msgs = drain_messages(transport_subject, case first_msg {
     Ok(msg) -> [msg]
@@ -343,9 +345,9 @@ pub fn runtime_effect_dispatches_message_test() {
   })
   let has_42 = list.any(msgs, fn(m) {
     case m {
-      transport.SendMount(payload: payload) -> string.contains(payload, "42")
-      transport.SendPatch(ops_json: json, ..) -> string.contains(json, "42")
-      transport.SendModelSync(model_json: json, ..) -> string.contains(json, "42")
+      transport.SendMount(payload: payload) -> string.contains(payload, ">42<")
+      transport.SendPatch(ops_json: json, ..) -> string.contains(json, "42") && string.contains(json, "/count")
+      transport.SendModelSync(model_json: json, ..) -> string.contains(json, "\"count\":42")
       _ -> False
     }
   })
@@ -600,8 +602,8 @@ pub fn model_sync_sent_after_event_test() {
   let msgs = drain_messages(transport_subject, [])
   let has_update = list.any(msgs, fn(m) {
     case m {
-      transport.SendModelSync(model_json: json, ..) -> string.contains(json, "1")
-      transport.SendPatch(ops_json: json, ..) -> string.contains(json, "1")
+      transport.SendModelSync(model_json: json, ..) -> string.contains(json, "\"count\":1")
+      transport.SendPatch(ops_json: json, ..) -> string.contains(json, "/count")
       _ -> False
     }
   })
@@ -655,7 +657,7 @@ pub fn sends_patch_not_model_sync_after_join_test() {
   let event_msgs = drain_messages(transport_subject, [])
   let has_patch = list.any(event_msgs, fn(m) {
     case m {
-      transport.SendPatch(..) -> True
+      transport.SendPatch(ops_json: ops, ..) -> string.contains(ops, "/count")
       _ -> False
     }
   })
@@ -885,6 +887,166 @@ pub fn server_state_not_in_model_sync_test() {
   list.each(model_syncs, fn(json) {
     let assert False = string.contains(json, "secret_api_key")
     let assert True = string.contains(json, "count")
+  })
+}
+
+// === Error Path Tests ===
+
+pub fn runtime_handles_malformed_event_data_test() {
+  // Send an event with a valid handler_id but garbage event_data.
+  // The runtime must stay alive and send an error (not crash).
+  let assert Ok(subject) = runtime.start(counter_config())
+  let transport_subject = process.new_subject()
+
+  process.send(subject, runtime.ClientConnected(
+    conn_id: "malformed_conn", subject: transport_subject,
+  ))
+  process.sleep(20)
+  process.send(subject, runtime.ClientJoined(conn_id: "malformed_conn", token: ""))
+  process.sleep(50)
+  let _ = drain_messages(transport_subject, [])
+
+  // Send event with valid handler but garbage data
+  process.send(subject, runtime.ClientEventReceived(
+    conn_id: "malformed_conn", event_name: "click", handler_id: "increment",
+    event_data: "THIS_IS_NOT_JSON!!!", target_path: "0", clock: 1, ops: "",
+  ))
+  process.sleep(50)
+
+  // Runtime must still be alive — send a normal increment to prove it
+  process.send(subject, runtime.ClientEventReceived(
+    conn_id: "malformed_conn", event_name: "click", handler_id: "increment",
+    event_data: "{}", target_path: "0", clock: 2, ops: "",
+  ))
+  process.sleep(50)
+
+  // Should get a response (patch or model_sync) from the second event
+  let msgs = drain_messages(transport_subject, [])
+  let has_response = list.any(msgs, fn(m) {
+    case m {
+      transport.SendPatch(..) -> True
+      transport.SendModelSync(..) -> True
+      _ -> False
+    }
+  })
+  let assert True = has_response
+}
+
+pub fn runtime_handles_rapid_events_test() {
+  // Send 50 events in rapid succession (no sleep between).
+  // Verify runtime processes all of them and final state is correct.
+  let config = counter_config()
+  let assert Ok(subject) = runtime.start(config)
+  let transport_subject = process.new_subject()
+
+  process.send(subject, runtime.ClientConnected(
+    conn_id: "rapid_conn", subject: transport_subject,
+  ))
+  process.sleep(20)
+  process.send(subject, runtime.ClientJoined(conn_id: "rapid_conn", token: ""))
+  process.sleep(50)
+  let _ = drain_messages(transport_subject, [])
+
+  // Send 50 increments with NO sleep between them
+  list.repeat(Nil, 50) |> list.index_map(fn(_, i) { i + 1 }) |> list.each(fn(i) {
+    process.send(subject, runtime.ClientEventReceived(
+      conn_id: "rapid_conn", event_name: "click", handler_id: "increment",
+      event_data: "{}", target_path: "0", clock: i, ops: "",
+    ))
+  })
+  // Wait for all processing to complete
+  process.sleep(500)
+
+  let msgs = drain_messages(transport_subject, [])
+  // Should have received responses for all 50 events
+  let patch_count = list.count(msgs, fn(m) {
+    case m {
+      transport.SendPatch(..) -> True
+      _ -> False
+    }
+  })
+  let assert True = patch_count == 50
+
+  // The final patch (most recent) should contain "50" (final count value).
+  // drain_messages returns messages in reverse order (newest first),
+  // so the first patch in the list is the most recent one.
+  let patches = list.filter_map(msgs, fn(m) {
+    case m {
+      transport.SendPatch(ops_json: ops, ..) -> Ok(ops)
+      _ -> Error(Nil)
+    }
+  })
+  let assert [newest_patch, ..] = patches
+  let assert True = string.contains(newest_patch, "/count")
+  let assert True = string.contains(newest_patch, "50")
+}
+
+// === Connection Isolation Test ===
+
+pub fn connection_isolation_test() {
+  // Verify connection B's state is NOT affected by connection A's events.
+  // Per-connection runtimes mean each start() creates an independent actor.
+  let assert Ok(subject_a) = runtime.start(counter_config())
+  let assert Ok(subject_b) = runtime.start(counter_config())
+  let transport_a = process.new_subject()
+  let transport_b = process.new_subject()
+
+  // Connect both
+  process.send(subject_a, runtime.ClientConnected(
+    conn_id: "iso_a", subject: transport_a,
+  ))
+  process.send(subject_b, runtime.ClientConnected(
+    conn_id: "iso_b", subject: transport_b,
+  ))
+  process.sleep(20)
+
+  // Join both
+  process.send(subject_a, runtime.ClientJoined(conn_id: "iso_a", token: ""))
+  process.send(subject_b, runtime.ClientJoined(conn_id: "iso_b", token: ""))
+  process.sleep(50)
+
+  // Drain initial messages from both
+  let _ = drain_messages(transport_a, [])
+  let _ = drain_messages(transport_b, [])
+
+  // Send 5 increments ONLY on connection A
+  list.repeat(Nil, 5) |> list.index_map(fn(_, i) { i + 1 }) |> list.each(fn(i) {
+    process.send(subject_a, runtime.ClientEventReceived(
+      conn_id: "iso_a", event_name: "click", handler_id: "increment",
+      event_data: "{}", target_path: "0", clock: i, ops: "",
+    ))
+  })
+  process.sleep(100)
+
+  // Drain A's messages — should have patches with count values
+  let a_msgs = drain_messages(transport_a, [])
+  let a_patches = list.filter_map(a_msgs, fn(m) {
+    case m {
+      transport.SendPatch(ops_json: ops, ..) -> Ok(ops)
+      _ -> Error(Nil)
+    }
+  })
+  let assert True = list.length(a_patches) == 5
+
+  // B should have received NO messages (no patches, no model_syncs)
+  let b_msgs = drain_messages(transport_b, [])
+  let assert True = list.is_empty(b_msgs)
+
+  // Now trigger a fresh model_sync on B by re-joining — should show count:0
+  process.send(subject_b, runtime.ClientJoined(conn_id: "iso_b", token: ""))
+  process.sleep(50)
+
+  let b_join_msgs = drain_messages(transport_b, [])
+  let b_syncs = list.filter_map(b_join_msgs, fn(m) {
+    case m {
+      transport.SendModelSync(model_json: json, ..) -> Ok(json)
+      _ -> Error(Nil)
+    }
+  })
+  let assert True = list.length(b_syncs) >= 1
+  // B's model_sync must show count:0 (unaffected by A's increments)
+  list.each(b_syncs, fn(json) {
+    let assert True = string.contains(json, "\"count\":0")
   })
 }
 
