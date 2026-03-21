@@ -29,6 +29,11 @@ pub fn empty() -> HandlerRegistry(msg) {
   HandlerRegistry(simple: dict.new(), parameterized: dict.new(), next_id: 0)
 }
 
+/// Get the total number of registered handlers (simple + parameterized).
+pub fn registry_size(registry: HandlerRegistry(msg)) -> Int {
+  dict.size(registry.simple) + dict.size(registry.parameterized)
+}
+
 /// Start a new render cycle. Pushes any existing registry onto a stack
 /// and creates a fresh one. Safe for nested renders (components).
 pub fn start_render() -> Nil {

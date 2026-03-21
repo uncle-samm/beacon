@@ -331,6 +331,12 @@ fn handle_message(
       handler.start_render()
       let current_vdom = model_to_use |> state.view
       let view_registry = handler.finish_render()
+      log.debug(
+        "beacon.runtime",
+        "Mount render registry: "
+          <> int.to_string(handler.registry_size(view_registry))
+          <> " handlers",
+      )
       let mount_html = element.to_string(current_vdom)
       case dict.get(state.connections, conn_id) {
         Ok(subject) -> {
@@ -432,7 +438,17 @@ fn handle_message(
         "" -> {
           // No ops — run update on server as normal
           let resolve_result = case state.handler_registry {
-            Some(registry) -> handler.resolve(registry, handler_id, event_data)
+            Some(registry) -> {
+              log.debug(
+                "beacon.runtime",
+                "Resolving "
+                  <> handler_id
+                  <> " in registry with "
+                  <> int.to_string(handler.registry_size(registry))
+                  <> " handlers",
+              )
+              handler.resolve(registry, handler_id, event_data)
+            }
             None -> Error(error.RuntimeError(reason: "No handler registry"))
           }
           let resolve_result = case resolve_result {

@@ -8,6 +8,7 @@
 
 import beacon/effect.{type Effect}
 import beacon/element.{type Node}
+import beacon/handler
 import beacon/log
 import beacon/route
 import gleam/option.{type Option, None, Some}
@@ -68,7 +69,11 @@ pub fn render_page(config: SsrConfig(model, msg)) -> RenderedPage {
   // can be deferred to the live mount phase.
 
   // Step 2: Render view
+  // Reset handler counter so IDs always start at h0 (prevents accumulation
+  // across keep-alive requests on the same HTTP process)
+  handler.start_render()
   let view_tree = config.view(model)
+  let _view_registry = handler.finish_render()
   let view_html = element.to_string(view_tree)
 
   // Step 3: Create session token
@@ -111,7 +116,11 @@ pub fn render_page_for_path(
   }
 
   // Step 3: Render view with route-specific model
+  // Reset handler counter so IDs always start at h0 (prevents accumulation
+  // across keep-alive requests on the same HTTP process)
+  handler.start_render()
   let view_tree = config.view(model)
+  let _view_registry = handler.finish_render()
   let view_html = element.to_string(view_tree)
 
   // Step 4: Create session token
