@@ -88,7 +88,7 @@ pub fn runtime_starts_successfully_test() {
     ),
   )
   process.sleep(20)
-  process.send(subject, runtime.ClientJoined(conn_id: "start_conn", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "start_conn", token: "", path: "/"))
   process.sleep(50)
 
   let selector =
@@ -115,7 +115,7 @@ pub fn runtime_accepts_client_connect_test() {
   process.sleep(20)
 
   // Join and verify mount message is received
-  process.send(subject, runtime.ClientJoined(conn_id: "test_conn_1", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "test_conn_1", token: "", path: "/"))
   process.sleep(50)
 
   let selector =
@@ -146,7 +146,7 @@ pub fn runtime_sends_mount_on_join_test() {
   process.sleep(20)
 
   // Send join
-  process.send(subject, runtime.ClientJoined(conn_id: "test_conn_2", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "test_conn_2", token: "", path: "/"))
   process.sleep(50)
 
   // Check that we received a mount message with rendered content
@@ -327,7 +327,7 @@ pub fn runtime_effect_dispatches_message_test() {
 
   // The effect should have already dispatched SetCount(42),
   // so joining should show count=42 in the mount HTML
-  process.send(subject, runtime.ClientJoined(conn_id: "test_conn_6", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "test_conn_6", token: "", path: "/"))
   process.sleep(50)
 
   let selector =
@@ -421,7 +421,7 @@ pub fn runtime_survives_view_crash_test() {
 
   // Drain any messages from earlier, then send a new join to prove runtime is alive
   let _ = drain_messages(transport_subject, [])
-  process.send(subject, runtime.ClientJoined(conn_id: "crash_conn", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "crash_conn", token: "", path: "/"))
   process.sleep(50)
 
   // Verify we get a mount message back (proving the runtime survived the crash)
@@ -539,7 +539,7 @@ pub fn state_recovery_from_token_test() {
   // Join with the token containing count=3
   process.send(
     subject,
-    runtime.ClientJoined(conn_id: "recovery_conn_2", token: token),
+    runtime.ClientJoined(conn_id: "recovery_conn_2", token: token, path: "/"),
   )
   process.sleep(50)
 
@@ -583,7 +583,7 @@ pub fn model_sync_sent_after_event_test() {
 
   process.send(subject, runtime.ClientConnected(conn_id: "sync_conn", subject: transport_subject))
   process.sleep(20)
-  process.send(subject, runtime.ClientJoined(conn_id: "sync_conn", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "sync_conn", token: "", path: "/"))
   process.sleep(20)
 
   // Drain mount + initial model_sync messages
@@ -632,7 +632,7 @@ pub fn sends_patch_not_model_sync_after_join_test() {
 
   process.send(subject, runtime.ClientConnected(conn_id: "patch_conn", subject: transport_subject))
   process.sleep(20)
-  process.send(subject, runtime.ClientJoined(conn_id: "patch_conn", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "patch_conn", token: "", path: "/"))
   process.sleep(50)
 
   // Drain mount + initial model_sync
@@ -679,7 +679,7 @@ pub fn patch_contains_only_changed_field_test() {
 
   process.send(subject, runtime.ClientConnected(conn_id: "small_patch", subject: transport_subject))
   process.sleep(20)
-  process.send(subject, runtime.ClientJoined(conn_id: "small_patch", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "small_patch", token: "", path: "/"))
   process.sleep(50)
   let _ = drain_messages(transport_subject, [])
 
@@ -716,7 +716,7 @@ pub fn client_ops_falls_back_without_codec_test() {
 
   process.send(subject, runtime.ClientConnected(conn_id: "ops_conn", subject: transport_subject))
   process.sleep(20)
-  process.send(subject, runtime.ClientJoined(conn_id: "ops_conn", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "ops_conn", token: "", path: "/"))
   process.sleep(50)
   let _ = drain_messages(transport_subject, [])
 
@@ -756,7 +756,7 @@ pub fn multiple_increments_produce_patches_test() {
 
   process.send(subject, runtime.ClientConnected(conn_id: "multi_conn", subject: transport_subject))
   process.sleep(20)
-  process.send(subject, runtime.ClientJoined(conn_id: "multi_conn", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "multi_conn", token: "", path: "/"))
   process.sleep(50)
   let _ = drain_messages(transport_subject, [])
 
@@ -797,7 +797,7 @@ pub fn patch_content_correct_after_many_increments_test() {
 
   process.send(subject, runtime.ClientConnected(conn_id: "many_conn", subject: transport_subject))
   process.sleep(20)
-  process.send(subject, runtime.ClientJoined(conn_id: "many_conn", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "many_conn", token: "", path: "/"))
   process.sleep(50)
   let _ = drain_messages(transport_subject, [])
 
@@ -869,7 +869,7 @@ pub fn server_state_not_in_model_sync_test() {
 
   process.send(subject, runtime.ClientConnected(conn_id: "server_conn", subject: transport_subject))
   process.sleep(20)
-  process.send(subject, runtime.ClientJoined(conn_id: "server_conn", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "server_conn", token: "", path: "/"))
   process.sleep(100)
 
   // Collect ALL messages from join (mount + model_sync)
@@ -902,7 +902,7 @@ pub fn runtime_handles_malformed_event_data_test() {
     conn_id: "malformed_conn", subject: transport_subject,
   ))
   process.sleep(20)
-  process.send(subject, runtime.ClientJoined(conn_id: "malformed_conn", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "malformed_conn", token: "", path: "/"))
   process.sleep(50)
   let _ = drain_messages(transport_subject, [])
 
@@ -943,7 +943,7 @@ pub fn runtime_handles_rapid_events_test() {
     conn_id: "rapid_conn", subject: transport_subject,
   ))
   process.sleep(20)
-  process.send(subject, runtime.ClientJoined(conn_id: "rapid_conn", token: ""))
+  process.send(subject, runtime.ClientJoined(conn_id: "rapid_conn", token: "", path: "/"))
   process.sleep(50)
   let _ = drain_messages(transport_subject, [])
 
@@ -1001,8 +1001,8 @@ pub fn connection_isolation_test() {
   process.sleep(20)
 
   // Join both
-  process.send(subject_a, runtime.ClientJoined(conn_id: "iso_a", token: ""))
-  process.send(subject_b, runtime.ClientJoined(conn_id: "iso_b", token: ""))
+  process.send(subject_a, runtime.ClientJoined(conn_id: "iso_a", token: "", path: "/"))
+  process.send(subject_b, runtime.ClientJoined(conn_id: "iso_b", token: "", path: "/"))
   process.sleep(50)
 
   // Drain initial messages from both
@@ -1033,7 +1033,7 @@ pub fn connection_isolation_test() {
   let assert True = list.is_empty(b_msgs)
 
   // Now trigger a fresh model_sync on B by re-joining — should show count:0
-  process.send(subject_b, runtime.ClientJoined(conn_id: "iso_b", token: ""))
+  process.send(subject_b, runtime.ClientJoined(conn_id: "iso_b", token: "", path: "/"))
   process.sleep(50)
 
   let b_join_msgs = drain_messages(transport_b, [])

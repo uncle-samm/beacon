@@ -47,8 +47,9 @@ pub type RuntimeMessage(msg) {
   /// A client disconnected — remove their transport subject.
   ClientDisconnected(conn_id: transport.ConnectionId)
   /// A client sent a join request — send them the initial mount.
-  /// Includes session token for potential state recovery.
-  ClientJoined(conn_id: transport.ConnectionId, token: String)
+  /// Includes session token for potential state recovery and the
+  /// URL path the client connected from (for initial route dispatch).
+  ClientJoined(conn_id: transport.ConnectionId, token: String, path: String)
   /// A client event was received — decode to user message and run update.
   ClientEventReceived(
     conn_id: transport.ConnectionId,
@@ -272,8 +273,8 @@ fn handle_message(
       actor.continue(RuntimeState(..state, connections: new_connections))
     }
 
-    ClientJoined(conn_id, token) -> {
-      log.info("beacon.runtime", "Client joined: " <> conn_id)
+    ClientJoined(conn_id, token, path) -> {
+      log.info("beacon.runtime", "Client joined: " <> conn_id <> " path: " <> path)
       // Attempt state recovery from token
       let model_to_use = case token, state.deserialize_model {
         "", _ -> {
@@ -310,6 +311,21 @@ fn handle_message(
             }
           }
         }
+      }
+      // Apply initial route change so the mount reflects the URL the client is on.
+      // Without this, all clients would see the default init() model (e.g. Home)
+      // regardless of which URL they connected from.
+      let model_to_use = case state.on_route_change, path {
+        option.Some(make_msg), p if p != "" -> {
+          let matched_route = case route.match_path(state.route_patterns, p) {
+            option.Some(r) -> r
+            option.None -> route.from_path(p)
+          }
+          let msg = make_msg(matched_route)
+          let #(new_model, _effects) = state.update(model_to_use, msg)
+          new_model
+        }
+        _, _ -> model_to_use
       }
       // Render view to plain HTML for initial mount (SSR hydration)
       handler.start_render()
@@ -1296,10 +1312,10 @@ pub fn connect_transport_with_ssr(
             ),
           )
         }
-        transport.ClientJoin(token, _path) -> {
+        transport.ClientJoin(token, path) -> {
           process.send(
             runtime,
-            ClientJoined(conn_id: conn_id, token: token),
+            ClientJoined(conn_id: conn_id, token: token, path: path),
           )
         }
         transport.ClientNavigate(path) -> {
@@ -1412,10 +1428,10 @@ fn forward_client_message(
           ops: ops,
         ),
       )
-    transport.ClientJoin(token, _path) ->
+    transport.ClientJoin(token, path) ->
       process.send(
         runtime_subject,
-        ClientJoined(conn_id: conn_id, token: token),
+        ClientJoined(conn_id: conn_id, token: token, path: path),
       )
     transport.ClientNavigate(path) ->
       process.send(
