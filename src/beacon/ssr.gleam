@@ -120,7 +120,7 @@ pub fn render_page_for_path(
   RenderedPage(html: html, session_token: token)
 }
 
-/// Convert a RenderedPage to a Mist HTTP response.
+/// Convert a RenderedPage to an HTTP response.
 pub fn to_response(page: RenderedPage) -> Response(ResponseBody) {
   response.new(200)
   |> response.set_header("content-type", "text/html; charset=utf-8")

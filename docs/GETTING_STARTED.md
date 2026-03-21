@@ -146,4 +146,38 @@ Compile user code to JavaScript for client-side execution:
 gleam run -m beacon/build
 ```
 
-This creates `priv/static/beacon_client.js` — local events run in the browser with zero server traffic.
+This creates a content-hashed file like `priv/static/beacon_client_HASH.js` — local events run in the browser with zero server traffic.
+
+## Development Mode
+
+For a fast feedback loop during development:
+
+```bash
+gleam run -m beacon/dev
+```
+
+This starts your app with file watching and hot module reload:
+
+- Watches `.gleam` files for changes, auto-rebuilds server + client
+- Hot-swaps BEAM modules without restarting — no lost WebSocket connections
+- Notifies connected browsers to reload automatically
+- Uses native file watchers (`fswatch` on macOS, `inotifywait` on Linux) with polling fallback
+
+For production, use `gleam run` directly — no file watcher, no HMR overhead.
+
+## Server Privacy
+
+The build system automatically strips server-only code from the client JS bundle. Three mechanisms keep secrets server-side:
+
+1. **`@server` attribute** on constants — excluded from the client bundle
+2. **`server_` prefix** on constants — excluded from the client bundle
+3. **`pub type Server`** — private server-side state that never reaches the client
+
+Code referencing server-only modules (`store`, `effect`, `pubsub`, `process`) is automatically detected and excluded.
+
+```gleam
+const server_api_key = "sk_live_secret_key"   // stripped from client JS
+const app_title = "My App"                     // included — used by view
+```
+
+The `Server` type is available in `update` but not `view`, so the compiler itself prevents accidental leaks.

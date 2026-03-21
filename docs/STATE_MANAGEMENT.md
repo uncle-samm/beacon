@@ -67,6 +67,22 @@ beacon.app(init, update, view)
 
 When `model.current_room` changes, the old topic is unsubscribed and the new one subscribed automatically.
 
+## Computed Fields
+
+Public functions with the signature `fn(Model) -> T` are automatically detected as computed fields. Their values are calculated server-side on each update and included in `model_sync` messages sent to the client.
+
+- Computed values are derived, never stored — recalculated after every model change
+- Supported return types: `Int`, `String`, `Float`, `Bool`
+- No attribute needed — detection is by function signature
+
+```gleam
+pub fn total(model: Model) -> Int {
+  model.price * model.qty
+}
+```
+
+The client receives `total` alongside the model fields, but it is never part of the `Model` type itself.
+
 ## Cross-Route State Sharing
 
 Create a store at module level and reference it from multiple routes. Use `beacon.subscriptions` in each route to react to changes:

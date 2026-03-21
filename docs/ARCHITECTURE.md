@@ -8,7 +8,7 @@ no macros — pure function calls for views, build-time AST analysis via Glance.
 
 ### 1. Transport (`src/beacon/transport.gleam`)
 
-WebSocket via Mist, one BEAM actor per connection.
+WebSocket via Beacon's gen_tcp server, one BEAM actor per connection.
 
 **Wire protocol:**
 - 5 `ClientMessage` variants: `ClientEvent`, `ClientHeartbeat`, `ClientJoin`, `ClientNavigate`, `ClientEventBatch`
@@ -247,7 +247,6 @@ which client events have been processed, enabling optimistic update reconciliati
 | gleam_http | >= 4.3.0 | HTTP types (Request, Response) |
 | gleam_json | >= 3.1.0 | JSON encoding/decoding |
 | gleam_crypto | >= 1.5.1 | HMAC-SHA256 session signing |
-| mist | >= 5.0.4 | HTTP server, WebSocket, SSE |
 | glance | >= 6.0.0 | Gleam AST parser (codegen + linting) |
 | logging | >= 1.3.0 | Structured logging |
 | simplifile | >= 2.4.0 | File system access |
@@ -305,7 +304,7 @@ src/
     dev.gleam                   # Dev mode (auto-reload)
     error_page.gleam            # Error page rendering
     stress.gleam                # Load testing
-  beacon_*_ffi.erl (27 files)  # Erlang FFI modules
+  beacon_*_ffi.erl (28 files)  # Erlang FFI modules
 beacon_client/
   src/
     beacon_client.gleam         # Client Gleam types
@@ -315,7 +314,7 @@ examples/                       # 18 example apps (counter, chat, kanban, snake,
 test/                           # Tests mirroring src structure
 ```
 
-43 Gleam modules + 27 Erlang FFI files + 4 client JS/Gleam files.
+43 Gleam modules + 28 Erlang FFI files + 4 client JS/Gleam files.
 
 ## Design Patterns Implemented
 

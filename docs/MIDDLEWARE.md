@@ -48,7 +48,7 @@ fn require_api_key() -> middleware.Middleware {
       Ok("valid-key") -> next(req)
       _ ->
         response.new(401)
-        |> response.set_body(mist.Bytes(bytes_tree.from_string("Unauthorized")))
+        |> response.set_body(Bytes(bytes_tree.from_string("Unauthorized")))
     }
   }
 }
