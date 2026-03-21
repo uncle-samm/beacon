@@ -7,7 +7,7 @@ import beacon/element.{type Node}
 import gleam/bytes_tree
 import gleam/http/response.{type Response}
 import gleam/int
-import mist
+import beacon/transport/server.{type ResponseBody, Bytes}
 
 /// Render a 404 Not Found error page.
 pub fn not_found() -> Node(msg) {
@@ -78,7 +78,7 @@ pub fn dev_error(
 pub fn to_response(
   status: Int,
   page: Node(msg),
-) -> Response(mist.ResponseData) {
+) -> Response(ResponseBody) {
   let html =
     "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
     <> "<title>Error " <> int.to_string(status) <> "</title>"
@@ -94,5 +94,5 @@ pub fn to_response(
     <> "</body></html>"
   response.new(status)
   |> response.set_header("content-type", "text/html; charset=utf-8")
-  |> response.set_body(mist.Bytes(bytes_tree.from_string(html)))
+  |> response.set_body(Bytes(bytes_tree.from_string(html)))
 }

@@ -7,11 +7,30 @@
 
 ## Current Status
 
-**Active Milestone:** 83 — Server Privacy, Computed Fields, Constant Safety (COMPLETE)
-**Last Completed:** 83 — Server Privacy, Computed Fields, Constant Safety
+**Active Milestone:** 84 — Replace Mist with Beacon Transport (COMPLETE)
+**Last Completed:** 84 — Replace Mist with Beacon Transport
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (557 tests passed, 0 failures)
+**Test Status:** GREEN (593 tests passed, 0 failures — 30/30 runs green)
 **Linter:** PASSING (zero violations)
+
+### Milestone 84: Replace Mist with Beacon Transport ✅
+> Replace Mist + Glisten (5,822 lines) with beacon/transport/server — our own minimal HTTP/WebSocket server using gen_tcp directly. Thundering herd regression test is the acceptance gate.
+
+- [x] Phase 1: FFI layer (`beacon_transport_ffi.erl`) — gen_tcp ops, HTTP/1.1 parsing via `{packet, http_bin}`, WebSocket frame encode/decode, acceptor pool
+- [x] Phase 2: Server module (`beacon/transport/server.gleam`) — types (Connection, ResponseBody, Socket, TcpMsg), acceptor pool, server start
+- [x] Phase 3: HTTP module (`beacon/transport/http.gleam`) — request parsing, response writing
+- [x] Phase 4: WebSocket module (`beacon/transport/ws.gleam`) — RFC 6455 upgrade handshake, frame decoding
+- [x] Phase 5: Transport rewrite (`beacon/transport.gleam`) — replace all mist.* calls with own server, WebSocket frame loop via `process.select_other` for TCP messages
+- [x] Phase 6: Update consumer modules — middleware, ssr, static, auth, error_page (type substitution: `mist.Connection` → `Connection`, `mist.ResponseData` → `ResponseBody`, `mist.Bytes` → `Bytes`)
+- [x] Phase 7: Remove mist from gleam.toml — also removed glisten, gramps, hpack_erl, telemetry, exception, gleam_yielder (7 deps total)
+- [x] Phase 8: Enable thundering herd regression test — renamed to `thundering_herd_no_500_test`, passes 30/30 runs
+- [x] Phase 9: Fix ETS connection tracker TOCTOU race — `ets:new` race between concurrent handler processes; fixed with try/catch in init()
+- [x] `gleam build` — zero warnings, mist no longer in deps
+- [x] `gleam test` — 593 tests pass (36 more than before: thundering herd test enabled)
+
+**Architecture:** Acceptor-becomes-handler pattern (same as Ranch/Glisten). Each acceptor blocks on `gen_tcp:accept`, spawns a replacement, then becomes the connection handler. Eliminates `controlling_process` entirely — no socket ownership transfer races. Probe connection at startup verifies accept queue is active.
+
+**Stats:** 677 lines of new code replacing 5,822 lines of dependency code (mist 4,196 + glisten 1,626).
 
 ### Milestone 83: Server Privacy, Computed Fields, Constant Safety ✅
 > Add proper data boundaries: Server type for private state, @computed for derived fields, constant leak prevention, and remove dead server_fn code.

@@ -430,20 +430,15 @@ pub fn sim_corrupt_data_resilience_test() {
   metrics.destroy(mt2)
 }
 
-// ===== Mist Thundering Herd Regression Test =====
-// This test proves that Mist returns HTTP 500 when multiple WebSocket
-// connections arrive simultaneously after connection churn.
-// It uses NO client retry — raw single-attempt connects.
+// ===== Thundering Herd Test =====
+// Verifies that Beacon's transport handles simultaneous WebSocket
+// connections arriving after connection churn — no HTTP 500 errors.
+// Uses NO client retry — raw single-attempt connects.
 //
-// EXPECTED TO FAIL until Mist is replaced with our own transport.
-// When this test starts passing, Mist (or our replacement) handles
-// thundering herd correctly and the TODO can be removed.
-//
-// To run: rename to add _test suffix (currently excluded from test runner).
-// The test spawns 20 corrupt connections, waits, then tries 5 raw
-// simultaneous connections with NO retry. At least 1 will get HTTP 500.
+// Previously FAILED with Mist. Now PASSES with Beacon's own transport
+// (beacon/transport/server using gen_tcp directly).
 
-pub fn mist_thundering_herd_regression() {
+pub fn thundering_herd_no_500_test() {
   let port = test_app.unique_port()
   let assert Ok(_app) = test_app.start_counter_app(port)
   process.sleep(200)

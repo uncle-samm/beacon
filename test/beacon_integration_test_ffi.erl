@@ -3,7 +3,7 @@
 
 %% Create a Gleam HTTP response with the given status code.
 %% Matches gleam_http's Response type: {response, Status, Headers, Body}
-%% Body is mist.Bytes(bytes_tree)
+%% Body is server.Bytes(bytes_tree)
 response_401(Status) ->
     Body = {bytes, gleam@bytes_tree:from_string(<<"Unauthorized">>)},
     {response, Status, [], Body}.

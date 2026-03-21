@@ -15,7 +15,7 @@ import gleam/http
 import gleam/http/request
 import gleam/http/response
 import gleam/int
-import mist
+import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
 
 pub type Model {
   Model(count: Int, page: String)
@@ -78,14 +78,14 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
 /// In production you'd check a real session/token.
 fn require_admin() -> middleware.Middleware {
   fn(
-    req: request.Request(mist.Connection),
-    next: fn(request.Request(mist.Connection)) -> response.Response(mist.ResponseData),
-  ) -> response.Response(mist.ResponseData) {
+    req: request.Request(Connection),
+    next: fn(request.Request(Connection)) -> response.Response(ResponseBody),
+  ) -> response.Response(ResponseBody) {
     case request.get_header(req, "x-admin") {
       Ok("true") -> next(req)
       _ ->
         response.new(403)
-        |> response.set_body(mist.Bytes(bytes_tree.from_string("Forbidden: admin access required")))
+        |> response.set_body(Bytes(bytes_tree.from_string("Forbidden: admin access required")))
     }
   }
 }
@@ -93,9 +93,9 @@ fn require_admin() -> middleware.Middleware {
 /// API versioning middleware — adds version header.
 fn api_version() -> middleware.Middleware {
   fn(
-    req: request.Request(mist.Connection),
-    next: fn(request.Request(mist.Connection)) -> response.Response(mist.ResponseData),
-  ) -> response.Response(mist.ResponseData) {
+    req: request.Request(Connection),
+    next: fn(request.Request(Connection)) -> response.Response(ResponseBody),
+  ) -> response.Response(ResponseBody) {
     let resp = next(req)
     response.set_header(resp, "x-api-version", "v1")
   }
@@ -104,23 +104,23 @@ fn api_version() -> middleware.Middleware {
 /// Health check handler — returns 200 OK with status.
 fn health_handler() -> middleware.Middleware {
   fn(
-    _req: request.Request(mist.Connection),
-    _next: fn(request.Request(mist.Connection)) -> response.Response(mist.ResponseData),
-  ) -> response.Response(mist.ResponseData) {
+    _req: request.Request(Connection),
+    _next: fn(request.Request(Connection)) -> response.Response(ResponseBody),
+  ) -> response.Response(ResponseBody) {
     response.new(200)
     |> response.set_header("content-type", "application/json")
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("{\"status\":\"ok\"}")))
+    |> response.set_body(Bytes(bytes_tree.from_string("{\"status\":\"ok\"}")))
   }
 }
 
 /// Simple POST blocker for demo.
 fn block_writes() -> middleware.Middleware {
   fn(
-    _req: request.Request(mist.Connection),
-    _next: fn(request.Request(mist.Connection)) -> response.Response(mist.ResponseData),
-  ) -> response.Response(mist.ResponseData) {
+    _req: request.Request(Connection),
+    _next: fn(request.Request(Connection)) -> response.Response(ResponseBody),
+  ) -> response.Response(ResponseBody) {
     response.new(405)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("Method not allowed")))
+    |> response.set_body(Bytes(bytes_tree.from_string("Method not allowed")))
   }
 }
 

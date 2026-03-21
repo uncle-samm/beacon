@@ -17,7 +17,7 @@ import gleam/crypto
 import gleam/http/response.{type Response}
 import gleam/json
 import gleam/string
-import mist
+import beacon/transport/server.{type ResponseBody, Bytes}
 import simplifile
 
 /// Configuration for server-side rendering.
@@ -121,10 +121,10 @@ pub fn render_page_for_path(
 }
 
 /// Convert a RenderedPage to a Mist HTTP response.
-pub fn to_response(page: RenderedPage) -> Response(mist.ResponseData) {
+pub fn to_response(page: RenderedPage) -> Response(ResponseBody) {
   response.new(200)
   |> response.set_header("content-type", "text/html; charset=utf-8")
-  |> response.set_body(mist.Bytes(bytes_tree.from_string(page.html)))
+  |> response.set_body(Bytes(bytes_tree.from_string(page.html)))
 }
 
 /// Create a signed session token.

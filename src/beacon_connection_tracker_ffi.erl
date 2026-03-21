@@ -6,8 +6,15 @@
 init() ->
     case ets:info(beacon_conn_tracker) of
         undefined ->
-            ets:new(beacon_conn_tracker, [set, public, named_table]),
-            ets:insert(beacon_conn_tracker, {count, 0}),
+            try
+                ets:new(beacon_conn_tracker, [set, public, named_table]),
+                ets:insert(beacon_conn_tracker, {count, 0})
+            catch
+                error:badarg ->
+                    %% Another process created the table between our check and create.
+                    %% This is fine — the table exists now.
+                    ok
+            end,
             nil;
         _ ->
             nil

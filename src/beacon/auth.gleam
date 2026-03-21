@@ -9,7 +9,7 @@ import gleam/http
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
 import gleam/option.{None, Some}
-import mist
+import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
 
 /// Log in a user — creates a session and stores the user ID.
 pub fn login(
@@ -42,9 +42,9 @@ pub fn require_auth(
   store: session.SessionStore,
 ) -> middleware.Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     let cookie_header = request.get_header(req, "cookie")
     let session_id = case cookie_header {
       Ok(cookies) -> extract_session_cookie(cookies)
@@ -73,9 +73,9 @@ pub fn csrf_protection(
   store: session.SessionStore,
 ) -> middleware.Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     case req.method {
       http.Get | http.Head | http.Options -> next(req)
       _ -> {
@@ -125,16 +125,16 @@ fn extract_cookie_value(
 @external(erlang, "beacon_auth_ffi", "find_cookie")
 fn find_cookie(header: String, target: String) -> Result(String, Nil)
 
-fn unauthorized_response() -> Response(mist.ResponseData) {
+fn unauthorized_response() -> Response(ResponseBody) {
   response.new(401)
   |> response.set_body(
-    mist.Bytes(bytes_tree.from_string("Unauthorized")),
+    Bytes(bytes_tree.from_string("Unauthorized")),
   )
 }
 
-fn forbidden_response(reason: String) -> Response(mist.ResponseData) {
+fn forbidden_response(reason: String) -> Response(ResponseBody) {
   response.new(403)
   |> response.set_body(
-    mist.Bytes(bytes_tree.from_string("Forbidden: " <> reason)),
+    Bytes(bytes_tree.from_string("Forbidden: " <> reason)),
   )
 }

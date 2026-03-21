@@ -1,15 +1,25 @@
 /// Beacon's WebSocket transport layer.
-/// Manages WebSocket connections using Mist, with one BEAM process per connection.
+/// Manages WebSocket connections with one BEAM process per connection.
 /// Follows LiveView's connection lifecycle: connect → init → handle messages → close.
 ///
-/// Reference: Mist v5.0.4 WebSocket API, LiveView channel protocol.
+/// Uses Beacon's own minimal HTTP/WebSocket server (beacon/transport/server)
+/// instead of Mist. Direct gen_tcp for zero unnecessary abstraction layers.
+///
+/// Reference: LiveView channel protocol, RFC 6455.
 
 import beacon/error
 import beacon/log
 import beacon/middleware
 import beacon/pubsub
 import beacon/static
+import beacon/transport/http as transport_http
+import beacon/transport/server.{
+  type Connection, type ResponseBody, type Socket, Bytes,
+}
+import beacon/transport/ws
+import gleam/bit_array
 import gleam/bytes_tree
+import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/http/request.{type Request}
@@ -18,7 +28,6 @@ import gleam/int
 import gleam/json
 import gleam/option.{type Option, None, Some}
 import gleam/string
-import mist
 import simplifile
 
 /// Unique identifier for a WebSocket connection.
@@ -82,9 +91,8 @@ pub type ServerMessage {
   ServerReload
 }
 
-/// Internal messages that the connection actor can receive.
-/// These come either from the WebSocket (client) or from
-/// other BEAM processes (e.g. the runtime pushing patches).
+/// Internal messages that the connection process can receive.
+/// These come from the runtime (pushing patches) or from TCP events.
 pub type InternalMessage {
   /// A mount payload needs to be sent to the client.
   SendMount(payload: String)
@@ -96,6 +104,13 @@ pub type InternalMessage {
   SendPatch(ops_json: String, version: Int, ack_clock: Int)
   /// Send navigation redirect to the client.
   SendNavigate(path: String)
+  // --- TCP/WebSocket events (internal to transport layer) ---
+  /// Raw TCP data received — needs WebSocket frame decoding.
+  ReceivedTcpData(data: BitArray)
+  /// TCP connection closed by peer.
+  TcpConnectionClosed
+  /// TCP error occurred.
+  TcpConnectionError(reason: String)
 }
 
 /// Configurable security limits for the transport layer.
@@ -120,13 +135,13 @@ pub fn default_security_limits() -> SecurityLimits {
   )
 }
 
-/// State held by each WebSocket connection actor.
+/// State held by each WebSocket connection process.
 pub type ConnectionState {
   ConnectionState(
     /// Unique ID for this connection, used in logging.
     id: ConnectionId,
-    /// The WebSocket connection handle for sending frames.
-    connection: mist.WebsocketConnection,
+    /// The gen_tcp socket for this connection.
+    socket: Socket,
     /// Callback invoked when a client event is received (per-connection).
     on_event: fn(ConnectionId, ClientMessage) -> Nil,
     /// Callback invoked when this connection closes (per-connection).
@@ -141,6 +156,8 @@ pub type ConnectionState {
     heartbeat_count: Int,
     /// Heartbeat rate limiting: start of current window (monotonic native time units).
     heartbeat_window_start: Int,
+    /// WebSocket frame buffer for partial frame reassembly.
+    buffer: BitArray,
   )
 }
 
@@ -176,7 +193,7 @@ pub type TransportConfig {
     ),
     /// Optional: WebSocket authentication function.
     /// If set, runs before upgrade — returns Ok to allow, Error to reject with 401.
-    ws_auth: Option(fn(Request(mist.Connection)) -> Result(Nil, String)),
+    ws_auth: Option(fn(Request(Connection)) -> Result(Nil, String)),
     /// Optional: SSR factory for route-aware server-side rendering.
     /// Given a path, returns the HTML string for that route.
     /// When set, HTTP requests use this instead of page_html.
@@ -300,7 +317,11 @@ fn client_message_decoder() -> decode.Decoder(ClientMessage) {
         use name <- decode.field("name", decode.string)
         use handler_id <- decode.optional_field("handler_id", "", decode.string)
         use data <- decode.field("data", decode.string)
-        use target_path <- decode.optional_field("target_path", "", decode.string)
+        use target_path <- decode.optional_field(
+          "target_path",
+          "",
+          decode.string,
+        )
         use clock <- decode.optional_field("clock", 0, decode.int)
         use ops <- decode.optional_field("ops", "", decode.string)
         decode.success(ClientEvent(
@@ -340,9 +361,6 @@ pub fn decode_client_message(
 
 /// Return the type name of a client message for safe logging.
 /// Does not include payload data which may be sensitive.
-/// NOTE: Debug-level logging elsewhere in the transport may include message
-/// metadata (connection IDs, event names, paths). Ensure debug logging is
-/// disabled in production to avoid leaking potentially sensitive data.
 fn client_message_type(msg: ClientMessage) -> String {
   case msg {
     ClientEvent(name: name, ..) -> "event:" <> name
@@ -355,22 +373,18 @@ fn client_message_type(msg: ClientMessage) -> String {
 
 /// Send a ServerMessage over a WebSocket connection.
 /// Logs errors but does not crash — the connection may have closed.
-fn send_message(
-  conn: mist.WebsocketConnection,
-  conn_id: ConnectionId,
-  msg: ServerMessage,
-) -> Nil {
+fn send_ws_message(state: ConnectionState, msg: ServerMessage) -> Nil {
   let encoded = encode_server_message(msg)
-  case mist.send_text_frame(conn, encoded) {
+  case server.send_text_frame(state.socket, encoded) {
     Ok(Nil) -> {
-      log.debug("beacon.transport", "Sent message to " <> conn_id)
+      log.debug("beacon.transport", "Sent message to " <> state.id)
       Nil
     }
     Error(_reason) -> {
       log.error(
         "beacon.transport",
         "Failed to send message to "
-          <> conn_id
+          <> state.id
           <> ": send_text_frame failed",
       )
       Nil
@@ -410,35 +424,6 @@ fn check_rate_limit(state: ConnectionState) -> #(ConnectionState, Bool) {
   }
 }
 
-/// Handle an incoming WebSocket text frame.
-/// Rejects oversized messages, then decodes and dispatches to the appropriate handler.
-fn handle_text_message(
-  state: ConnectionState,
-  text: String,
-) -> mist.Next(ConnectionState, InternalMessage) {
-  // Reject oversized messages to prevent resource exhaustion
-  let size = string.byte_size(text)
-  case size > state.security_limits.max_message_bytes {
-    True -> {
-      log.warning(
-        "beacon.transport",
-        "Oversized message from "
-          <> state.id
-          <> " ("
-          <> int.to_string(size)
-          <> " bytes) — rejected",
-      )
-      send_message(
-        state.connection,
-        state.id,
-        ServerError(reason: "Message too large"),
-      )
-      mist.continue(state)
-    }
-    False -> handle_text_message_decode(state, text)
-  }
-}
-
 /// Check heartbeat rate limit: max 2 per second.
 /// Returns the updated state and whether the heartbeat was rate limited.
 fn check_heartbeat_rate(state: ConnectionState) -> #(ConnectionState, Bool) {
@@ -462,25 +447,50 @@ fn check_heartbeat_rate(state: ConnectionState) -> #(ConnectionState, Bool) {
   }
 }
 
+/// Handle an incoming WebSocket text frame.
+/// Rejects oversized messages, then decodes and dispatches.
+/// Returns the updated connection state.
+fn handle_ws_text(state: ConnectionState, text: String) -> ConnectionState {
+  let size = string.byte_size(text)
+  case size > state.security_limits.max_message_bytes {
+    True -> {
+      log.warning(
+        "beacon.transport",
+        "Oversized message from "
+          <> state.id
+          <> " ("
+          <> int.to_string(size)
+          <> " bytes) — rejected",
+      )
+      send_ws_message(state, ServerError(reason: "Message too large"))
+      state
+    }
+    False -> handle_ws_text_decode(state, text)
+  }
+}
+
 /// Decode and dispatch a validated text message.
 /// Applies per-connection rate limiting to non-heartbeat messages.
-fn handle_text_message_decode(
+fn handle_ws_text_decode(
   state: ConnectionState,
   text: String,
-) -> mist.Next(ConnectionState, InternalMessage) {
+) -> ConnectionState {
   case decode_client_message(text) {
     Ok(ClientHeartbeat) -> {
       // Rate-limit heartbeats: max 2 per second to prevent flooding
       let #(new_state, hb_limited) = check_heartbeat_rate(state)
       case hb_limited {
         True -> {
-          log.debug("beacon.transport", "Heartbeat rate limited for " <> state.id)
-          mist.continue(new_state)
+          log.debug(
+            "beacon.transport",
+            "Heartbeat rate limited for " <> state.id,
+          )
+          new_state
         }
         False -> {
           log.debug("beacon.transport", "Heartbeat from " <> state.id)
-          send_message(new_state.connection, new_state.id, ServerHeartbeatAck)
-          mist.continue(new_state)
+          send_ws_message(new_state, ServerHeartbeatAck)
+          new_state
         }
       }
     }
@@ -497,12 +507,8 @@ fn handle_text_message_decode(
               <> int.to_string(new_state.event_count)
               <> " events/sec)",
           )
-          send_message(
-            new_state.connection,
-            new_state.id,
-            ServerError(reason: "Rate limited"),
-          )
-          mist.continue(new_state)
+          send_ws_message(new_state, ServerError(reason: "Rate limited"))
+          new_state
         }
         False -> {
           log.debug(
@@ -513,7 +519,7 @@ fn handle_text_message_decode(
               <> client_message_type(msg),
           )
           new_state.on_event(new_state.id, msg)
-          mist.continue(new_state)
+          new_state
         }
       }
     }
@@ -523,93 +529,227 @@ fn handle_text_message_decode(
         "beacon.transport",
         "Decode error from " <> state.id <> ": " <> err_str,
       )
-      send_message(
-        state.connection,
-        state.id,
+      send_ws_message(
+        state,
         ServerError(reason: "Invalid message: " <> err_str),
       )
-      mist.continue(state)
+      state
     }
   }
 }
 
-/// Create the HTTP handler that upgrades WebSocket connections
-/// and serves a basic HTML page for non-WebSocket requests.
-/// Applies middleware pipeline to all HTTP requests.
-/// Checks static file serving before app routes.
-pub fn create_handler(
-  config: TransportConfig,
-) -> fn(Request(mist.Connection)) -> response.Response(mist.ResponseData) {
-  // The core handler (before middleware)
-  let core_handler = fn(req: Request(mist.Connection)) {
-    case request.path_segments(req) {
-      ["ws"] -> handle_websocket(req, config)
-      ["beacon_client.js"] -> serve_client_js()
-      ["health"] -> {
-        response.new(200)
-        |> response.set_header("content-type", "application/json")
-        |> response.set_body(
-          mist.Bytes(bytes_tree.from_string("{\"status\":\"ok\"}")),
-        )
+// --- Frame Processing ---
+
+/// Result of processing buffered WebSocket frames.
+type FrameResult {
+  /// Continue — state updated, remaining buffer returned.
+  FrameContinue(ConnectionState, BitArray)
+  /// Close frame received — connection should be closed.
+  FrameClose(ConnectionState)
+}
+
+/// Process all complete frames in the buffer.
+/// Loops until no more complete frames can be decoded.
+fn process_frames(state: ConnectionState, buffer: BitArray) -> FrameResult {
+  case ws.decode_frame(buffer) {
+    Ok(#(ws.TextFrame(text), rest)) -> {
+      let new_state = handle_ws_text(state, text)
+      process_frames(new_state, rest)
+    }
+    Ok(#(ws.BinaryFrame(_), rest)) -> {
+      log.warning(
+        "beacon.transport",
+        "Unexpected binary frame from " <> state.id,
+      )
+      process_frames(state, rest)
+    }
+    Ok(#(ws.CloseFrame, _rest)) -> {
+      log.info("beacon.transport", "Close frame from " <> state.id)
+      FrameClose(state)
+    }
+    Ok(#(ws.PingFrame(_data), rest)) -> {
+      // Pong is same as ping payload — but for simplicity, skip pong response
+      // WebSocket keepalive is handled by our heartbeat protocol instead
+      process_frames(state, rest)
+    }
+    Ok(#(ws.PongFrame(_), rest)) -> {
+      // Ignore pong frames
+      process_frames(state, rest)
+    }
+    Error(_) -> {
+      // Incomplete frame — keep buffer for next read
+      FrameContinue(state, buffer)
+    }
+  }
+}
+
+// --- WebSocket Connection Lifecycle ---
+
+/// Cleanup a WebSocket connection: decrement tracker, unsub PubSub, call on_close.
+fn cleanup_connection(state: ConnectionState) -> Nil {
+  log.info("beacon.transport", "Connection closed (cleanup): " <> state.id)
+  let conn_count = connection_tracker_decrement()
+  log.debug(
+    "beacon.transport",
+    "Global connections after close: " <> int.to_string(conn_count),
+  )
+  pubsub.unsubscribe("beacon:patches:" <> state.id)
+  state.on_close(state.id)
+}
+
+/// WebSocket receive loop — runs in the handler process.
+/// Receives TCP data and internal messages via a selector.
+/// This function never returns normally — it exits when the connection closes.
+fn ws_loop(state: ConnectionState, subject: process.Subject(InternalMessage)) -> Nil {
+  let selector =
+    process.new_selector()
+    |> process.select(subject)
+    |> process.select_other(fn(raw: Dynamic) -> InternalMessage {
+      case server.classify_tcp_message(raw) {
+        Ok(server.TcpData(data)) -> ReceivedTcpData(data)
+        Ok(server.TcpClosed) -> TcpConnectionClosed
+        Ok(server.TcpError(reason)) -> TcpConnectionError(reason)
+        Error(Nil) -> TcpConnectionError("Unknown message received")
       }
-      _ -> {
-        // Check for hashed client JS file (beacon_client_HASH.js)
-        let path = req.path
-        case
-          string.starts_with(path, "/beacon_client_")
-          && string.ends_with(path, ".js")
-        {
-          True -> {
-            let name = string.drop_start(path, 1)
-            serve_hashed_client_js(name)
-          }
-          False -> {
-            // Try static files first
-            case config.static_config {
-              Some(static_cfg) -> {
-                let if_none_match =
-                  case request.get_header(req, "if-none-match") {
-                    Ok(val) -> val
-                    Error(Nil) -> ""
-                  }
-                case
-                  static.serve_with_etag_check(
-                    static_cfg,
-                    req.path,
-                    if_none_match,
-                  )
-                {
-                  Ok(resp) -> resp
-                  Error(Nil) ->
-                    serve_page_or_ssr(config.page_html, config.ssr_factory, req.path)
-                }
-              }
-              None ->
-                serve_page_or_ssr(config.page_html, config.ssr_factory, req.path)
-            }
-          }
+    })
+  ws_loop_inner(state, selector)
+}
+
+/// Inner loop with cached selector.
+fn ws_loop_inner(
+  state: ConnectionState,
+  selector: process.Selector(InternalMessage),
+) -> Nil {
+  let msg = process.selector_receive_forever(selector)
+  case msg {
+    ReceivedTcpData(data) -> {
+      let buffer = bit_array.append(state.buffer, data)
+      case process_frames(state, buffer) {
+        FrameContinue(new_state, new_buffer) -> {
+          server.set_active_once(new_state.socket)
+          ws_loop_inner(
+            ConnectionState(..new_state, buffer: new_buffer),
+            selector,
+          )
+        }
+        FrameClose(close_state) -> {
+          let _ = server.send_close_frame(close_state.socket)
+          server.close(close_state.socket)
+          cleanup_connection(close_state)
         }
       }
     }
-  }
-  // Wrap with middleware pipeline
-  case config.middlewares {
-    [] -> core_handler
-    mws -> middleware.pipeline(mws, core_handler)
+    TcpConnectionClosed -> {
+      cleanup_connection(state)
+    }
+    TcpConnectionError(reason) -> {
+      log.error(
+        "beacon.transport",
+        "TCP error for " <> state.id <> ": " <> reason,
+      )
+      server.close(state.socket)
+      cleanup_connection(state)
+    }
+    SendMount(payload) -> {
+      send_ws_message(state, ServerMount(payload: payload))
+      ws_loop_inner(state, selector)
+    }
+    SendError(reason) -> {
+      send_ws_message(state, ServerError(reason: reason))
+      ws_loop_inner(state, selector)
+    }
+    SendModelSync(model_json, version, ack_clock) -> {
+      send_ws_message(
+        state,
+        ServerModelSync(
+          model_json: model_json,
+          version: version,
+          ack_clock: ack_clock,
+        ),
+      )
+      ws_loop_inner(state, selector)
+    }
+    SendPatch(ops_json, version, ack_clock) -> {
+      send_ws_message(
+        state,
+        ServerPatch(
+          ops_json: ops_json,
+          version: version,
+          ack_clock: ack_clock,
+        ),
+      )
+      ws_loop_inner(state, selector)
+    }
+    SendNavigate(path) -> {
+      send_ws_message(state, ServerNavigate(path: path))
+      ws_loop_inner(state, selector)
+    }
   }
 }
 
+/// Start a WebSocket connection on an already-upgraded socket.
+/// Creates the connection state, sets up runtime, and enters the frame loop.
+/// This function runs in the handler process and never returns.
+fn start_ws_connection(
+  socket: Socket,
+  config: TransportConfig,
+) -> Nil {
+  let conn_id = generate_connection_id()
+  log.info("beacon.transport", "New connection: " <> conn_id)
+
+  let subject = process.new_subject()
+
+  // Use runtime_factory if available (per-connection runtimes)
+  // Otherwise fall back to shared callbacks
+  let #(conn_on_event, conn_on_close) = case config.runtime_factory {
+    Some(factory) -> {
+      let #(evt_handler, close_handler) = factory(conn_id, subject)
+      #(evt_handler, close_handler)
+    }
+    None -> {
+      config.on_connect(conn_id, subject)
+      #(config.on_event, config.on_disconnect)
+    }
+  }
+
+  // Track global connection count
+  let conn_count = connection_tracker_increment()
+  log.debug(
+    "beacon.transport",
+    "Global connections: " <> int.to_string(conn_count),
+  )
+
+  let state =
+    ConnectionState(
+      id: conn_id,
+      socket: socket,
+      on_event: conn_on_event,
+      on_close: conn_on_close,
+      event_count: 0,
+      rate_window_start: 0,
+      security_limits: config.security_limits,
+      heartbeat_count: 0,
+      heartbeat_window_start: 0,
+      buffer: <<>>,
+    )
+
+  pubsub.subscribe("beacon:patches:" <> conn_id)
+
+  // Start receiving TCP data
+  server.set_active_once(socket)
+
+  // Enter the receive loop — never returns
+  ws_loop(state, subject)
+}
+
+// --- WebSocket Upgrade Validation ---
+
 /// Check that the Origin header (if present) matches the server's host.
 /// This prevents cross-site WebSocket hijacking (CSWSH).
-/// If no Origin header is present, the request is allowed (non-browser clients, same-origin).
 ///
 /// SECURITY: Origin validation is the primary CSRF defense for WebSocket connections.
-/// Unlike HTTP requests, WebSocket upgrades cannot use CSRF tokens because the browser
-/// sends the upgrade request automatically. The same-origin policy combined with this
-/// origin check is the standard defense (same approach as Phoenix LiveView).
-fn check_origin(req: Request(mist.Connection)) -> Result(Nil, String) {
+fn check_origin(req: Request(Connection)) -> Result(Nil, String) {
   case request.get_header(req, "origin") {
-    // No origin header — allow (non-browser clients, same-origin)
     Error(Nil) -> Ok(Nil)
     Ok(origin) -> {
       let origin_host = extract_host_from_origin(origin)
@@ -617,8 +757,6 @@ fn check_origin(req: Request(mist.Connection)) -> Result(Nil, String) {
         Ok(h) -> h
         Error(Nil) -> ""
       }
-      // Compare: origin host must match request host.
-      // An empty origin host is NOT allowed — it would bypass the check.
       case origin_host == request_host {
         True -> Ok(Nil)
         False -> {
@@ -634,28 +772,25 @@ fn check_origin(req: Request(mist.Connection)) -> Result(Nil, String) {
 }
 
 /// Extract the host portion from an origin URL.
-/// e.g. "http://localhost:8080" -> "localhost:8080"
-/// e.g. "https://example.com" -> "example.com"
 fn extract_host_from_origin(origin: String) -> String {
-  // Strip protocol prefix (e.g. "http://", "https://")
   let without_protocol = case string.split(origin, "://") {
     [_, rest] -> rest
     _ -> origin
   }
-  // Take everything before the first /
   case string.split(without_protocol, "/") {
     [host, ..] -> host
     _ -> without_protocol
   }
 }
 
-/// Handle a WebSocket upgrade request.
-/// Checks global connection limit, then origin (CSWSH prevention), then auth, then upgrades.
-fn handle_websocket(
-  req: Request(mist.Connection),
+/// Handle a WebSocket upgrade request on a raw socket.
+/// Validates connection limit, origin, auth, then performs the upgrade handshake.
+fn handle_ws_request(
+  socket: Socket,
+  req: Request(Connection),
   config: TransportConfig,
-) -> response.Response(mist.ResponseData) {
-  // Check global connection limit first — prevents process exhaustion
+) -> Nil {
+  // Check global connection limit
   let current_count = connection_tracker_count()
   case current_count >= config.security_limits.max_connections {
     True -> {
@@ -667,22 +802,20 @@ fn handle_websocket(
           <> int.to_string(config.security_limits.max_connections)
           <> ") — rejecting new connection",
       )
-      response.new(503)
-      |> response.set_body(
-        mist.Bytes(bytes_tree.from_string("Too many connections")),
-      )
+      transport_http.write_error(socket, 503, "Too many connections")
     }
     False -> {
       // Check origin — prevents cross-site WebSocket hijacking
       case check_origin(req) {
         Error(reason) -> {
-          response.new(403)
-          |> response.set_body(
-            mist.Bytes(bytes_tree.from_string("Forbidden: " <> reason)),
+          transport_http.write_error(
+            socket,
+            403,
+            "Forbidden: " <> reason,
           )
         }
         Ok(Nil) -> {
-          // Then check WebSocket auth if configured
+          // Check WebSocket auth if configured
           let auth_ok = case config.ws_auth {
             Some(auth_fn) -> auth_fn(req)
             None -> Ok(Nil)
@@ -690,14 +823,28 @@ fn handle_websocket(
           case auth_ok {
             Error(reason) -> {
               log.warning("beacon.transport", "WS auth rejected: " <> reason)
-              response.new(401)
-              |> response.set_body(
-                mist.Bytes(
-                  bytes_tree.from_string("Unauthorized: " <> reason),
-                ),
+              transport_http.write_error(
+                socket,
+                401,
+                "Unauthorized: " <> reason,
               )
             }
-            Ok(Nil) -> handle_websocket_upgrade(req, config)
+            Ok(Nil) -> {
+              // Perform the WebSocket upgrade handshake
+              case ws.upgrade(socket, req) {
+                Ok(Nil) -> {
+                  // Upgrade succeeded — enter the WS frame loop
+                  start_ws_connection(socket, config)
+                }
+                Error(reason) -> {
+                  log.error(
+                    "beacon.transport",
+                    "WebSocket upgrade failed: " <> reason,
+                  )
+                  server.close(socket)
+                }
+              }
+            }
           }
         }
       }
@@ -705,144 +852,144 @@ fn handle_websocket(
   }
 }
 
-fn handle_websocket_upgrade(
-  req: Request(mist.Connection),
-  config: TransportConfig,
-) -> response.Response(mist.ResponseData) {
-  let on_event = config.on_event
-  let on_connect = config.on_connect
-  let on_disconnect = config.on_disconnect
+// --- HTTP Handler ---
 
-  mist.websocket(
-    request: req,
-    handler: fn(state: ConnectionState, msg, _conn) {
-      case msg {
-        mist.Text(text) -> handle_text_message(state, text)
-        mist.Binary(_data) -> {
-          log.warning(
-            "beacon.transport",
-            "Unexpected binary frame from " <> state.id,
-          )
-          mist.continue(state)
-        }
-        mist.Closed -> {
-          log.info("beacon.transport", "Connection closed: " <> state.id)
-          mist.stop()
-        }
-        mist.Shutdown -> {
-          log.info("beacon.transport", "Connection shutdown: " <> state.id)
-          mist.stop()
-        }
-        mist.Custom(internal_msg) -> {
-          case internal_msg {
-            SendMount(payload) -> {
-              send_message(
-                state.connection,
-                state.id,
-                ServerMount(payload: payload),
-              )
-              mist.continue(state)
-            }
-            SendError(reason) -> {
-              send_message(
-                state.connection,
-                state.id,
-                ServerError(reason: reason),
-              )
-              mist.continue(state)
-            }
-            SendModelSync(model_json, version, ack_clock) -> {
-              send_message(
-                state.connection,
-                state.id,
-                ServerModelSync(
-                  model_json: model_json,
-                  version: version,
-                  ack_clock: ack_clock,
-                ),
-              )
-              mist.continue(state)
-            }
-            SendPatch(ops_json, version, ack_clock) -> {
-              send_message(
-                state.connection,
-                state.id,
-                ServerPatch(
-                  ops_json: ops_json,
-                  version: version,
-                  ack_clock: ack_clock,
-                ),
-              )
-              mist.continue(state)
-            }
-            SendNavigate(path) -> {
-              send_message(
-                state.connection,
-                state.id,
-                ServerNavigate(path: path),
-              )
-              mist.continue(state)
+/// Create the HTTP handler for non-WebSocket requests.
+/// Handles: static files, client JS, health check, SSR pages.
+pub fn create_handler(
+  config: TransportConfig,
+) -> fn(Request(Connection)) -> response.Response(ResponseBody) {
+  let core_handler = fn(req: Request(Connection)) {
+    case request.path_segments(req) {
+      ["beacon_client.js"] -> serve_client_js()
+      ["health"] -> {
+        response.new(200)
+        |> response.set_header("content-type", "application/json")
+        |> response.set_body(
+          Bytes(bytes_tree.from_string("{\"status\":\"ok\"}")),
+        )
+      }
+      _ -> {
+        let path = req.path
+        case
+          string.starts_with(path, "/beacon_client_")
+          && string.ends_with(path, ".js")
+        {
+          True -> {
+            let name = string.drop_start(path, 1)
+            serve_hashed_client_js(name)
+          }
+          False -> {
+            case config.static_config {
+              Some(static_cfg) -> {
+                let if_none_match = case
+                  request.get_header(req, "if-none-match")
+                {
+                  Ok(val) -> val
+                  Error(Nil) -> ""
+                }
+                case
+                  static.serve_with_etag_check(
+                    static_cfg,
+                    req.path,
+                    if_none_match,
+                  )
+                {
+                  Ok(resp) -> resp
+                  Error(Nil) ->
+                    serve_page_or_ssr(
+                      config.page_html,
+                      config.ssr_factory,
+                      req.path,
+                    )
+                }
+              }
+              None ->
+                serve_page_or_ssr(
+                  config.page_html,
+                  config.ssr_factory,
+                  req.path,
+                )
             }
           }
         }
       }
-    },
-    on_init: fn(conn) {
-      let conn_id = generate_connection_id()
-      log.info("beacon.transport", "New connection: " <> conn_id)
-      let subject = process.new_subject()
-      let selector =
-        process.new_selector()
-        |> process.select(subject)
-      // Use runtime_factory if available (per-connection runtimes)
-      // Otherwise fall back to shared callbacks
-      let #(conn_on_event, conn_on_close) =
-        case config.runtime_factory {
-          Some(factory) -> {
-            // Factory creates a new runtime for this connection
-            // Returns per-connection event and disconnect handlers
-            let #(evt_handler, close_handler) = factory(conn_id, subject)
-            #(evt_handler, close_handler)
-          }
-          None -> {
-            // Shared runtime — use the global callbacks
-            on_connect(conn_id, subject)
-            #(on_event, on_disconnect)
+    }
+  }
+  case config.middlewares {
+    [] -> core_handler
+    mws -> middleware.pipeline(mws, core_handler)
+  }
+}
+
+// --- Per-Connection Handler ---
+
+/// Handle a single TCP connection: read HTTP request, route to WS or HTTP handler.
+/// Middleware runs on ALL requests, including /ws, before routing.
+fn per_connection_handler(socket: Socket, config: TransportConfig) -> Nil {
+  case transport_http.read_request(socket) {
+    Ok(req) -> {
+      case request.path_segments(req) {
+        ["ws"] -> {
+          // Run middleware on WS request first — middleware can reject (e.g. auth)
+          case check_middleware(req, config.middlewares) {
+            Ok(Nil) -> handle_ws_request(socket, req, config)
+            Error(resp) -> {
+              let _ = transport_http.write_response(socket, resp)
+              server.close(socket)
+            }
           }
         }
-      // Track global connection count
-      let conn_count = connection_tracker_increment()
-      log.debug(
+        _ -> {
+          let handler = create_handler(config)
+          let resp = handler(req)
+          case transport_http.write_response(socket, resp) {
+            Ok(Nil) -> Nil
+            Error(reason) ->
+              log.error(
+                "beacon.transport",
+                "Failed to write response: " <> reason,
+              )
+          }
+          server.close(socket)
+        }
+      }
+    }
+    Error(reason) -> {
+      log.error(
         "beacon.transport",
-        "Global connections: " <> int.to_string(conn_count),
+        "Failed to read HTTP request: " <> reason,
       )
-      let state =
-        ConnectionState(
-          id: conn_id,
-          connection: conn,
-          on_event: conn_on_event,
-          on_close: conn_on_close,
-          event_count: 0,
-          rate_window_start: 0,
-          security_limits: config.security_limits,
-          heartbeat_count: 0,
-          heartbeat_window_start: 0,
-        )
-      pubsub.subscribe("beacon:patches:" <> conn_id)
-      #(state, Some(selector))
-    },
-    on_close: fn(state) {
-      log.info("beacon.transport", "Connection closed (cleanup): " <> state.id)
-      let conn_count = connection_tracker_decrement()
-      log.debug(
-        "beacon.transport",
-        "Global connections after close: " <> int.to_string(conn_count),
-      )
-      pubsub.unsubscribe("beacon:patches:" <> state.id)
-      state.on_close(state.id)
-    },
-  )
+      server.close(socket)
+    }
+  }
 }
+
+/// Run middleware on a request and check if it short-circuits.
+/// Returns Ok(Nil) if middleware passes through, Error(resp) if it rejects.
+fn check_middleware(
+  req: Request(Connection),
+  middlewares: List(middleware.Middleware),
+) -> Result(Nil, response.Response(ResponseBody)) {
+  case middlewares {
+    [] -> Ok(Nil)
+    mws -> {
+      // Use a marker handler — if middleware calls next(), we get status 101
+      let marker = fn(_req: Request(Connection)) {
+        response.new(101)
+        |> response.set_body(Bytes(bytes_tree.new()))
+      }
+      let piped = middleware.pipeline(mws, marker)
+      let result = piped(req)
+      case result.status {
+        101 -> Ok(Nil)
+        _ -> Error(result)
+      }
+    }
+  }
+}
+
+// --- HTML/JS Serving ---
 
 /// Serve the HTML page. Checks: ssr_factory (route-aware), page_html (static SSR),
 /// then default page.
@@ -850,17 +997,18 @@ fn serve_page_or_ssr(
   page_html: option.Option(String),
   ssr_factory: option.Option(fn(String) -> String),
   path: String,
-) -> response.Response(mist.ResponseData) {
+) -> response.Response(ResponseBody) {
   let html = case ssr_factory {
     option.Some(factory) -> factory(path)
-    option.None -> case page_html {
-      option.Some(rendered) -> rendered
-      option.None -> default_page_html()
-    }
+    option.None ->
+      case page_html {
+        option.Some(rendered) -> rendered
+        option.None -> default_page_html()
+      }
   }
   response.new(200)
   |> response.set_header("content-type", "text/html; charset=utf-8")
-  |> response.set_body(mist.Bytes(bytes_tree.from_string(html)))
+  |> response.set_body(Bytes(bytes_tree.from_string(html)))
 }
 
 /// Default page when no SSR is configured.
@@ -890,14 +1038,12 @@ fn get_client_js_filename() -> String {
           <> string.inspect(err)
           <> " — the client JS was not built. Run `gleam run -m beacon/build` first.",
       )
-      // No fallback — return a name that will 404 with a clear error
       "MISSING_CLIENT_JS_RUN_BEACON_BUILD"
     }
   }
 }
 
-/// Serve the compiled Gleam-to-JS client runtime bundle.
-fn serve_client_js() -> response.Response(mist.ResponseData) {
+fn serve_client_js() -> response.Response(ResponseBody) {
   case simplifile.read("priv/static/beacon_client.manifest") {
     Ok(name) -> serve_js_file("priv/static/" <> string.trim(name))
     Error(err) -> {
@@ -909,7 +1055,7 @@ fn serve_client_js() -> response.Response(mist.ResponseData) {
       )
       response.new(500)
       |> response.set_body(
-        mist.Bytes(
+        Bytes(
           bytes_tree.from_string(
             "Client JS not built. Run `gleam run -m beacon/build` first.",
           ),
@@ -919,13 +1065,11 @@ fn serve_client_js() -> response.Response(mist.ResponseData) {
   }
 }
 
-fn serve_hashed_client_js(
-  name: String,
-) -> response.Response(mist.ResponseData) {
+fn serve_hashed_client_js(name: String) -> response.Response(ResponseBody) {
   serve_js_file("priv/static/" <> name)
 }
 
-fn serve_js_file(path: String) -> response.Response(mist.ResponseData) {
+fn serve_js_file(path: String) -> response.Response(ResponseBody) {
   case simplifile.read(path) {
     Ok(contents) -> {
       response.new(200)
@@ -937,27 +1081,35 @@ fn serve_js_file(path: String) -> response.Response(mist.ResponseData) {
         "cache-control",
         "public, max-age=31536000, immutable",
       )
-      |> response.set_body(mist.Bytes(bytes_tree.from_string(contents)))
+      |> response.set_body(Bytes(bytes_tree.from_string(contents)))
     }
     Error(err) -> {
       log.error(
         "beacon.transport",
-        "Client JS not found: " <> string.inspect(err)
+        "Client JS not found: "
+          <> string.inspect(err)
           <> " — run `gleam run -m beacon/build` to compile client JS",
       )
       response.new(500)
       |> response.set_header("content-type", "text/plain")
       |> response.set_body(
-        mist.Bytes(bytes_tree.from_string(
-          "// beacon.js not found. Run: gleam run -m beacon/build\n",
-        )),
+        Bytes(
+          bytes_tree.from_string(
+            "// beacon.js not found. Run: gleam run -m beacon/build\n",
+          ),
+        ),
       )
     }
   }
 }
 
+// --- Server Start ---
+
+/// Default number of acceptor processes.
+const default_acceptor_count = 10
+
 /// Start the transport layer — binds to the given port and begins
-/// accepting connections. Returns the supervisor's Pid for monitoring.
+/// accepting connections. Returns the server process Pid for monitoring.
 pub fn start(
   config: TransportConfig,
 ) -> Result(process.Pid, error.BeaconError) {
@@ -975,23 +1127,26 @@ pub fn start(
       )
     Some(_) -> Nil
   }
-  let handler = create_handler(config)
-  let result =
-    mist.new(handler)
-    |> mist.port(config.port)
-    |> mist.start
-  case result {
-    Ok(started) -> {
+
+  let handler_fn = fn(socket: Socket) {
+    per_connection_handler(socket, config)
+  }
+
+  case server.start(config.port, handler_fn, default_acceptor_count) {
+    Ok(pid) -> {
       log.info(
         "beacon.transport",
         "Listening on port " <> int.to_string(config.port),
       )
-      Ok(started.pid)
+      Ok(pid)
     }
-    Error(_start_error) -> {
+    Error(reason) -> {
       log.error(
         "beacon.transport",
-        "Failed to start on port " <> int.to_string(config.port),
+        "Failed to start on port "
+          <> int.to_string(config.port)
+          <> ": "
+          <> reason,
       )
       Error(error.TransportError(
         reason: "Failed to bind to port " <> int.to_string(config.port),
@@ -999,4 +1154,3 @@ pub fn start(
     }
   }
 }
-

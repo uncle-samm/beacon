@@ -9,7 +9,7 @@ import gleam/http/response.{type Response}
 import gleam/int
 import gleam/list
 import gleam/string
-import mist
+import beacon/transport/server.{type ResponseBody, Bytes}
 import simplifile
 
 /// Configuration for static file serving.
@@ -40,7 +40,7 @@ pub fn default_config() -> StaticConfig {
 pub fn serve(
   config: StaticConfig,
   path: String,
-) -> Result(Response(mist.ResponseData), Nil) {
+) -> Result(Response(ResponseBody), Nil) {
   serve_with_etag_check(config, path, "")
 }
 
@@ -50,7 +50,7 @@ pub fn serve_with_etag_check(
   config: StaticConfig,
   path: String,
   if_none_match: String,
-) -> Result(Response(mist.ResponseData), Nil) {
+) -> Result(Response(ResponseBody), Nil) {
   // Check if path starts with the prefix
   case string.starts_with(path, config.prefix) {
     False -> Error(Nil)
@@ -66,7 +66,7 @@ pub fn serve_with_etag_check(
           Ok(
             response.new(403)
             |> response.set_body(
-              mist.Bytes(bytes_tree.from_string("Forbidden")),
+              Bytes(bytes_tree.from_string("Forbidden")),
             ),
           )
         }
@@ -85,7 +85,7 @@ fn serve_file(
   path: String,
   max_age: Int,
   if_none_match: String,
-) -> Result(Response(mist.ResponseData), Nil) {
+) -> Result(Response(ResponseBody), Nil) {
   case simplifile.read_bits(path) {
     Ok(contents) -> {
       let mime = mime_type(path)
@@ -103,7 +103,7 @@ fn serve_file(
             response.new(304)
             |> response.set_header("etag", etag)
             |> response.set_header("cache-control", cache_control)
-            |> response.set_body(mist.Bytes(bytes_tree.new())),
+            |> response.set_body(Bytes(bytes_tree.new())),
           )
         }
         False -> {
@@ -117,7 +117,7 @@ fn serve_file(
             |> response.set_header("cache-control", cache_control)
             |> response.set_header("etag", etag)
             |> response.set_body(
-              mist.Bytes(bytes_tree.from_bit_array(contents)),
+              Bytes(bytes_tree.from_bit_array(contents)),
             ),
           )
         }
@@ -190,7 +190,7 @@ pub fn fingerprint(path: String, contents: BitArray) -> String {
 pub fn serve_immutable(
   config: StaticConfig,
   path: String,
-) -> Result(Response(mist.ResponseData), Nil) {
+) -> Result(Response(ResponseBody), Nil) {
   let immutable_config = StaticConfig(..config, max_age: 31_536_000)
   serve_with_etag_check(immutable_config, path, "")
 }

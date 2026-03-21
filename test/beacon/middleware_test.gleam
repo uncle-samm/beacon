@@ -3,14 +3,14 @@ import gleam/bytes_tree
 import gleam/http/request
 import gleam/http/response
 import gleam/string
-import mist
+import beacon/transport/server.{type Connection, Bytes}
 
 // --- Pipeline tests ---
 
 pub fn pipeline_empty_passes_through_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let piped = middleware.pipeline([], handler)
   let req = make_request("GET", "/")
@@ -21,7 +21,7 @@ pub fn pipeline_empty_passes_through_test() {
 pub fn pipeline_single_middleware_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let mw = fn(req, next) {
     let resp = next(req)
@@ -36,7 +36,7 @@ pub fn pipeline_single_middleware_test() {
 pub fn pipeline_order_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   // First middleware adds "1", second adds "2"
   let mw1 = fn(req, next) {
@@ -57,12 +57,12 @@ pub fn pipeline_order_test() {
 pub fn pipeline_short_circuit_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   // Auth middleware that always rejects
   let auth_mw = fn(_req, _next) {
     response.new(401)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("unauthorized")))
+    |> response.set_body(Bytes(bytes_tree.from_string("unauthorized")))
   }
   let piped = middleware.pipeline([auth_mw], handler)
   let req = make_request("GET", "/protected")
@@ -75,7 +75,7 @@ pub fn pipeline_short_circuit_test() {
 pub fn secure_headers_sets_x_content_type_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let piped = middleware.pipeline([middleware.secure_headers()], handler)
   let req = make_request("GET", "/")
@@ -101,7 +101,7 @@ pub fn secure_headers_sets_x_content_type_test() {
 pub fn request_id_adds_header_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let piped = middleware.pipeline([middleware.request_id()], handler)
   let req = make_request("GET", "/")
@@ -114,7 +114,7 @@ pub fn request_id_adds_header_test() {
 pub fn request_id_unique_per_request_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let piped = middleware.pipeline([middleware.request_id()], handler)
   let req = make_request("GET", "/")
@@ -130,7 +130,7 @@ pub fn request_id_unique_per_request_test() {
 pub fn body_parser_passes_small_body_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let piped = middleware.pipeline([middleware.body_parser(1_000_000)], handler)
   let req = make_request_with_header("POST", "/api", "content-length", "100")
@@ -141,7 +141,7 @@ pub fn body_parser_passes_small_body_test() {
 pub fn body_parser_rejects_oversized_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let piped = middleware.pipeline([middleware.body_parser(1000)], handler)
   let req =
@@ -153,7 +153,7 @@ pub fn body_parser_rejects_oversized_test() {
 pub fn body_parser_passes_no_content_length_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let piped = middleware.pipeline([middleware.body_parser(1000)], handler)
   let req = make_request("GET", "/")
@@ -168,7 +168,7 @@ pub fn compress_adds_gzip_header_test() {
     response.new(200)
     |> response.set_header("content-type", "text/html; charset=utf-8")
     |> response.set_body(
-      mist.Bytes(bytes_tree.from_string("<html><body>Hello World!</body></html>")),
+      Bytes(bytes_tree.from_string("<html><body>Hello World!</body></html>")),
     )
   }
   let piped = middleware.pipeline([middleware.compress()], handler)
@@ -183,7 +183,7 @@ pub fn compress_skips_without_accept_encoding_test() {
     response.new(200)
     |> response.set_header("content-type", "text/html")
     |> response.set_body(
-      mist.Bytes(bytes_tree.from_string("<html>Hello</html>")),
+      Bytes(bytes_tree.from_string("<html>Hello</html>")),
     )
   }
   let piped = middleware.pipeline([middleware.compress()], handler)
@@ -197,7 +197,7 @@ pub fn compress_skips_binary_content_test() {
     response.new(200)
     |> response.set_header("content-type", "image/png")
     |> response.set_body(
-      mist.Bytes(bytes_tree.from_string("binary data")),
+      Bytes(bytes_tree.from_string("binary data")),
     )
   }
   let piped = middleware.pipeline([middleware.compress()], handler)
@@ -237,7 +237,7 @@ pub fn rate_limit_middleware_allows_test() {
     )
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let piped = middleware.pipeline([middleware.rate_limit(limiter)], handler)
   let req = make_request("GET", "/")
@@ -253,7 +253,7 @@ pub fn rate_limit_middleware_blocks_test() {
     )
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let piped = middleware.pipeline([middleware.rate_limit(limiter)], handler)
   let req = make_request("GET", "/")
@@ -278,7 +278,7 @@ import gleam/http
 pub fn only_applies_to_matching_prefix_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   // Middleware that adds a header — only on /admin/*
   let tag_mw = fn(req, next) {
@@ -299,12 +299,12 @@ pub fn only_applies_to_matching_prefix_test() {
 pub fn only_short_circuits_on_matching_prefix_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   // Auth middleware that blocks — only on /admin/*
   let auth_mw = fn(_req, _next) {
     response.new(401)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("unauthorized")))
+    |> response.set_body(Bytes(bytes_tree.from_string("unauthorized")))
   }
   let piped = middleware.pipeline([middleware.only("/admin", auth_mw)], handler)
 
@@ -317,7 +317,7 @@ pub fn only_short_circuits_on_matching_prefix_test() {
 pub fn at_matches_exact_path_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let tag_mw = fn(req, next) {
     let resp = next(req)
@@ -341,12 +341,12 @@ pub fn at_matches_exact_path_test() {
 pub fn except_skips_matching_prefix_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   // Auth on everything EXCEPT /public
   let auth_mw = fn(_req, _next) {
     response.new(401)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("unauthorized")))
+    |> response.set_body(Bytes(bytes_tree.from_string("unauthorized")))
   }
   let piped = middleware.pipeline([middleware.except("/public", auth_mw)], handler)
 
@@ -359,12 +359,12 @@ pub fn except_skips_matching_prefix_test() {
 pub fn methods_filters_by_http_method_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   // Rate limit only POST and PUT
   let block_mw = fn(_req, _next) {
     response.new(429)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("rate limited")))
+    |> response.set_body(Bytes(bytes_tree.from_string("rate limited")))
   }
   let piped =
     middleware.pipeline(
@@ -381,7 +381,7 @@ pub fn methods_filters_by_http_method_test() {
 pub fn group_chains_multiple_middleware_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let tag1 = fn(req, next) {
     let resp = next(req)
@@ -412,11 +412,11 @@ pub fn group_chains_multiple_middleware_test() {
 pub fn composing_only_and_except_test() {
   let handler = fn(_req) {
     response.new(200)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("ok")))
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
   let auth_mw = fn(_req, _next) {
     response.new(401)
-    |> response.set_body(mist.Bytes(bytes_tree.from_string("unauthorized")))
+    |> response.set_body(Bytes(bytes_tree.from_string("unauthorized")))
   }
   let tag_mw = fn(req, next) {
     let resp = next(req)
@@ -449,9 +449,9 @@ pub fn composing_only_and_except_test() {
 fn make_request(
   method: String,
   path: String,
-) -> request.Request(mist.Connection) {
+) -> request.Request(Connection) {
   // Create a minimal request for testing
-  // We can't create a real mist.Connection, so we use FFI
+  // We can't create a real Connection, so we use FFI
   do_make_request(method, path)
 }
 
@@ -459,14 +459,14 @@ fn make_request(
 fn do_make_request(
   method: String,
   path: String,
-) -> request.Request(mist.Connection)
+) -> request.Request(Connection)
 
 fn make_request_with_header(
   method: String,
   path: String,
   header_name: String,
   header_value: String,
-) -> request.Request(mist.Connection) {
+) -> request.Request(Connection) {
   do_make_request_with_header(method, path, header_name, header_value)
 }
 
@@ -476,4 +476,4 @@ fn do_make_request_with_header(
   path: String,
   header_name: String,
   header_value: String,
-) -> request.Request(mist.Connection)
+) -> request.Request(Connection)

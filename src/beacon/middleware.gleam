@@ -17,15 +17,15 @@ import gleam/http/response.{type Response}
 import gleam/int
 import gleam/list
 import gleam/string
-import mist
+import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
 
 /// A middleware function.
 /// Takes a request and a `next` function, returns a response.
 /// Can modify the request before passing to next, modify the response after,
 /// or short-circuit by returning a response without calling next.
 pub type Middleware =
-  fn(Request(mist.Connection), fn(Request(mist.Connection)) -> Response(mist.ResponseData)) ->
-    Response(mist.ResponseData)
+  fn(Request(Connection), fn(Request(Connection)) -> Response(ResponseBody)) ->
+    Response(ResponseBody)
 
 /// Chain multiple middleware into a single handler.
 /// Middleware execute in order: first middleware wraps the second, etc.
@@ -40,19 +40,19 @@ pub type Middleware =
 /// ```
 pub fn pipeline(
   middlewares: List(Middleware),
-  handler: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-) -> fn(Request(mist.Connection)) -> Response(mist.ResponseData) {
+  handler: fn(Request(Connection)) -> Response(ResponseBody),
+) -> fn(Request(Connection)) -> Response(ResponseBody) {
   list.fold_right(middlewares, handler, fn(next, mw) {
-    fn(req: Request(mist.Connection)) { mw(req, next) }
+    fn(req: Request(Connection)) { mw(req, next) }
   })
 }
 
 /// Logger middleware — logs request method, path, and response status.
 pub fn logger() -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     let method = http.method_to_string(req.method)
     let path = req.path
     log.info(
@@ -99,9 +99,9 @@ pub fn default_cors() -> CorsConfig {
 /// CORS middleware — sets Access-Control-* headers.
 pub fn cors(config: CorsConfig) -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     let origin = string.join(config.allow_origins, ", ")
     let methods = string.join(config.allow_methods, ", ")
     let headers = string.join(config.allow_headers, ", ")
@@ -117,7 +117,7 @@ pub fn cors(config: CorsConfig) -> Middleware {
           "access-control-max-age",
           int.to_string(config.max_age),
         )
-        |> response.set_body(mist.Bytes(bytes_tree.new()))
+        |> response.set_body(Bytes(bytes_tree.new()))
       }
       _ -> {
         let resp = next(req)
@@ -138,9 +138,9 @@ pub fn cors(config: CorsConfig) -> Middleware {
 /// template so that <script> tags include nonce="..." attributes.
 pub fn secure_headers() -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     let resp = next(req)
     resp
     |> response.set_header("x-content-type-options", "nosniff")
@@ -165,9 +165,9 @@ pub fn secure_headers() -> Middleware {
 /// Returns 429 Too Many Requests when the limit is exceeded.
 pub fn rate_limit(limiter: rate_limit.RateLimiter) -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     // Use the request path + host as a simple client identifier
     // In production, you'd extract the real client IP from headers
     let client_key = case request.get_header(req, "x-forwarded-for") {
@@ -181,7 +181,7 @@ pub fn rate_limit(limiter: rate_limit.RateLimiter) -> Middleware {
         |> response.set_header("content-type", "text/plain")
         |> response.set_header("retry-after", "60")
         |> response.set_body(
-          mist.Bytes(bytes_tree.from_string("Too Many Requests")),
+          Bytes(bytes_tree.from_string("Too Many Requests")),
         )
       }
     }
@@ -193,9 +193,9 @@ pub fn rate_limit(limiter: rate_limit.RateLimiter) -> Middleware {
 /// Useful for tracing requests through distributed systems.
 pub fn request_id() -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     let id = generate_request_id()
     log.debug("beacon.middleware", "Request " <> id <> ": " <> req.path)
     let resp = next(req)
@@ -209,9 +209,9 @@ pub fn request_id() -> Middleware {
 /// Passes the request through if body is within limits or has no body.
 pub fn body_parser(max_bytes: Int) -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     // Check Content-Length header if present
     case request.get_header(req, "content-length") {
       Ok(length_str) -> {
@@ -227,7 +227,7 @@ pub fn body_parser(max_bytes: Int) -> Middleware {
             response.new(413)
             |> response.set_header("content-type", "text/plain")
             |> response.set_body(
-              mist.Bytes(bytes_tree.from_string("Payload Too Large")),
+              Bytes(bytes_tree.from_string("Payload Too Large")),
             )
           }
           _ -> next(req)
@@ -243,9 +243,9 @@ pub fn body_parser(max_bytes: Int) -> Middleware {
 /// Only compresses text-based responses (HTML, CSS, JS, JSON).
 pub fn compress() -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     let accepts_gzip = case request.get_header(req, "accept-encoding") {
       Ok(val) -> string.contains(val, "gzip")
       Error(Nil) -> False
@@ -279,18 +279,17 @@ fn is_compressible(content_type: String) -> Bool {
 
 /// Compress a response body with gzip.
 fn compress_response(
-  resp: Response(mist.ResponseData),
-) -> Response(mist.ResponseData) {
+  resp: Response(ResponseBody),
+) -> Response(ResponseBody) {
   case resp.body {
-    mist.Bytes(body_tree) -> {
+    Bytes(body_tree) -> {
       let body_str = bytes_tree.to_bit_array(body_tree)
       let compressed = gzip_compress(body_str)
       resp
       |> response.set_header("content-encoding", "gzip")
       |> response.set_header("vary", "Accept-Encoding")
-      |> response.set_body(mist.Bytes(bytes_tree.from_bit_array(compressed)))
+      |> response.set_body(Bytes(bytes_tree.from_bit_array(compressed)))
     }
-    _ -> resp
   }
 }
 
@@ -320,9 +319,9 @@ fn gzip_compress(data: BitArray) -> BitArray
 /// ```
 pub fn only(prefix: String, mw: Middleware) -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     case string.starts_with(req.path, prefix) {
       True -> mw(req, next)
       False -> next(req)
@@ -337,9 +336,9 @@ pub fn only(prefix: String, mw: Middleware) -> Middleware {
 /// ```
 pub fn at(path: String, mw: Middleware) -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     case req.path == path {
       True -> mw(req, next)
       False -> next(req)
@@ -355,9 +354,9 @@ pub fn at(path: String, mw: Middleware) -> Middleware {
 /// ```
 pub fn except(prefix: String, mw: Middleware) -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     case string.starts_with(req.path, prefix) {
       True -> next(req)
       False -> mw(req, next)
@@ -372,9 +371,9 @@ pub fn except(prefix: String, mw: Middleware) -> Middleware {
 /// ```
 pub fn methods(allowed: List(http.Method), mw: Middleware) -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     case list.contains(allowed, req.method) {
       True -> mw(req, next)
       False -> next(req)
@@ -393,9 +392,9 @@ pub fn methods(allowed: List(http.Method), mw: Middleware) -> Middleware {
 /// ```
 pub fn group(middlewares: List(Middleware)) -> Middleware {
   fn(
-    req: Request(mist.Connection),
-    next: fn(Request(mist.Connection)) -> Response(mist.ResponseData),
-  ) -> Response(mist.ResponseData) {
+    req: Request(Connection),
+    next: fn(Request(Connection)) -> Response(ResponseBody),
+  ) -> Response(ResponseBody) {
     let handler = pipeline(middlewares, next)
     handler(req)
   }
