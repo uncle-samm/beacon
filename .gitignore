@@ -21,6 +21,7 @@ beacon_client/build/
 *.pem
 *.key
 secrets/
+.hex_api_key
 
 # Test scripts (local dev only)
 test_cdp*.py
