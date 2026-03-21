@@ -93,7 +93,7 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
     "Starting Beacon application on port " <> int.to_string(config.port),
   )
 
-  // Pre-render SSR page
+  // SSR rendering: route-aware (per-request) or static (pre-rendered once)
   let ssr_config =
     ssr.SsrConfig(
       init: config.init,
@@ -102,8 +102,35 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       title: config.title,
       head_html: config.head_html,
     )
-  let page = ssr.render_page(ssr_config)
-  log.info("beacon.application", "SSR page rendered")
+
+  // When routes are configured, render per-request so each URL gets
+  // route-specific HTML (e.g. /login renders the login page).
+  // Otherwise, pre-render once at startup.
+  let #(page_html, ssr_factory) = case
+    config.route_patterns,
+    config.on_route_change
+  {
+    [_, ..], Some(_) -> {
+      log.info("beacon.application", "Route-aware SSR enabled")
+      let factory = fn(path: String) {
+        let page =
+          ssr.render_page_for_path(
+            ssr_config,
+            path,
+            config.route_patterns,
+            config.on_route_change,
+            config.update,
+          )
+        page.html
+      }
+      #(None, Some(factory))
+    }
+    _, _ -> {
+      let page = ssr.render_page(ssr_config)
+      log.info("beacon.application", "SSR page rendered (static)")
+      #(Some(page.html), None)
+    }
+  }
 
   // Per-connection runtime: each WebSocket gets its own runtime process
   let runtime_config =
@@ -125,7 +152,7 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
     runtime.connect_transport_per_connection(
       runtime_config,
       config.port,
-      Some(page.html),
+      page_html,
     )
   let static_cfg = case config.static_dir {
     Some(dir) ->
@@ -142,6 +169,7 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       middlewares: config.middlewares,
       static_config: static_cfg,
       security_limits: config.security_limits,
+      ssr_factory: ssr_factory,
     )
   case transport.start(transport_config) {
     Ok(transport_pid) -> {
