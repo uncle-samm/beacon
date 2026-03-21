@@ -6,7 +6,8 @@
 /// LiveView's positional diff format for the wire protocol.
 
 import beacon/element.{
-  type Attr, type Node, ElementNode, EventAttr, HtmlAttr, MemoNode, TextNode,
+  type Attr, type Node, ElementNode, EventAttr, HtmlAttr, MemoNode, NoneNode,
+  RawHtml, TextNode,
 }
 import gleam/json
 import gleam/list
@@ -57,6 +58,19 @@ fn diff_nodes(
   path: List(Int),
 ) -> List(Patch) {
   case old, new {
+    // Both NoneNodes — no change
+    NoneNode, NoneNode -> []
+
+    // Both RawHtml — check if content changed
+    RawHtml(old_html), RawHtml(new_html) -> {
+      case old_html == new_html {
+        True -> []
+        False -> [
+          ReplaceNode(path: list.reverse(path), node_json: element.to_json(new)),
+        ]
+      }
+    }
+
     // Both memo nodes with same key — compare deps to decide whether to diff
     MemoNode(old_key, old_deps, old_child),
       MemoNode(new_key, new_deps, new_child)

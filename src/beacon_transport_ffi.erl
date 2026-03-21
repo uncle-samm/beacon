@@ -2,7 +2,7 @@
 -export([
     listen/2, accept/1, tcp_send/2, close/1,
     controlling_process/2, set_active_once/1,
-    read_http_request/1,
+    read_http_request/1, read_body/2,
     ws_accept_key/1,
     ws_encode_text_frame/1, ws_encode_close_frame/0,
     ws_decode_frame/1,
@@ -89,6 +89,20 @@ read_headers(Socket, Acc) ->
             {ok, lists:reverse(Acc)};
         {ok, {http_error, _}} ->
             {error, <<"bad_header">>};
+        {error, Reason} ->
+            {error, format_reason(Reason)}
+    end.
+
+%% Read exactly Length bytes from the socket (request body).
+%% Socket must be in {packet, raw} mode (set by read_http_request after headers).
+%% MaxBytes is the safety limit — if Length > MaxBytes, returns error without reading.
+%% Returns {ok, Data} or {error, Reason}.
+read_body(Socket, Length) ->
+    case gen_tcp:recv(Socket, Length, 30000) of
+        {ok, Data} ->
+            {ok, Data};
+        {error, closed} ->
+            {error, <<"closed">>};
         {error, Reason} ->
             {error, format_reason(Reason)}
     end.

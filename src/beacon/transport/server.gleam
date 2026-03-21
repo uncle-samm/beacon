@@ -10,10 +10,10 @@ import gleam/dynamic.{type Dynamic}
 import gleam/erlang/process
 import gleam/int
 
-/// Connection type — phantom type used as the body parameter for gleam_http Request.
-/// Beacon never reads HTTP request bodies, so this is a marker type.
+/// Connection type — used as the body parameter for gleam_http Request.
+/// Carries the socket reference so handlers can read the request body.
 pub type Connection {
-  Connection
+  Connection(socket: Socket)
 }
 
 /// Response body type. Replaces mist.ResponseData.
@@ -85,6 +85,23 @@ pub fn send_close_frame(socket: Socket) -> Result(Nil, String) {
   let frame = ffi_ws_encode_close_frame()
   send_bytes(socket, frame)
 }
+
+// --- HTTP Body Reading ---
+
+/// Read exactly `length` bytes from the socket as the HTTP request body.
+/// The socket must be in raw packet mode (i.e., after HTTP headers have been read).
+/// Returns the body as a BitArray, or an error if reading fails.
+///
+/// Typical usage in a handler:
+/// ```gleam
+/// let content_length = get_content_length(request)
+/// case server.read_body(socket, content_length) {
+///   Ok(body) -> handle_body(body)
+///   Error(reason) -> send_error(400, reason)
+/// }
+/// ```
+@external(erlang, "beacon_transport_ffi", "read_body")
+pub fn read_body(socket: Socket, length: Int) -> Result(BitArray, String)
 
 // --- TCP Message Classification ---
 

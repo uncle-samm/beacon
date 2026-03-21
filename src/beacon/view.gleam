@@ -9,7 +9,8 @@
 /// Architecture doc section 9 (Build-Time Template Analysis).
 
 import beacon/element.{
-  type Attr, type Node, ElementNode, EventAttr, HtmlAttr, MemoNode, TextNode,
+  type Attr, type Node, ElementNode, EventAttr, HtmlAttr, MemoNode, NoneNode,
+  RawHtml, TextNode,
 }
 import beacon/template/rendered.{type Rendered}
 import gleam/list
@@ -88,6 +89,16 @@ fn finish_static(state: RenderState) -> List(String) {
 /// Recursively walk a Node tree, splitting into statics and dynamics.
 fn do_render(node: Node(msg), state: RenderState) -> RenderState {
   case node {
+    NoneNode -> {
+      // Empty node — renders nothing, contributes no static or dynamic content
+      state
+    }
+
+    RawHtml(html) -> {
+      // Raw HTML is DYNAMIC — it's injected without escaping and may change
+      add_dynamic(state, html)
+    }
+
     TextNode(content) -> {
       // Text content is DYNAMIC — it may change between renders
       add_dynamic(state, content)

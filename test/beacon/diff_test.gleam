@@ -242,6 +242,66 @@ pub fn memo_to_string_renders_child_test() {
   let assert "<p>content</p>" = element.to_string(node)
 }
 
+// --- NoneNode diff tests ---
+
+pub fn identical_none_nodes_no_patches_test() {
+  let old = element.none()
+  let new = element.none()
+  let patches = diff.diff(old, new)
+  let assert [] = patches
+}
+
+pub fn none_to_element_replaced_test() {
+  let old = element.none()
+  let new = element.el("div", [], [element.text("hello")])
+  let patches = diff.diff(old, new)
+  let assert [diff.ReplaceNode(path: [], ..)] = patches
+}
+
+pub fn element_to_none_replaced_test() {
+  let old = element.el("div", [], [element.text("hello")])
+  let new = element.none()
+  let patches = diff.diff(old, new)
+  let assert [diff.ReplaceNode(path: [], ..)] = patches
+}
+
+pub fn none_to_text_replaced_test() {
+  let old = element.none()
+  let new = element.text("hello")
+  let patches = diff.diff(old, new)
+  let assert [diff.ReplaceNode(path: [], ..)] = patches
+}
+
+// --- RawHtml diff tests ---
+
+pub fn identical_raw_html_no_patches_test() {
+  let old = element.raw_html("<b>bold</b>")
+  let new = element.raw_html("<b>bold</b>")
+  let patches = diff.diff(old, new)
+  let assert [] = patches
+}
+
+pub fn raw_html_content_changed_test() {
+  let old = element.raw_html("<b>old</b>")
+  let new = element.raw_html("<b>new</b>")
+  let patches = diff.diff(old, new)
+  let assert [diff.ReplaceNode(path: [], ..)] = patches
+}
+
+pub fn raw_html_to_element_replaced_test() {
+  let old = element.raw_html("<b>bold</b>")
+  let new = element.el("div", [], [])
+  let patches = diff.diff(old, new)
+  let assert [diff.ReplaceNode(path: [], ..)] = patches
+}
+
+pub fn element_to_raw_html_replaced_test() {
+  let old = element.el("div", [], [])
+  let new = element.raw_html("<b>bold</b>")
+  let patches = diff.diff(old, new)
+  let assert [diff.ReplaceNode(path: [], ..)] = patches
+}
+
 // --- Helper ---
 
 fn string_contains(haystack: String, needle: String) -> Bool {

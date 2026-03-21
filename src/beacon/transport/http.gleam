@@ -22,6 +22,8 @@ fn ffi_read_http_request(
 ) -> Result(#(String, String, List(#(String, String))), String)
 
 /// Read and parse an HTTP request from a socket into a gleam_http Request.
+/// The socket is embedded in the Connection body so handlers can read the
+/// request body via `server.read_body(req.body.socket, length)`.
 pub fn read_request(
   socket: server.Socket,
 ) -> Result(Request(server.Connection), String) {
@@ -34,7 +36,7 @@ pub fn read_request(
       Ok(request.Request(
         method: method,
         headers: headers,
-        body: server.Connection,
+        body: server.Connection(socket: socket),
         scheme: http.Http,
         host: host_name,
         port: port_opt,
@@ -81,6 +83,56 @@ pub fn write_response(
   // Send headers + body in one write
   let full = bit_array.append(header_bits, body_bits)
   server.send_bytes(socket, full)
+}
+
+/// Read the request body from the connection.
+/// Parses the Content-Length header to determine how many bytes to read.
+/// Returns Error if Content-Length is missing, exceeds max_bytes, or reading fails.
+///
+/// Example:
+/// ```gleam
+/// case transport_http.read_body(request, 1_000_000) {
+///   Ok(body_bits) -> {
+///     case bit_array.to_string(body_bits) {
+///       Ok(body_string) -> handle_json(body_string)
+///       Error(Nil) -> send_error(400, "Invalid UTF-8")
+///     }
+///   }
+///   Error(reason) -> send_error(400, reason)
+/// }
+/// ```
+pub fn read_body(
+  req: Request(server.Connection),
+  max_bytes: Int,
+) -> Result(BitArray, String) {
+  case request.get_header(req, "content-length") {
+    Error(Nil) -> Error("Missing Content-Length header")
+    Ok(length_str) -> {
+      case int.parse(length_str) {
+        Error(Nil) -> Error("Invalid Content-Length header")
+        Ok(length) -> {
+          case length > max_bytes {
+            True ->
+              Error(
+                "Content-Length "
+                <> int.to_string(length)
+                <> " exceeds limit of "
+                <> int.to_string(max_bytes),
+              )
+            False -> {
+              case length <= 0 {
+                True -> Ok(<<>>)
+                False -> {
+                  let server.Connection(socket: socket) = req.body
+                  server.read_body(socket, length)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 /// Write an error response and close the socket.

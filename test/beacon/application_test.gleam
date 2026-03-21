@@ -43,6 +43,7 @@ fn test_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     on_route_change: option.None,
     dynamic_subscriptions: option.None, on_notify: option.None,
     security_limits: transport.default_security_limits(),
+    head_html: option.None,
   )
 }
 

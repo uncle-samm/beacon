@@ -373,6 +373,7 @@ pub fn start(port: Int) -> Result(Nil, error.BeaconError) {
           view: view,
           secret_key: "todo-secret-key-change-in-production!!",
           title: "Beacon Todos",
+          head_html: option.None,
         )
       let page = ssr.render_page(ssr_config)
       let transport_config =

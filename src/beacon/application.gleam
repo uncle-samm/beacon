@@ -61,6 +61,9 @@ pub type AppConfig(model, msg) {
     on_notify: Option(fn(String) -> msg),
     /// Configurable security limits for the transport layer.
     security_limits: transport.SecurityLimits,
+    /// Optional: extra HTML to inject into `<head>` (stylesheets, meta tags, etc.).
+    /// Example: `Some("<link rel=\"stylesheet\" href=\"/static/styles.css\">")`
+    head_html: Option(String),
   )
 }
 
@@ -97,6 +100,7 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       view: config.view,
       secret_key: config.secret_key,
       title: config.title,
+      head_html: config.head_html,
     )
   let page = ssr.render_page(ssr_config)
   log.info("beacon.application", "SSR page rendered")

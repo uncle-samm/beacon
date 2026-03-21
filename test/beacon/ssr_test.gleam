@@ -31,6 +31,7 @@ fn test_config() -> ssr.SsrConfig(TestModel, TestMsg) {
     view: test_view,
     secret_key: "test-secret-key-at-least-32-chars-long!!",
     title: "Test Page",
+    head_html: option.None,
   )
 }
 
@@ -141,6 +142,7 @@ pub fn render_page_for_path_renders_route_specific_html_test() {
     view: test_view,
     secret_key: "test-secret-key-at-least-32-chars-long!!",
     title: "Route Test",
+    head_html: option.None,
   )
   let patterns = [route.pattern("/"), route.pattern("/about")]
   let on_route_change = option.Some(fn(r: route.Route) -> TestMsg {
@@ -166,10 +168,58 @@ pub fn to_response_returns_200_test() {
   let assert 200 = resp.status
 }
 
+// --- head_html tests ---
+
+pub fn head_html_none_renders_no_extra_content_test() {
+  let page = ssr.render_page(test_config())
+  // No <style> block (removed hardcoded demo styles)
+  let assert True = does_not_contain(page.html, "<style>")
+  // head_html is None, so no extra content between </title> and </head>
+  let assert True = str_contains(page.html, "</title></head>")
+}
+
+pub fn head_html_injects_stylesheet_link_test() {
+  let config = ssr.SsrConfig(
+    init: test_init,
+    view: test_view,
+    secret_key: "test-secret-key-at-least-32-chars-long!!",
+    title: "CSS Test",
+    head_html: option.Some("<link rel=\"stylesheet\" href=\"/static/styles.css\">"),
+  )
+  let page = ssr.render_page(config)
+  let assert True = str_contains(page.html, "<link rel=\"stylesheet\" href=\"/static/styles.css\">")
+  // The link tag should be in the head section (after title, before </head>)
+  let assert Ok(title_pos) = string_index_of(page.html, "</title>")
+  let assert Ok(link_pos) = string_index_of(page.html, "<link rel=\"stylesheet\"")
+  let assert Ok(head_close_pos) = string_index_of(page.html, "</head>")
+  let assert True = title_pos < link_pos
+  let assert True = link_pos < head_close_pos
+}
+
+pub fn head_html_multiple_tags_test() {
+  let config = ssr.SsrConfig(
+    init: test_init,
+    view: test_view,
+    secret_key: "test-secret-key-at-least-32-chars-long!!",
+    title: "Multi Head Test",
+    head_html: option.Some("<link rel=\"stylesheet\" href=\"/a.css\"><meta name=\"theme-color\" content=\"#000\">"),
+  )
+  let page = ssr.render_page(config)
+  let assert True = str_contains(page.html, "href=\"/a.css\"")
+  let assert True = str_contains(page.html, "theme-color")
+}
+
 // --- Helpers ---
 
 fn str_contains(haystack: String, needle: String) -> Bool {
   do_str_contains(haystack, needle)
+}
+
+fn does_not_contain(haystack: String, needle: String) -> Bool {
+  case do_str_contains(haystack, needle) {
+    True -> False
+    False -> True
+  }
 }
 
 @external(erlang, "beacon_test_ffi", "string_contains")

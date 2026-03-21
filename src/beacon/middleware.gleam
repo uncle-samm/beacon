@@ -130,13 +130,25 @@ pub fn cors(config: CorsConfig) -> Middleware {
 
 /// Security headers middleware — sets common security headers.
 /// Reference: OWASP secure headers project.
-///
-/// TODO: Add per-request CSP nonce generation for script-src. Currently uses
-/// script-src 'self' which is decent protection but a nonce would allow removing
-/// 'unsafe-inline' from style-src and provide stronger XSS protection. This
-/// requires threading a nonce value through the request context to the SSR
-/// template so that <script> tags include nonce="..." attributes.
+/// Uses the default CSP policy. For custom CSP, use `secure_headers_with_csp`.
 pub fn secure_headers() -> Middleware {
+  secure_headers_with_csp(default_csp)
+}
+
+/// Default Content-Security-Policy value.
+const default_csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:"
+
+/// Security headers middleware with a custom Content-Security-Policy.
+/// Use this when the default CSP is too strict (e.g., external stylesheets,
+/// fonts, or images from CDNs).
+///
+/// Example:
+/// ```gleam
+/// middleware.secure_headers_with_csp(
+///   "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss:",
+/// )
+/// ```
+pub fn secure_headers_with_csp(csp: String) -> Middleware {
   fn(
     req: Request(Connection),
     next: fn(Request(Connection)) -> Response(ResponseBody),
@@ -154,10 +166,7 @@ pub fn secure_headers() -> Middleware {
       "permissions-policy",
       "camera=(), microphone=(), geolocation=()",
     )
-    |> response.set_header(
-      "content-security-policy",
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:",
-    )
+    |> response.set_header("content-security-policy", csp)
   }
 }
 

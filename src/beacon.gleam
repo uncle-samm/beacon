@@ -155,6 +155,8 @@ pub opaque type AppBuilder(model, msg) {
     on_update_effect: Option(fn(model, msg) -> effect.Effect(msg)),
     /// Configurable security limits for the transport layer.
     security_limits: transport.SecurityLimits,
+    /// Optional: extra HTML to inject into `<head>` (stylesheets, meta tags, etc.).
+    head_html: Option(String),
   )
 }
 
@@ -187,6 +189,7 @@ pub fn app(
     on_notify: None,
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
+    head_html: None,
   )
 }
 
@@ -216,6 +219,7 @@ pub fn app_with_effects(
     on_notify: None,
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
+    head_html: None,
   )
 }
 
@@ -266,6 +270,7 @@ pub fn app_with_local(
     on_notify: None,
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
+    head_html: None,
   )
 }
 
@@ -322,6 +327,7 @@ pub fn app_with_server(
     on_notify: None,
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
+    head_html: None,
   )
 }
 
@@ -331,6 +337,21 @@ pub fn title(
   t: String,
 ) -> AppBuilder(model, msg) {
   AppBuilder(..builder, title: t)
+}
+
+/// Inject custom HTML into the `<head>` of the SSR page.
+/// Use this for stylesheets, meta tags, fonts, or other head content.
+///
+/// ```gleam
+/// beacon.app(init, update, view)
+/// |> beacon.head_html("<link rel=\"stylesheet\" href=\"/static/styles.css\">")
+/// |> beacon.start(8080)
+/// ```
+pub fn head_html(
+  builder: AppBuilder(model, msg),
+  html: String,
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, head_html: Some(html))
 }
 
 /// Set a model encoder for model_sync.
@@ -578,6 +599,7 @@ fn start_validated(
       dynamic_subscriptions: builder.dynamic_subscriptions,
       on_notify: builder.on_notify,
       security_limits: builder.security_limits,
+      head_html: builder.head_html,
     )
   case application.start(config) {
     Ok(_app) -> {

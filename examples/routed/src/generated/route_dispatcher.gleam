@@ -113,6 +113,7 @@ pub fn ssr_for_route(
         view: route_index.view,
         secret_key: secret_key,
         title: title,
+        head_html: option.None,
       ))
     }
     ["about"] -> {
@@ -121,6 +122,7 @@ pub fn ssr_for_route(
         view: route_about.view,
         secret_key: secret_key,
         title: title,
+        head_html: option.None,
       ))
     }
     ["settings"] -> {
@@ -129,6 +131,7 @@ pub fn ssr_for_route(
         view: route_settings.view,
         secret_key: secret_key,
         title: title,
+        head_html: option.None,
       ))
     }
     ["stats"] -> {
@@ -137,6 +140,7 @@ pub fn ssr_for_route(
         view: route_stats.view,
         secret_key: secret_key,
         title: title,
+        head_html: option.None,
       ))
     }
     _ -> ssr.render_page(ssr.SsrConfig(
@@ -144,6 +148,7 @@ pub fn ssr_for_route(
       view: fn(_) { element.text("404 — Not Found") },
       secret_key: secret_key,
       title: title <> " — Not Found",
+      head_html: option.None,
     ))
   }
 }

@@ -11,6 +11,7 @@ import beacon/error
 import beacon/log
 import beacon/middleware
 import beacon/pubsub
+import beacon/ssr
 import beacon/static
 import beacon/transport/http as transport_http
 import beacon/transport/server.{
@@ -1015,11 +1016,6 @@ fn serve_page_or_ssr(
 fn default_page_html() -> String {
   "<!DOCTYPE html>"
   <> "<html><head><meta charset=\"utf-8\"><title>Beacon</title>"
-  <> "<style>"
-  <> "body{font-family:system-ui,sans-serif;max-width:600px;margin:2rem auto}"
-  <> "button{font-size:1.5rem;padding:.5rem 1.5rem;margin:.25rem;cursor:pointer}"
-  <> ".counter{text-align:center}"
-  <> "</style>"
   <> "</head><body>"
   <> "<div id=\"beacon-app\"></div>"
   <> "<script src=\"/"
@@ -1029,12 +1025,15 @@ fn default_page_html() -> String {
 }
 
 fn get_client_js_filename() -> String {
-  case simplifile.read("priv/static/beacon_client.manifest") {
+  let manifest_path = ssr.beacon_priv_path("static/beacon_client.manifest")
+  case simplifile.read(manifest_path) {
     Ok(name) -> string.trim(name)
     Error(err) -> {
       log.error(
         "beacon.transport",
-        "FATAL: No beacon_client.manifest found: "
+        "FATAL: No beacon_client.manifest found at "
+          <> manifest_path
+          <> ": "
           <> string.inspect(err)
           <> " — the client JS was not built. Run `gleam run -m beacon/build` first.",
       )
@@ -1044,8 +1043,9 @@ fn get_client_js_filename() -> String {
 }
 
 fn serve_client_js() -> response.Response(ResponseBody) {
-  case simplifile.read("priv/static/beacon_client.manifest") {
-    Ok(name) -> serve_js_file("priv/static/" <> string.trim(name))
+  let manifest_path = ssr.beacon_priv_path("static/beacon_client.manifest")
+  case simplifile.read(manifest_path) {
+    Ok(name) -> serve_js_file(ssr.beacon_priv_path("static/" <> string.trim(name)))
     Error(err) -> {
       log.error(
         "beacon.transport",
@@ -1066,7 +1066,7 @@ fn serve_client_js() -> response.Response(ResponseBody) {
 }
 
 fn serve_hashed_client_js(name: String) -> response.Response(ResponseBody) {
-  serve_js_file("priv/static/" <> name)
+  serve_js_file(ssr.beacon_priv_path("static/" <> name))
 }
 
 fn serve_js_file(path: String) -> response.Response(ResponseBody) {

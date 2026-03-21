@@ -28,6 +28,21 @@ pub type Node(msg) {
   /// (compared for equality), and `child` is the rendered output.
   /// Reference: Elm's Html.Lazy, Lustre's memo.
   MemoNode(key: String, deps: List(String), child: Node(msg))
+  /// An empty node that renders nothing. Used for conditional rendering:
+  /// ```gleam
+  /// case show_error {
+  ///   True -> html.p([], [html.text("Error!")])
+  ///   False -> element.none()
+  /// }
+  /// ```
+  NoneNode
+  /// Raw HTML content that is injected without escaping.
+  /// Used for server-rendered markdown or other pre-sanitized HTML.
+  /// WARNING: The caller is responsible for ensuring the HTML is safe.
+  /// ```gleam
+  /// element.raw_html("<strong>bold</strong>")
+  /// ```
+  RawHtml(html: String)
 }
 
 /// An HTML attribute (key-value pair).
@@ -49,6 +64,8 @@ pub fn to_string(node: Node(msg)) -> String {
 /// Convert a Node tree to a StringTree (efficient string building).
 pub fn to_string_tree(node: Node(msg)) -> StringTree {
   case node {
+    NoneNode -> string_tree.new()
+    RawHtml(html) -> string_tree.from_string(html)
     TextNode(content) -> {
       string_tree.from_string(escape_html(content))
     }
@@ -85,6 +102,13 @@ pub fn to_string_tree(node: Node(msg)) -> StringTree {
 /// Convert a Node tree to a JSON value for wire transport.
 pub fn to_json(node: Node(msg)) -> json.Json {
   case node {
+    NoneNode ->
+      json.object([#("t", json.string("none"))])
+    RawHtml(html) ->
+      json.object([
+        #("t", json.string("raw")),
+        #("h", json.string(html)),
+      ])
     TextNode(content) ->
       json.object([
         #("t", json.string("text")),
@@ -109,6 +133,30 @@ pub fn to_json_string(node: Node(msg)) -> String {
 }
 
 // --- Constructors ---
+
+/// Create an empty node that renders nothing.
+/// Used for conditional rendering in views:
+/// ```gleam
+/// case model.show_error {
+///   True -> html.p([], [html.text("Error!")])
+///   False -> element.none()
+/// }
+/// ```
+pub fn none() -> Node(msg) {
+  NoneNode
+}
+
+/// Create a raw HTML node that is injected without escaping.
+/// Used for server-rendered content like markdown HTML output.
+/// WARNING: The caller is responsible for sanitizing the HTML.
+/// Injecting unsanitized user input creates XSS vulnerabilities.
+/// ```gleam
+/// let html_string = markdown.to_html(source)
+/// element.raw_html(html_string)
+/// ```
+pub fn raw_html(html: String) -> Node(msg) {
+  RawHtml(html: html)
+}
 
 /// Create a text node.
 pub fn text(content: String) -> Node(msg) {

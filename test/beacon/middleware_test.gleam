@@ -96,6 +96,24 @@ pub fn secure_headers_sets_x_content_type_test() {
   ) = response.get_header(resp, "content-security-policy")
 }
 
+pub fn secure_headers_with_custom_csp_test() {
+  let handler = fn(_req) {
+    response.new(200)
+    |> response.set_body(Bytes(bytes_tree.from_string("ok")))
+  }
+  let custom_csp = "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' ws: wss:"
+  let piped = middleware.pipeline([middleware.secure_headers_with_csp(custom_csp)], handler)
+  let req = make_request("GET", "/")
+  let resp = piped(req)
+  // Custom CSP is used
+  let assert Ok(csp) = response.get_header(resp, "content-security-policy")
+  let assert True = string.contains(csp, "https://fonts.googleapis.com")
+  let assert True = string.contains(csp, "https://fonts.gstatic.com")
+  // Other security headers are still set
+  let assert Ok("nosniff") = response.get_header(resp, "x-content-type-options")
+  let assert Ok("SAMEORIGIN") = response.get_header(resp, "x-frame-options")
+}
+
 // --- Request ID tests ---
 
 pub fn request_id_adds_header_test() {

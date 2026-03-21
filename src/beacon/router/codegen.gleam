@@ -334,6 +334,7 @@ fn generate_ssr_for_route(routes: List(RouteDefinition)) -> String {
     <> "      view: fn(_) { element.text(\"404 — Not Found\") },\n"
     <> "      secret_key: secret_key,\n"
     <> "      title: title <> \" — Not Found\",\n"
+    <> "      head_html: option.None,\n"
     <> "    ))"
 
   let all_arms = case arms {
@@ -382,6 +383,7 @@ fn generate_route_ssr_body(route: RouteDefinition) -> String {
     "        view: " <> alias <> ".view,\n",
     "        secret_key: secret_key,\n",
     "        title: title,\n",
+    "        head_html: option.None,\n",
     "      ))",
   ])
 }

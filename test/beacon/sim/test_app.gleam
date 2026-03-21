@@ -52,6 +52,7 @@ pub fn start_counter_app(
       dynamic_subscriptions: option.None,
       on_notify: option.None,
       security_limits: transport.default_security_limits(),
+      head_html: option.None,
     )
   application.start(config)
 }
@@ -100,6 +101,7 @@ pub fn start_ticker_app(
       dynamic_subscriptions: option.None,
       on_notify: option.None,
       security_limits: transport.default_security_limits(),
+      head_html: option.None,
     )
   application.start(config)
 }

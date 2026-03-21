@@ -31,6 +31,10 @@ pub type SsrConfig(model, msg) {
     secret_key: String,
     /// Application title for the HTML page.
     title: String,
+    /// Optional: extra HTML to inject into `<head>` (stylesheets, meta tags, etc.).
+    /// Rendered raw — caller is responsible for valid HTML.
+    /// Example: `"<link rel=\"stylesheet\" href=\"/static/styles.css\">"`.
+    head_html: Option(String),
   )
 }
 
@@ -71,7 +75,7 @@ pub fn render_page(config: SsrConfig(model, msg)) -> RenderedPage {
   let token = create_session_token(config.secret_key)
 
   // Step 4: Build full HTML document
-  let html = build_html_document(config.title, view_html, token)
+  let html = build_html_document(config.title, view_html, token, config.head_html)
 
   log.debug("beacon.ssr", "Dead render complete")
   RenderedPage(html: html, session_token: token)
@@ -114,7 +118,7 @@ pub fn render_page_for_path(
   let token = create_session_token(config.secret_key)
 
   // Step 5: Build HTML
-  let html = build_html_document(config.title, view_html, token)
+  let html = build_html_document(config.title, view_html, token, config.head_html)
 
   log.debug("beacon.ssr", "Route-aware render complete for: " <> path)
   RenderedPage(html: html, session_token: token)
@@ -201,7 +205,12 @@ fn build_html_document(
   title: String,
   view_html: String,
   session_token: String,
+  head_html: Option(String),
 ) -> String {
+  let extra_head = case head_html {
+    Some(html) -> html
+    None -> ""
+  }
   string.concat([
     "<!DOCTYPE html>",
     "<html><head>",
@@ -210,11 +219,7 @@ fn build_html_document(
     "<title>",
     escape_html(title),
     "</title>",
-    "<style>",
-    "body{font-family:system-ui,sans-serif;max-width:600px;margin:2rem auto}",
-    "button{font-size:1.5rem;padding:.5rem 1.5rem;margin:.25rem;cursor:pointer}",
-    ".counter{text-align:center}",
-    "</style>",
+    extra_head,
     "</head><body>",
     // TODO: The session token is embedded in a data attribute, which is readable
     // by any JS on the page (XSS risk). The proper fix is to use an HTTP-only cookie
@@ -235,13 +240,17 @@ fn build_html_document(
 
 /// Get the current client JS filename from the build manifest.
 /// The manifest is created by `gleam run -m beacon/build`.
+/// Resolves via `code:priv_dir(beacon)` so it works from consuming apps too.
 fn client_js_filename() -> String {
-  case simplifile.read("priv/static/beacon_client.manifest") {
+  let manifest_path = beacon_priv_path("static/beacon_client.manifest")
+  case simplifile.read(manifest_path) {
     Ok(name) -> string.trim(name)
     Error(err) -> {
       log.error(
         "beacon.ssr",
-        "FATAL: No beacon_client.manifest: "
+        "FATAL: No beacon_client.manifest at "
+          <> manifest_path
+          <> ": "
           <> string.inspect(err)
           <> " — client JS not built. Run `gleam run -m beacon/build`.",
       )
@@ -249,6 +258,18 @@ fn client_js_filename() -> String {
     }
   }
 }
+
+/// Resolve a path relative to Beacon's priv directory.
+/// Uses `code:priv_dir(beacon)` for correct resolution from consuming apps.
+pub fn beacon_priv_path(relative: String) -> String {
+  case ffi_priv_dir() {
+    Ok(dir) -> dir <> "/" <> relative
+    Error(_) -> "priv/" <> relative
+  }
+}
+
+@external(erlang, "beacon_ssr_ffi", "priv_dir")
+fn ffi_priv_dir() -> Result(String, String)
 
 /// Escape HTML special characters in text content.
 fn escape_html(text: String) -> String {

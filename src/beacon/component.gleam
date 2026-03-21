@@ -56,6 +56,8 @@ pub fn render(
 pub fn map_node(node: Node(a), f: fn(a) -> b) -> Node(b) {
   log.debug("beacon.component", "Mapping node messages to parent type")
   case node {
+    element.NoneNode -> element.NoneNode
+    element.RawHtml(html) -> element.RawHtml(html: html)
     element.TextNode(content) -> element.TextNode(content: content)
     element.ElementNode(tag, attributes, children) ->
       element.ElementNode(
