@@ -15,6 +15,21 @@ let appRoot = null;
 let hydrated = false;
 let eventClock = 0;
 
+// === Client-Side Event Rate Limiting ===
+let eventSendCount = 0;
+let eventSendWindowStart = 0;
+const MAX_EVENTS_PER_SECOND = 30;
+
+function isEventRateLimited() {
+  const now = Date.now();
+  if (now - eventSendWindowStart > 1000) {
+    eventSendCount = 0;
+    eventSendWindowStart = now;
+  }
+  eventSendCount++;
+  return eventSendCount > MAX_EVENTS_PER_SECOND;
+}
+
 // === Client-Side State (when BeaconApp is available) ===
 let clientModel = null;
 let clientLocal = null;
@@ -163,8 +178,9 @@ function startHeartbeat() { stopHeartbeat(); heartbeatTimer = setInterval(() => 
 function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } }
 function scheduleReconnect(wsUrl) {
   const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+  const jitter = Math.floor(Math.random() * 1000);
   reconnectAttempts++;
-  setTimeout(() => connect(wsUrl), delay);
+  setTimeout(() => connect(wsUrl), delay + jitter);
 }
 
 export function ws_send(data) { send(JSON.parse(data)); return undefined; }
@@ -182,7 +198,6 @@ function handleMessage(raw) {
     case "mount": handleMount(msg.payload); break;
     case "model_sync": handleModelSync(msg.model, msg.version); break;
     case "patch": handlePatch(msg.ops, msg.version); break;
-    case "server_fn_result": handleServerFnResult(msg.call_id, msg.result, msg.ok); break;
     case "navigate": handleServerNavigate(msg.path); break;
     case "reload": console.log("[beacon] Hot reload — refreshing..."); location.reload(); break;
     case "heartbeat_ack": break;
@@ -214,7 +229,7 @@ function handleModelSync(modelJson, version) {
       clientModel = result[0];
 
       // Cache JSON representation for future patch diffing
-      try { clientModelJson = JSON.parse(modelJson); } catch (e) { console.error("[beacon] Failed to parse cached model JSON:", e.message); clientModelJson = null; }
+      try { clientModelJson = JSON.parse(modelJson); } catch (e) { console.error("[beacon] Failed to parse cached model JSON:", e.message); console.warn("[beacon] Client patching disabled until next successful model_sync — JSON cache is null"); clientModelJson = null; }
 
       // Decode Local state if available
       if (App.decode_local) {
@@ -280,10 +295,12 @@ function handlePatch(opsJson, version) {
       console.log("[beacon] Patch applied v" + version + " (" + ops.length + " ops)");
     } else {
       console.error("[beacon] Patch decode failed, requesting full sync");
+      console.warn("[beacon] Client-server desync detected: patch decode failed, disabling client patching until next model_sync");
       clientModelJson = null;
     }
   } catch (e) {
     console.error("[beacon] Patch apply failed:", e);
+    console.warn("[beacon] Client-server desync detected: patch apply exception, disabling client patching until next model_sync");
     clientModelJson = null;
   }
 }
@@ -377,11 +394,19 @@ function dispatchEvent(eventName, hid, data, tp) {
   if (clientInitialized) {
     const r = handleEventLocally(hid, data, eventName, tp, eventClock);
     if (r.action === "send") {
+      if (isEventRateLimited()) {
+        console.warn("[beacon] Event rate limited (>" + MAX_EVENTS_PER_SECOND + "/s)");
+        return;
+      }
       const msg = { type: "event", name: eventName, handler_id: hid, data, target_path: tp, clock: eventClock };
       if (r.ops) msg.ops = r.ops;
       send(msg);
     }
   } else {
+    if (isEventRateLimited()) {
+      console.warn("[beacon] Event rate limited (>" + MAX_EVENTS_PER_SECOND + "/s)");
+      return;
+    }
     send({ type: "event", name: eventName, handler_id: hid, data, target_path: tp, clock: eventClock });
   }
 }
@@ -535,25 +560,6 @@ function getPath(node) {
   const parts = []; let c = node;
   while (c && c !== appRoot) { const p = c.parentNode; if (p) { const ch = p.childNodes; for (let i = 0; i < ch.length; i++) if (ch[i] === c) { parts.unshift(i); break; } } c = c.parentNode; }
   return parts.join(".");
-}
-
-// === Server Functions ===
-const pendingServerFns = {};
-let serverFnCounter = 0;
-
-export function call_server_fn(name, args, callback) {
-  const callId = "sf" + (serverFnCounter++);
-  pendingServerFns[callId] = callback;
-  send({ type: "server_fn", name: name, args: args, call_id: callId });
-  return undefined;
-}
-
-function handleServerFnResult(callId, result, ok) {
-  const cb = pendingServerFns[callId];
-  if (cb) {
-    delete pendingServerFns[callId];
-    cb(result, ok);
-  }
 }
 
 // === SPA Navigation ===
