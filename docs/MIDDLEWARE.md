@@ -24,6 +24,7 @@ let handler = middleware.pipeline(
 | `request_id()` | Generates a unique `x-request-id` response header |
 | `body_parser(max_bytes)` | Returns 413 if `Content-Length` exceeds `max_bytes` |
 | `cors(config)` | Sets CORS headers; handles preflight OPTIONS with 204 |
+| `secure_headers_with_csp(csp)` | Like `secure_headers()` but applies a custom CSP policy string |
 
 ## Scoping
 
@@ -53,6 +54,10 @@ fn require_api_key() -> middleware.Middleware {
   }
 }
 ```
+
+## Reading Request Bodies
+
+To read an HTTP request body manually (outside the middleware pipeline), use `transport_http.read_body(request, max_bytes)`. It returns `Result(BitArray, Nil)` and enforces the byte limit to prevent oversized payloads.
 
 ## Request Context
 

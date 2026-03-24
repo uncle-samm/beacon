@@ -21,6 +21,7 @@ Full-stack Gleam web framework on BEAM. MVU architecture, one process per sessio
 | `docs/ERROR_HANDLING.md` | Error types, recovery, user experience |
 | `docs/DEPLOYMENT.md` | Production config, Docker, health checks |
 | `docs/HTML_ELEMENTS.md` | Element helpers, attributes, events |
+| `docs/SVG.md` | SVG element helpers, attributes, namespaces |
 | `docs/TODO.md` | Issues and deferred items |
 
 ## Commands

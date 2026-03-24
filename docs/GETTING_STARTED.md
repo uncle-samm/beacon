@@ -56,9 +56,12 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
 pub fn main() {
   beacon.app(init, update, view)
   |> beacon.title("My Counter")
+  |> beacon.head_html("<link rel='stylesheet' href='/styles.css'>")
   |> beacon.start(8080)
 }
 ```
+
+`beacon.head_html(html_string)` injects custom content into the `<head>` of the SSR page -- use it for stylesheets, meta tags, fonts, or any other head content your app needs.
 
 ### 4. Run it
 

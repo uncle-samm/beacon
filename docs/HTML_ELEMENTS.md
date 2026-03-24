@@ -57,6 +57,24 @@ Defined in `beacon` (not `beacon/html`):
 | `on_dragover(Msg)` | dragover | Simple (preventDefault) |
 | `on_drop(fn(String) -> Msg)` | drop | Receives drag-id |
 
+## Special Elements
+
+| Function | Description |
+|----------|-------------|
+| `element.none()` | Returns an empty node that renders nothing |
+| `element.raw_html(html)` | Injects a raw HTML string without escaping |
+
+**`element.none()`** is used for conditional rendering:
+
+```gleam
+case show {
+  True -> element.text("visible")
+  False -> element.none()
+}
+```
+
+**`element.raw_html(html)`** injects pre-sanitized HTML directly into the DOM. **WARNING:** the caller must sanitize the input to prevent XSS -- this function performs no escaping. Use it for content that has already been sanitized, such as rendered markdown output.
+
 ## Example: Login Form
 
 ```gleam

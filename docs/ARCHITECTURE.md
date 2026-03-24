@@ -261,10 +261,15 @@ Element type, view helpers, middleware, and routing.
 src/
   beacon.gleam                  # Top-level API (AppBuilder, event helpers)
   beacon/
-    transport.gleam             # WebSocket, wire protocol, security
+    transport.gleam             # Transport orchestration, WS lifecycle, connection state
+    transport/
+      server.gleam            # HTTP/1.1 + WebSocket server on gen_tcp
+      http.gleam              # HTTP request parsing, response writing
+      ws.gleam                # WebSocket upgrade + frame encode/decode
     runtime.gleam               # MVU loop, OTP actor, state management
     element.gleam               # Node/Attr types, to_string
     html.gleam                  # HTML element helpers
+    svg.gleam                   # SVG element helpers and attributes
     view.gleam                  # Node -> Rendered splitting
     diff.gleam                  # VDOM tree diffing
     patch.gleam                 # JSON Patch for state deltas
@@ -314,7 +319,7 @@ examples/                       # 18 example apps (counter, chat, kanban, snake,
 test/                           # Tests mirroring src structure
 ```
 
-43 Gleam modules + 28 Erlang FFI files + 4 client JS/Gleam files.
+46 Gleam modules + 28 Erlang FFI files + 4 client JS/Gleam files.
 
 ## Design Patterns Implemented
 
