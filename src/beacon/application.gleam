@@ -131,10 +131,16 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
   {
     [_, ..], Some(_) -> {
       log.info("beacon.application", "Route-aware SSR enabled")
-      let factory = fn(path: String) {
+      let factory = fn(req: request.Request(server.Connection), path: String) {
+        // Use init_from_request if available — renders SSR with auth context
+        // (e.g., ws_init reads session cookie → model has auth_user → SSR shows Home)
+        let init_fn = case config.init_from_request {
+          Some(ifr) -> fn() { ifr(req) }
+          None -> config.init
+        }
         let page =
           ssr.render_page_for_path(
-            ssr_config,
+            ssr.SsrConfig(..ssr_config, init: init_fn),
             path,
             config.route_patterns,
             config.on_route_change,

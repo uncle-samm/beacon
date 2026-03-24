@@ -203,9 +203,10 @@ pub type TransportConfig {
     /// If set, runs before upgrade — returns Ok to allow, Error to reject with 401.
     ws_auth: Option(fn(Request(Connection)) -> Result(Nil, String)),
     /// Optional: SSR factory for route-aware server-side rendering.
-    /// Given a path, returns the HTML string for that route.
+    /// Given the HTTP request and path, returns the HTML string for that route.
+    /// The request is available for reading cookies, headers, etc.
     /// When set, HTTP requests use this instead of page_html.
-    ssr_factory: Option(fn(String) -> String),
+    ssr_factory: Option(fn(Request(Connection), String) -> String),
     /// Configurable security limits (message size, rate limiting, max connections).
     /// Defaults to `default_security_limits()`.
     security_limits: SecurityLimits,
@@ -1018,7 +1019,7 @@ fn route_framework_request(
                   serve_page_or_ssr(
                     config.page_html,
                     config.ssr_factory,
-                    req.path,
+                    req,
                   )
               }
             }
@@ -1026,7 +1027,7 @@ fn route_framework_request(
               serve_page_or_ssr(
                 config.page_html,
                 config.ssr_factory,
-                req.path,
+                req,
               )
           }
         }
@@ -1108,14 +1109,14 @@ fn check_middleware(
 // --- HTML/JS Serving ---
 
 /// Serve the HTML page. Checks: ssr_factory (route-aware), page_html (static SSR),
-/// then default page.
+/// then default page. The request is passed to the SSR factory for cookie/header access.
 fn serve_page_or_ssr(
   page_html: option.Option(String),
-  ssr_factory: option.Option(fn(String) -> String),
-  path: String,
+  ssr_factory: option.Option(fn(Request(Connection), String) -> String),
+  req: Request(Connection),
 ) -> response.Response(ResponseBody) {
   let html = case ssr_factory {
-    option.Some(factory) -> factory(path)
+    option.Some(factory) -> factory(req, req.path)
     option.None ->
       case page_html {
         option.Some(rendered) -> rendered

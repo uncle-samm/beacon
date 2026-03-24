@@ -194,6 +194,7 @@ function handleMessage(raw) {
   // crashing the entire client runtime. This is acceptable because a single
   // corrupt frame should not take down the WS connection.
   try { msg = JSON.parse(raw); } catch (e) { console.error("[beacon] Failed to parse server message:", e.message, raw.substring(0, 100)); return; }
+  if (msg.type === "mount") console.log("[beacon] Mount received, appRoot:", !!appRoot, "payload length:", msg.payload?.length);
   switch (msg.type) {
     case "mount": handleMount(msg.payload); break;
     case "model_sync": handleModelSync(msg.model, msg.version); break;
@@ -608,6 +609,8 @@ export function query_selector(sel) { const el = document.querySelector(sel); re
 export function log(msg) { console.log("[beacon]", msg); return undefined; }
 
 // === Auto-boot ===
+// When loaded as a script tag, auto-boot: find the app root, set up navigation, connect WS.
+// For base builds (no codec), this is the only entry point — initClientAfterBoot is never called.
 if (typeof document !== "undefined") {
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { boot("#beacon-app"); setupNavigation(); });
   else { boot("#beacon-app"); setupNavigation(); }

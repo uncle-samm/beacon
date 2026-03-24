@@ -901,7 +901,7 @@ pub fn start_router(
   }
 
   // Step 5: Create SSR factory
-  let ssr_factory = fn(path: String) -> String {
+  let ssr_factory = fn(_req: request.Request(Connection), path: String) -> String {
     case call_ssr_for_route(path, builder.title, builder.secret_key) {
       Ok(page) -> page.html
       Error(err) -> {
