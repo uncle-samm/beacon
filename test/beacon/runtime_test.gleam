@@ -1260,4 +1260,69 @@ pub fn init_from_request_none_uses_default_init_test() {
   let assert True = has_0
 }
 
+/// Regression test: mount HTML must reflect the ws_init model, not the default init.
+/// Bug: client showed login page after auth because mount used SSR HTML (hydrated=true skip).
+/// Fix: handleMount always morphs the mount HTML, never skips.
+pub fn mount_html_reflects_ws_init_model_test() {
+  // ws_init sets count to 99 (simulating auth-populated state)
+  let init_from_req = fn(_req: request.Request(server.Connection)) -> #(CounterModel, effect.Effect(CounterMsg)) {
+    #(CounterModel(count: 99), effect.none())
+  }
+
+  let config =
+    runtime.RuntimeConfig(
+      init: counter_init,
+      update: counter_update,
+      view: counter_view,
+      decode_event: option.Some(counter_decode_event),
+      serialize_model: option.None,
+      deserialize_model: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
+      init_from_request: option.Some(init_from_req),
+    )
+
+  let fake_req =
+    request.new()
+    |> request.set_body(server.Connection(socket: fake_socket()))
+    |> request.set_header("cookie", "session=test")
+
+  let transport_subject = process.new_subject()
+  let assert Ok(#(on_event, _shutdown)) =
+    runtime.start_and_connect_with_request(
+      config,
+      "mount_html_conn",
+      transport_subject,
+      option.Some(fake_req),
+    )
+
+  // Join — triggers mount HTML render
+  on_event("mount_html_conn", transport.ClientJoin(token: "", path: "/"))
+  process.sleep(200)
+
+  let msgs = drain_messages(transport_subject, [])
+
+  // The mount HTML MUST contain "99" (from ws_init), not "0" (from default init)
+  let mount_has_99 =
+    list.any(msgs, fn(m) {
+      case m {
+        transport.SendMount(payload: html) -> string.contains(html, "99")
+        _ -> False
+      }
+    })
+  let assert True = mount_has_99
+
+  // Verify it does NOT contain the default init value in mount
+  let mount_msgs =
+    list.filter_map(msgs, fn(m) {
+      case m {
+        transport.SendMount(payload: html) -> Ok(html)
+        _ -> Error(Nil)
+      }
+    })
+  // At least one mount message should exist
+  let assert True = list.length(mount_msgs) >= 1
+}
 

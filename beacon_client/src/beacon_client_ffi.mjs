@@ -208,13 +208,10 @@ function handleMessage(raw) {
 
 function handleMount(payload) {
   if (!appRoot) return;
-  if (hydrated) {
-    // SSR content already in DOM — just attach events and wait for model_sync
-    hydrated = false;
-    attachEvents();
-    return;
-  }
-  // Plain HTML from server — morph into DOM
+  // Always morph mount HTML into the DOM. The mount is authoritative —
+  // it reflects the ws_init model which may differ from SSR (e.g., auth state).
+  // SSR content was a quick first paint; the mount from the runtime replaces it.
+  hydrated = false;
   morphInnerHTML(appRoot, payload);
   attachEvents();
 }
