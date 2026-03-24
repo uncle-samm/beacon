@@ -54,7 +54,7 @@ pub fn subscriber_count_zero_test() {
 
 pub fn subscriber_count_after_join_test() {
   pubsub.start()
-  let topic = "count_test_topic"
+  let topic = "count_test_" <> unique_id()
   let _ =
     process.spawn(fn() {
       pubsub.subscribe(topic)
@@ -66,7 +66,7 @@ pub fn subscriber_count_after_join_test() {
 
 pub fn multiple_subscribers_count_test() {
   pubsub.start()
-  let topic = "multi_count_topic"
+  let topic = "multi_count_" <> unique_id()
   let _ =
     process.spawn(fn() {
       pubsub.subscribe(topic)

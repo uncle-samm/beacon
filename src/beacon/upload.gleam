@@ -118,9 +118,10 @@ pub fn format_size(bytes: Int) -> String {
   }
 }
 
-/// Sanitize a filename — remove directory traversal and special characters.
+/// Sanitize a filename — remove directory traversal, null bytes, and special characters.
 fn sanitize_filename(name: String) -> String {
   name
+  |> string.replace("\u{0000}", "")
   |> string.replace("..", "_")
   |> string.replace("/", "_")
   |> string.replace("\\", "_")

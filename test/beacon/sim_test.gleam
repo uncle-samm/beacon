@@ -232,9 +232,9 @@ pub fn sim_process_leak_test() {
   let procs_after = metrics.snapshot_processes()
 
   let assert True = result.succeeded > 0
-  // Process leak should be small (< 10 — connections must clean up properly)
+  // 200 connections with clean disconnect should leak <5 processes (timer cleanup delay)
   let leaked = procs_after - procs_before
-  let assert True = leaked < 10
+  let assert True = leaked < 5
   metrics.destroy(mt)
 }
 
@@ -501,7 +501,8 @@ pub fn sim_patch_efficiency_test() {
   let m = metrics.collect(mt)
   // Connection must succeed
   let assert True = result.succeeded == 1
-  // Should have received patches for events (optimization working)
+  // 10 events sent with WaitForResponse should produce ~10 patches (one per event).
+  // Threshold of 8 accounts for possible coalescing of rapid updates.
   let assert True = m.patches_received >= 8
   // Wire: bytes should be tracked
   let assert True = m.bytes_received > 0
@@ -731,9 +732,9 @@ pub fn sim_server_push_ticker_test() {
   let m = metrics.collect(mt)
   // Connection must succeed
   let assert True = result.succeeded == 1
-  // Should have received patches from server-initiated ticks (not just mount + model_sync)
-  // The ticker fires every 100ms, after 1s sleep we expect at least 3 patches
-  // (connection/join overhead eats into the 1s window)
+  // The ticker fires every 100ms; after 1s sleep we expect ~10 patches.
+  // Threshold of 3 accounts for connection/join overhead, test scheduling jitter,
+  // and concurrent test load consuming CPU time on the BEAM scheduler.
   let assert True = m.patches_received >= 3
 
   metrics.destroy(mt)

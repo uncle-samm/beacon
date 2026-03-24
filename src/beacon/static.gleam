@@ -131,9 +131,15 @@ fn serve_file(
 }
 
 /// Check if a path contains directory traversal sequences.
+/// Catches: "..", backslash, null bytes, and encoded traversal (%2e, %2f, %5c).
 pub fn contains_traversal(path: String) -> Bool {
+  let lower = string.lowercase(path)
   string.contains(path, "..")
   || string.contains(path, "\\")
+  || string.contains(path, "\u{0000}")
+  || string.contains(lower, "%2e")
+  || string.contains(lower, "%2f")
+  || string.contains(lower, "%5c")
 }
 
 /// Determine MIME type from file extension.

@@ -7,11 +7,59 @@
 
 ## Current Status
 
-**Active Milestone:** 84 — Replace Mist with Beacon Transport (COMPLETE)
-**Last Completed:** 84 — Replace Mist with Beacon Transport
+**Active Milestone:** 86 — ws_init Hook (COMPLETE)
+**Last Completed:** 86 — ws_init Hook (Request-Aware Server State)
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (634 tests passed, 0 failures)
+**Test Status:** GREEN (667 tests passed, 0 failures)
 **Linter:** PASSING (zero violations)
+
+### Milestone 86: ws_init Hook (Request-Aware Server State) ✅
+> Thread HTTP request from WS upgrade into runtime init. Add `beacon.ws_init(fn(Request) -> model)`
+> builder so session cookies can populate server state.
+
+- [x] Phase 1: Thread HTTP request through runtime factory — `runtime_factory` now accepts `Request(Connection)`
+- [x] Phase 2: `init_from_request` field on RuntimeConfig — `start_and_connect_with_request` uses it when available
+- [x] Phase 3: Wired through AppConfig and application.gleam
+- [x] Phase 4: `beacon.ws_init(fn(Request(Connection)) -> model)` builder function added
+- [x] Phase 5: Tests — `init_from_request_replaces_default_init_test` (reads cookie, sets count:42), `init_from_request_none_uses_default_init_test` (backwards compatible)
+- [x] Phase 6: All TransportConfig/RuntimeConfig constructors updated (runtime.gleam, beacon.gleam, codegen, todos, tests)
+- [x] `gleam build` — zero warnings
+- [x] `gleam test` — 666 tests passed, 0 failures
+
+**Architecture:** HTTP request flows: `handle_ws_request(socket, req, config)` → `ws.upgrade` → `start_ws_connection(socket, config, req)` → `factory(conn_id, subject, req)` → `start_and_connect_with_request(config, conn_id, subject, Some(req))` → if `init_from_request` set, replaces `config.init` with `fn() { init_fn(req) }`.
+
+### Milestone 85: API Routes, Cookies, ws_auth Builder ✅
+> Add REST API endpoint support, cookie read/write, and ws_auth builder for the Agent Harness app.
+> Needed for: OAuth callbacks, webhooks, session cookies, WebSocket auth.
+
+- [x] Add `api_handler` to TransportConfig — `Option(fn(Request(Connection)) -> Option(Response(ResponseBody)))`, runs BEFORE SSR/static
+- [x] Add `api_handler` to AppConfig — wire through to TransportConfig
+- [x] Add `beacon.api_routes(handler)` builder — registers API handler on AppBuilder
+- [x] Integrate API handler into `create_handler` — `try_api_handler` checks before `route_framework_request`
+- [x] Create `beacon/cookie.gleam` — `parse(req)`, `get(req, name)`, `set(resp, name, value, opts)`, `set_default`, `delete`
+- [x] Add `beacon.ws_auth(fn)` builder — wire through AppBuilder → AppConfig → TransportConfig
+- [x] Add `beacon.get_cookie(req, name)` convenience re-export
+- [x] Tests: API route handler serves custom responses (4 tests)
+- [x] Tests: API route handler falls through to SSR on None
+- [x] Tests: Cookie parsing and setting (11 tests)
+- [x] `gleam build` — zero warnings
+- [x] `gleam test` — 649 tests passed, 0 failures
+- [x] Form submit already works (verified: client JS has `onsubmit` delegation, element renders `data-beacon-event-submit`)
+
+**Files created:**
+- `src/beacon/cookie.gleam` — Cookie parse/set/delete utilities with secure defaults (HttpOnly, Secure, SameSite=Lax)
+- `test/beacon/cookie_test.gleam` — 11 tests for cookie parsing and setting
+- `test/beacon/api_route_test.gleam` — 4 tests for API route handler integration
+- `test/beacon_api_test_ffi.erl` — Raw TCP HTTP client for API tests
+
+**Files modified:**
+- `src/beacon.gleam` — AppBuilder: `api_handler`, `ws_auth` fields + builder functions + `get_cookie` helper
+- `src/beacon/application.gleam` — AppConfig: `api_handler`, `ws_auth` fields, wired to TransportConfig
+- `src/beacon/transport.gleam` — TransportConfig: `api_handler` field, `try_api_handler` + `route_framework_request` split
+- `src/beacon/runtime.gleam` — Both TransportConfig constructors: `api_handler: option.None`
+- `test/beacon/integration_test.gleam` — AppConfig: added new fields
+- `test/beacon/application_test.gleam` — AppConfig: added new fields
+- `test/beacon/sim/test_app.gleam` — AppConfig: added new fields (both constructors)
 
 ### Milestone 84: Replace Mist with Beacon Transport ✅
 > Replace Mist + Glisten (5,822 lines) with beacon/transport/server — our own minimal HTTP/WebSocket server using gen_tcp directly. Thundering herd regression test is the acceptance gate.
@@ -121,7 +169,7 @@
 - [x] docs/SECURITY.md — SecurityLimits, origin validation, rate limiting, CSP, tokens
 - [x] docs/DEPLOYMENT.md — env vars, Docker, health check, build step
 - [x] docs/MIDDLEWARE.md — pipeline, built-in middleware, scoping, custom middleware
-- [x] docs/EFFECTS.md — from, background, every, after, batch, server functions
+- [x] docs/EFFECTS.md — from, background, every, after, batch
 - [x] docs/COMPONENTS.md — Component type, render, map_node, composition
 - [x] docs/SERVER_FUNCTIONS.md — RPC registration, call/call_async/try_call/stream
 - [x] docs/STATE_MANAGEMENT.md — stores, PubSub, dynamic subscriptions, 3 state layers

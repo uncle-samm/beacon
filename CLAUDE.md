@@ -12,8 +12,8 @@ Full-stack Gleam web framework on BEAM. MVU architecture, one process per sessio
 | `docs/TIGERSTYLE.md` | Full TigerStyle engineering principles |
 | `docs/SECURITY.md` | SecurityLimits, origin validation, rate limiting, CSP, tokens |
 | `docs/FILE_BASED_ROUTING.md` | Route files, dynamic params, codegen |
-| `docs/WIRE_PROTOCOL.md` | All 12 WebSocket message types with JSON examples |
-| `docs/EFFECTS.md` | Effects, timers, server functions, async patterns |
+| `docs/WIRE_PROTOCOL.md` | All 13 WebSocket message types with JSON examples |
+| `docs/EFFECTS.md` | Effects, timers, async patterns |
 | `docs/MIDDLEWARE.md` | HTTP middleware pipeline, scoping, built-ins |
 | `docs/STATE_MANAGEMENT.md` | Stores, PubSub, dynamic subscriptions |
 | `docs/COMPONENTS.md` | Composable MVU units |

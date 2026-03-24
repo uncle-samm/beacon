@@ -173,6 +173,15 @@ pub fn encode_navigate_message_test() {
     json.parse(encoded, decode.at(["path"], decode.string))
 }
 
+pub fn encode_hard_navigate_message_test() {
+  let msg = transport.ServerHardNavigate(path: "/auth/session/abc")
+  let encoded = transport.encode_server_message(msg)
+  let assert Ok("hard_navigate") =
+    json.parse(encoded, decode.at(["type"], decode.string))
+  let assert Ok("/auth/session/abc") =
+    json.parse(encoded, decode.at(["path"], decode.string))
+}
+
 pub fn encode_reload_message_test() {
   let msg = transport.ServerReload
   let encoded = transport.encode_server_message(msg)
@@ -237,6 +246,42 @@ fn repeat_a(n: Int) -> String {
   }
 }
 
+// --- ClientEventBatch tests ---
+
+pub fn decode_client_event_batch_test() {
+  let raw =
+    "{\"type\":\"event_batch\",\"events\":[{\"name\":\"click\",\"handler_id\":\"inc\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":1},{\"name\":\"input\",\"handler_id\":\"search\",\"data\":\"{\\\"value\\\":\\\"hi\\\"}\",\"target_path\":\"0.2\",\"clock\":2}]}"
+  let assert Ok(transport.ClientEventBatch(events: events)) =
+    transport.decode_client_message(raw)
+  let assert 2 = list.length(events)
+  // Verify first event
+  let assert [
+    transport.ClientEvent(
+      name: "click",
+      handler_id: "inc",
+      data: "{}",
+      target_path: "0",
+      clock: 1,
+      ops: "",
+    ),
+    transport.ClientEvent(
+      name: "input",
+      handler_id: "search",
+      data: _,
+      target_path: "0.2",
+      clock: 2,
+      ops: "",
+    ),
+  ] = events
+}
+
+pub fn decode_client_event_batch_empty_test() {
+  let raw = "{\"type\":\"event_batch\",\"events\":[]}"
+  let assert Ok(transport.ClientEventBatch(events: events)) =
+    transport.decode_client_message(raw)
+  let assert 0 = list.length(events)
+}
+
 // --- Round-trip test ---
 
 pub fn encode_decode_roundtrip_consistency_test() {
@@ -248,6 +293,7 @@ pub fn encode_decode_roundtrip_consistency_test() {
     transport.ServerHeartbeatAck,
     transport.ServerError(reason: "test error"),
     transport.ServerNavigate(path: "/foo"),
+    transport.ServerHardNavigate(path: "/hard"),
     transport.ServerReload,
   ]
   list.each(messages, fn(msg) {

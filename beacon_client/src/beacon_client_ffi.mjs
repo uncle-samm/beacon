@@ -199,6 +199,7 @@ function handleMessage(raw) {
     case "model_sync": handleModelSync(msg.model, msg.version); break;
     case "patch": handlePatch(msg.ops, msg.version); break;
     case "navigate": handleServerNavigate(msg.path); break;
+    case "hard_navigate": handleServerHardNavigate(msg.path); break;
     case "reload": console.log("[beacon] Hot reload — refreshing..."); location.reload(); break;
     case "heartbeat_ack": break;
     case "error": console.error("[beacon] Server error:", msg.reason); break;
@@ -313,6 +314,22 @@ function handleServerNavigate(path) {
   }
 }
 
+// Hard navigation — full page reload via window.location.href.
+// Used when the browser needs to make a real HTTP request (e.g., to receive Set-Cookie headers).
+function handleServerHardNavigate(path) {
+  if (!path) {
+    console.warn("[beacon] Hard navigate: received empty path from server");
+    return;
+  }
+  // SECURITY: Only allow relative paths to prevent open redirect attacks.
+  // Absolute URLs (https://evil.com), javascript: and data: protocols are rejected.
+  if (path.startsWith("/")) {
+    window.location.href = path;
+  } else {
+    console.error("[beacon] Hard navigate rejected: path must start with / (got:", path, ")");
+  }
+}
+
 // === Rendered Format ===
 
 // === DOM Morphing ===
@@ -333,14 +350,16 @@ function morphInnerHTML(container, html) {
   if (focusedTag === "INPUT" || focusedTag === "TEXTAREA" || focusedTag === "SELECT") {
     let restored = null;
     if (focusedName) {
-      restored = container.querySelector(`[name="${focusedName}"]`) ||
-                 container.querySelector(`[data-beacon-event-input="${focusedName}"]`);
+      // SECURITY: Use CSS.escape to prevent selector injection from attribute values
+      const safeName = CSS.escape(focusedName);
+      restored = container.querySelector(`[name="${safeName}"]`) ||
+                 container.querySelector(`[data-beacon-event-input="${safeName}"]`);
     }
     if (!restored && focused.type) {
       // Fallback: find by type and placeholder
       const placeholder = focused.getAttribute("placeholder");
       if (placeholder) {
-        restored = container.querySelector(`${focusedTag}[placeholder="${placeholder}"]`);
+        restored = container.querySelector(`${focusedTag}[placeholder="${CSS.escape(placeholder)}"]`);
       }
     }
     if (restored && restored !== document.activeElement) {
@@ -569,7 +588,7 @@ function setupNavigation() {
     const a = e.target.closest("a[href]");
     if (!a) return;
     // Only intercept same-origin links without data-beacon-external
-    if (a.hostname !== location.hostname) return;
+    if (a.hostname.toLowerCase() !== location.hostname.toLowerCase()) return;
     if (a.hasAttribute("data-beacon-external")) return;
     if (a.target === "_blank") return;
 

@@ -158,12 +158,12 @@ pub fn raw_html(html: String) -> Node(msg) {
   RawHtml(html: html)
 }
 
-/// Create a text node.
+/// Create a text node. Content is automatically HTML-escaped.
 pub fn text(content: String) -> Node(msg) {
   TextNode(content: content)
 }
 
-/// Create an element node.
+/// Create an HTML element with the given tag, attributes, and children.
 pub fn el(
   tag: String,
   attributes: List(Attr),
@@ -172,12 +172,12 @@ pub fn el(
   ElementNode(tag: tag, attributes: attributes, children: children)
 }
 
-/// Create an HTML attribute.
+/// Create an HTML attribute (key-value pair).
 pub fn attr(name: String, value: String) -> Attr {
   HtmlAttr(name: name, value: value)
 }
 
-/// Create an event handler attribute.
+/// Create an event handler attribute. Prefer beacon.on_click(), beacon.on_input(), etc.
 pub fn on(event_name: String, handler_id: String) -> Attr {
   EventAttr(event_name: event_name, handler_id: handler_id)
 }

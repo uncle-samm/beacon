@@ -91,6 +91,8 @@ const max_timers = 10
 /// The timer runs in a separate BEAM process and continues until the runtime shuts down.
 /// Capped at 10 concurrent timers per runtime — additional timers are rejected with a warning.
 ///
+/// Note: each call creates a NEW timer. Guard against duplicate calls in update.
+///
 /// Reference: Phoenix LiveView `Process.send_after` in `handle_info`.
 ///
 /// Example:

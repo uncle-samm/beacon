@@ -139,3 +139,88 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
 }
 
 import beacon/build/analyzer
+
+// === Cookie Header Injection Tests ===
+
+import beacon/cookie
+import gleam/http/response
+
+pub fn cookie_value_newline_stripped_test() {
+  // CVE: newlines in cookie values enable header injection
+  // Fix: sanitize_cookie_value strips \r, \n, \0
+  let resp =
+    response.new(200)
+    |> cookie.set_default("session", "abc\r\nSet-Cookie: admin=true")
+  let assert Ok(header_val) = find_header(resp.headers, "set-cookie")
+  // Newlines must be stripped — no header injection possible
+  let assert False = string.contains(header_val, "\r")
+  let assert False = string.contains(header_val, "\n")
+  // After stripping CRLF, the injected text is harmless — it's part of the
+  // cookie VALUE, not a separate Set-Cookie header. The security fix is that
+  // without \r\n, the browser cannot split this into multiple headers.
+  let assert True = string.contains(header_val, "session=abc")
+}
+
+pub fn cookie_value_null_byte_stripped_test() {
+  let resp =
+    response.new(200)
+    |> cookie.set_default("tok", "abc\u{0000}def")
+  let assert Ok(header_val) = find_header(resp.headers, "set-cookie")
+  let assert True = string.contains(header_val, "tok=abcdef")
+  let assert False = string.contains(header_val, "\u{0000}")
+}
+
+pub fn cookie_name_newline_stripped_test() {
+  let resp =
+    response.new(200)
+    |> cookie.set_default("bad\r\nname", "value")
+  let assert Ok(header_val) = find_header(resp.headers, "set-cookie")
+  let assert False = string.contains(header_val, "\r")
+  let assert False = string.contains(header_val, "\n")
+}
+
+fn find_header(
+  headers: List(#(String, String)),
+  name: String,
+) -> Result(String, Nil) {
+  case headers {
+    [] -> Error(Nil)
+    [#(k, v), ..rest] ->
+      case k == name {
+        True -> Ok(v)
+        False -> find_header(rest, name)
+      }
+  }
+}
+
+// === Static File Traversal Tests ===
+
+import beacon/static
+
+pub fn traversal_encoded_dots_rejected_test() {
+  // CVE: %2e%2e/ bypasses simple ".." check
+  let assert True = static.contains_traversal("%2e%2e/etc/passwd")
+}
+
+pub fn traversal_encoded_slash_rejected_test() {
+  // CVE: %2f bypasses simple "/" check
+  let assert True = static.contains_traversal("..%2fetc%2fpasswd")
+}
+
+pub fn traversal_encoded_backslash_rejected_test() {
+  let assert True = static.contains_traversal("..%5cwindows%5csystem32")
+}
+
+pub fn traversal_null_byte_rejected_test() {
+  let assert True = static.contains_traversal("file\u{0000}.txt")
+}
+
+pub fn traversal_case_insensitive_encoding_test() {
+  // %2E is uppercase version of %2e
+  let assert True = static.contains_traversal("%2E%2E/etc/passwd")
+}
+
+pub fn traversal_clean_path_allowed_test() {
+  let assert False = static.contains_traversal("/css/style.css")
+  let assert False = static.contains_traversal("/images/logo.png")
+}

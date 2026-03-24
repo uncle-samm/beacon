@@ -59,8 +59,8 @@ ws_connect(Host, Port, Attempt) ->
 %% Delays: 200ms, 400ms, 600ms. Real browsers use exponential backoff + jitter.
 maybe_retry(_Host, _Port, Attempt, Reason) when Attempt >= 3 ->
     {error, Reason};
-maybe_retry(Host, Port, Attempt, Reason) ->
-    io:format("[beacon_http_client] WS connect attempt ~p failed: ~s, retrying...~n", [Attempt, Reason]),
+maybe_retry(Host, Port, Attempt, _Reason) ->
+    %% Silent retry — normal during test startup when server isn't ready yet
     timer:sleep(Attempt * 200),
     ws_connect(Host, Port, Attempt + 1).
 

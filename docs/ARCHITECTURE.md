@@ -12,7 +12,7 @@ WebSocket via Beacon's gen_tcp server, one BEAM actor per connection.
 
 **Wire protocol:**
 - 5 `ClientMessage` variants: `ClientEvent`, `ClientHeartbeat`, `ClientJoin`, `ClientNavigate`, `ClientEventBatch`
-- 7 `ServerMessage` variants: `ServerMount`, `ServerHeartbeatAck`, `ServerError`, `ServerModelSync`, `ServerPatch`, `ServerNavigate`, `ServerReload`
+- 8 `ServerMessage` variants: `ServerMount`, `ServerHeartbeatAck`, `ServerError`, `ServerModelSync`, `ServerPatch`, `ServerNavigate`, `ServerHardNavigate`, `ServerReload`
 
 **Security (`SecurityLimits`):**
 - Per-connection rate limiting: 50 events/sec (configurable)
@@ -23,7 +23,8 @@ WebSocket via Beacon's gen_tcp server, one BEAM actor per connection.
 
 **`TransportConfig`** ties it together: port, on_connect/on_event/on_disconnect callbacks,
 optional SSR factory, middleware pipeline, static file config, runtime factory for
-per-connection runtime spawning, and security limits.
+per-connection runtime spawning, optional API route handler (for custom route handling before SSR),
+and security limits.
 
 ### 2. Runtime (`src/beacon/runtime.gleam`)
 
@@ -53,9 +54,11 @@ On WebSocket reconnect, the token restores model state without re-running init.
 - `TextNode(content)` — text content
 - `ElementNode(tag, attributes, children)` — HTML element
 - `MemoNode(key, deps, child)` — memoized subtree (skips re-render when deps match)
+- `NoneNode` — empty node for conditional rendering
+- `RawHtml(html)` — raw HTML content (pre-sanitized only)
 - `Attr`: `HtmlAttr(name, value)` or `EventAttr(event_name, handler_id)`
 
-**`html.gleam`** — 30+ element helpers (`div`, `span`, `p`, `h1`-`h6`, `ul`, `li`,
+**`html.gleam`** — 54 element helpers and attribute builders (`div`, `span`, `p`, `h1`-`h6`, `ul`, `li`,
 `button`, `input`, `form`, `table`, `canvas`, `select`, `option`, etc.).
 
 **`view.gleam`** — Converts a `Node` tree into a `Rendered` struct by splitting
@@ -192,6 +195,7 @@ Files: `beacon_client.gleam` (Gleam types), `beacon_client_ffi.mjs` (JS runtime)
 - **`pubsub.gleam`** — Erlang `pg`-based publish/subscribe. `subscribe(topic)`, `unsubscribe(topic)`, `broadcast(topic, message)`. Works across distributed BEAM nodes.
 - **`store.gleam`** — ETS-backed shared stores: `Store` (key-value) and `ListStore` (bag-type). Auto-broadcast via PubSub on mutation (`put`, `delete`, `push`). Use `beacon.watch(store, fn() -> msg)` to subscribe.
 - **`session.gleam`** — Cookie-based sessions stored in ETS with TTL.
+- **`cookie.gleam`** — Cookie parsing and setting utilities (parse, get, set, delete with secure defaults).
 
 ### Build Tooling
 - **`build.gleam`** — Client JS codegen: `gleam run -m beacon/build`. Compiles user Gleam to JS client bundle. Auto-builds before starting examples.
@@ -319,7 +323,7 @@ examples/                       # 18 example apps (counter, chat, kanban, snake,
 test/                           # Tests mirroring src structure
 ```
 
-46 Gleam modules + 28 Erlang FFI files + 4 client JS/Gleam files.
+48 Gleam modules + 28 Erlang FFI files + 4 client JS/Gleam files.
 
 ## Design Patterns Implemented
 

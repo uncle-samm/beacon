@@ -61,6 +61,15 @@ Beacon communicates over WebSocket at `/ws` using JSON messages with a `type` di
 {"type": "navigate", "path": "/dashboard"}
 ```
 
+### hard_navigate (server → client)
+Full page navigation via `window.location.href`. Unlike `navigate` (which uses pushState),
+this triggers a real HTTP request — use when the browser needs to receive HTTP headers
+(e.g., Set-Cookie after login).
+
+```json
+{"type": "hard_navigate", "path": "/api/auth/session/TOKEN"}
+```
+
 **reload** -- Dev mode: tells browser to reload.
 ```json
 {"type": "reload"}
