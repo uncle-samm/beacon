@@ -3,10 +3,17 @@ import beacon/element
 import beacon/error
 import beacon/runtime
 import beacon/transport
+import beacon/transport/server
 import gleam/erlang/process
+import gleam/http/request
 import gleam/int
 import gleam/list
 import gleam/option
+import gleam/string
+
+/// Create a fake socket for testing (nil wrapped as Socket type).
+@external(erlang, "beacon_runtime_test_ffi", "fake_socket")
+fn fake_socket() -> server.Socket
 
 // --- Test helpers ---
 
@@ -70,6 +77,7 @@ fn counter_config() -> runtime.RuntimeConfig(CounterModel, CounterMsg) {
       route_patterns: [],
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
+      init_from_request: option.None,
   )
 }
 
@@ -310,6 +318,7 @@ pub fn runtime_effect_dispatches_message_test() {
       route_patterns: [],
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
+      init_from_request: option.None,
     )
 
   let assert Ok(subject) = runtime.start(config)
@@ -375,6 +384,7 @@ pub fn runtime_survives_view_crash_test() {
       route_patterns: [],
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
+      init_from_request: option.None,
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -464,6 +474,7 @@ pub fn state_recovery_from_token_test() {
       route_patterns: [],
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
+      init_from_request: option.None,
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -560,8 +571,6 @@ pub fn state_recovery_from_token_test() {
   }
 }
 
-import gleam/string
-
 pub fn model_sync_sent_after_event_test() {
   // Runtime with serialize_model should send model_sync after events
   let config =
@@ -577,6 +586,7 @@ pub fn model_sync_sent_after_event_test() {
       route_patterns: [],
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
+      init_from_request: option.None,
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -863,6 +873,7 @@ pub fn server_state_not_in_model_sync_test() {
       on_route_change: option.None,
       dynamic_subscriptions: option.None,
       on_notify: option.None,
+      init_from_request: option.None,
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -1049,4 +1060,204 @@ pub fn connection_isolation_test() {
     let assert True = string.contains(json, "\"count\":0")
   })
 }
+
+/// Verify that on_update_effect wrapping works: the chained effect is
+/// actually invoked by the runtime when an event triggers an update.
+/// This tests the same wrapping pattern used by beacon.on_update().
+pub fn on_update_effect_is_invoked_test() {
+  // Create a Subject that on_update_effect will send to, proving it ran
+  let proof_subject = process.new_subject()
+
+  // Wrap update the same way start_validated does: chain on_update_effect after base
+  let on_update_fn = fn(model: CounterModel, _msg: CounterMsg) {
+    // This effect proves on_update was called — sends the new count
+    effect.from(fn(_dispatch) {
+      process.send(proof_subject, model.count)
+    })
+  }
+  let wrapped_update = fn(model: CounterModel, msg: CounterMsg) {
+    let #(new_model, base_effect) = counter_update(model, msg)
+    let extra_effect = on_update_fn(new_model, msg)
+    #(new_model, effect.batch([base_effect, extra_effect]))
+  }
+
+  // Create config with the wrapped update
+  let config =
+    runtime.RuntimeConfig(
+      init: counter_init,
+      update: wrapped_update,
+      view: counter_view,
+      decode_event: option.Some(counter_decode_event),
+      serialize_model: option.Some(fn(model: CounterModel) {
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
+      deserialize_model: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
+      init_from_request: option.None,
+    )
+  let assert Ok(subject) = runtime.start(config)
+  let transport_subject = process.new_subject()
+
+  // Connect
+  process.send(
+    subject,
+    runtime.ClientConnected(conn_id: "on_update_conn", subject: transport_subject),
+  )
+  process.sleep(50)
+
+  // Join
+  process.send(
+    subject,
+    runtime.ClientJoined(conn_id: "on_update_conn", token: "", path: "/"),
+  )
+  process.sleep(50)
+
+  // Send an event — this should trigger update AND on_update_effect
+  process.send(
+    subject,
+    runtime.ClientEventReceived(
+      conn_id: "on_update_conn",
+      event_name: "click",
+      handler_id: "increment",
+      event_data: "{}",
+      target_path: "0",
+      clock: 1,
+      ops: "",
+    ),
+  )
+
+  // Wait for the on_update_effect to fire
+  case process.receive(proof_subject, 2000) {
+    Ok(count) -> {
+      // on_update_effect was called with the NEW model (count=1)
+      let assert True = count == 1
+    }
+    Error(Nil) -> {
+      // on_update_effect was NEVER called — this is the bug
+      panic as "on_update_effect was not invoked by the runtime"
+    }
+  }
+}
+
+/// Verify that init_from_request replaces the default init when provided.
+/// This tests the core of ws_init: the runtime uses init_from_request(req)
+/// instead of init() when both are available.
+pub fn init_from_request_replaces_default_init_test() {
+  // Create a fake request with a cookie
+  // Use request.set_body to give it the Connection type
+  let fake_req =
+    request.new()
+    |> request.set_body(server.Connection(socket: fake_socket()))
+    |> request.set_header("cookie", "user_id=42")
+
+  // Default init creates count:0
+  // init_from_request reads cookie and creates count based on user_id
+  let init_from_req = fn(req: request.Request(server.Connection)) -> #(CounterModel, effect.Effect(CounterMsg)) {
+    case request.get_header(req, "cookie") {
+      Ok(cookie_val) -> {
+        // Parse "user_id=42" → use 42 as initial count
+        case string.split(cookie_val, "=") {
+          [_, val] ->
+            case int.parse(val) {
+              Ok(n) -> #(CounterModel(count: n), effect.none())
+              Error(Nil) -> #(CounterModel(count: -1), effect.none())
+            }
+          _ -> #(CounterModel(count: -1), effect.none())
+        }
+      }
+      Error(Nil) -> #(CounterModel(count: -1), effect.none())
+    }
+  }
+
+  let config =
+    runtime.RuntimeConfig(
+      init: counter_init,
+      update: counter_update,
+      view: counter_view,
+      decode_event: option.Some(counter_decode_event),
+      serialize_model: option.Some(fn(model: CounterModel) {
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
+      deserialize_model: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
+      init_from_request: option.Some(init_from_req),
+    )
+
+  // Use start_and_connect_with_request which should use init_from_request
+  let transport_subject = process.new_subject()
+  let assert Ok(#(on_event, _shutdown)) =
+    runtime.start_and_connect_with_request(
+      config,
+      "ws_init_conn",
+      transport_subject,
+      option.Some(fake_req),
+    )
+
+  // Send ClientJoin to trigger mount — the runtime will send back model state
+  on_event("ws_init_conn", transport.ClientJoin(token: "", path: "/"))
+  process.sleep(200)
+
+  // Drain the transport subject for messages
+  let msgs = drain_messages(transport_subject, [])
+  // Look for a model_sync or mount containing "42" (the count from cookie)
+  let has_42 =
+    list.any(msgs, fn(m) {
+      case m {
+        transport.SendModelSync(model_json: json, ..) ->
+          string.contains(json, "\"count\":42")
+        transport.SendMount(payload: p) -> string.contains(p, "42")
+        _ -> False
+      }
+    })
+  let assert True = has_42
+}
+
+/// Without init_from_request, the default init is used (count:0).
+pub fn init_from_request_none_uses_default_init_test() {
+  let config =
+    runtime.RuntimeConfig(
+      init: counter_init,
+      update: counter_update,
+      view: counter_view,
+      decode_event: option.Some(counter_decode_event),
+      serialize_model: option.Some(fn(model: CounterModel) {
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
+      deserialize_model: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
+      init_from_request: option.None,
+    )
+
+  // start_and_connect (no request) should use default init (count:0)
+  let transport_subject = process.new_subject()
+  let assert Ok(#(on_event, _shutdown)) =
+    runtime.start_and_connect(
+      config,
+      "default_init_conn",
+      transport_subject,
+    )
+  on_event("default_init_conn", transport.ClientJoin(token: "", path: "/"))
+  process.sleep(200)
+  let msgs = drain_messages(transport_subject, [])
+  let has_0 =
+    list.any(msgs, fn(m) {
+      case m {
+        transport.SendModelSync(model_json: json, ..) ->
+          string.contains(json, "\"count\":0")
+        transport.SendMount(payload: p) -> string.contains(p, "0")
+        _ -> False
+      }
+    })
+  let assert True = has_0
+}
+
 

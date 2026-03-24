@@ -87,8 +87,11 @@ pub type ServerMessage {
   /// Incremental model patch — only changed fields.
   /// Client applies ops to its cached model JSON instead of replacing entirely.
   ServerPatch(ops_json: String, version: Int, ack_clock: Int)
-  /// Server-initiated navigation (redirect).
+  /// Server-initiated navigation (redirect via pushState).
   ServerNavigate(path: String)
+  /// Server-initiated hard navigation (full page reload via window.location.href).
+  /// Use when the browser needs to make a real HTTP request (e.g., to receive Set-Cookie).
+  ServerHardNavigate(path: String)
   /// Dev mode: tell browser to reload.
   ServerReload
 }
@@ -104,8 +107,10 @@ pub type InternalMessage {
   SendModelSync(model_json: String, version: Int, ack_clock: Int)
   /// Send incremental model patch to the client.
   SendPatch(ops_json: String, version: Int, ack_clock: Int)
-  /// Send navigation redirect to the client.
+  /// Send navigation redirect to the client (pushState).
   SendNavigate(path: String)
+  /// Send hard navigation to the client (full page reload).
+  SendHardNavigate(path: String)
   // --- TCP/WebSocket events (internal to transport layer) ---
   /// Raw TCP data received — needs WebSocket frame decoding.
   ReceivedTcpData(data: BitArray)
@@ -186,8 +191,9 @@ pub type TransportConfig {
     /// If set, each WebSocket connection gets its OWN runtime (like LiveView).
     /// The factory returns callbacks for this specific connection's runtime.
     /// If None, uses the shared on_connect/on_event/on_disconnect callbacks.
+    /// The factory receives the HTTP request so ws_init can read cookies/headers.
     runtime_factory: Option(
-      fn(ConnectionId, process.Subject(InternalMessage)) ->
+      fn(ConnectionId, process.Subject(InternalMessage), Request(Connection)) ->
         #(
           fn(ConnectionId, ClientMessage) -> Nil,
           fn(ConnectionId) -> Nil,
@@ -203,6 +209,13 @@ pub type TransportConfig {
     /// Configurable security limits (message size, rate limiting, max connections).
     /// Defaults to `default_security_limits()`.
     security_limits: SecurityLimits,
+    /// Optional: API route handler — runs BEFORE SSR/static file routing.
+    /// If it returns Some(response), that response is sent immediately.
+    /// If it returns None, the request falls through to normal routing.
+    api_handler: Option(
+      fn(Request(Connection)) ->
+        Option(response.Response(ResponseBody)),
+    ),
   )
 }
 
@@ -272,6 +285,12 @@ pub fn encode_server_message(msg: ServerMessage) -> String {
     ServerNavigate(path) ->
       json.object([
         #("type", json.string("navigate")),
+        #("path", json.string(path)),
+      ])
+      |> json.to_string
+    ServerHardNavigate(path) ->
+      json.object([
+        #("type", json.string("hard_navigate")),
         #("path", json.string(path)),
       ])
       |> json.to_string
@@ -742,15 +761,21 @@ fn ws_loop_inner(
       send_ws_message(state, ServerNavigate(path: path))
       ws_loop_inner(state, selector)
     }
+    SendHardNavigate(path) -> {
+      send_ws_message(state, ServerHardNavigate(path: path))
+      ws_loop_inner(state, selector)
+    }
   }
 }
 
 /// Start a WebSocket connection on an already-upgraded socket.
 /// Creates the connection state, sets up runtime, and enters the frame loop.
 /// This function runs in the handler process and never returns.
+/// The HTTP request is passed through so ws_init can read cookies/headers.
 fn start_ws_connection(
   socket: Socket,
   config: TransportConfig,
+  req: Request(Connection),
 ) -> Nil {
   let conn_id = generate_connection_id()
   log.info("beacon.transport", "New connection: " <> conn_id)
@@ -761,7 +786,7 @@ fn start_ws_connection(
   // Otherwise fall back to shared callbacks
   let #(conn_on_event, conn_on_close) = case config.runtime_factory {
     Some(factory) -> {
-      let #(evt_handler, close_handler) = factory(conn_id, subject)
+      let #(evt_handler, close_handler) = factory(conn_id, subject, req)
       #(evt_handler, close_handler)
     }
     None -> {
@@ -895,7 +920,7 @@ fn handle_ws_request(
               case ws.upgrade(socket, req) {
                 Ok(Nil) -> {
                   // Upgrade succeeded — enter the WS frame loop
-                  start_ws_connection(socket, config)
+                  start_ws_connection(socket, config, req)
                 }
                 Error(reason) -> {
                   log.error(
@@ -916,70 +941,97 @@ fn handle_ws_request(
 // --- HTTP Handler ---
 
 /// Create the HTTP handler for non-WebSocket requests.
-/// Handles: static files, client JS, health check, SSR pages.
+/// Handles: API routes, static files, client JS, health check, SSR pages.
+/// API handler runs first — if it returns Some(response), that's used.
+/// Otherwise falls through to static files, beacon_client.js, health, SSR.
 pub fn create_handler(
   config: TransportConfig,
 ) -> fn(Request(Connection)) -> response.Response(ResponseBody) {
   let core_handler = fn(req: Request(Connection)) {
-    case request.path_segments(req) {
-      ["beacon_client.js"] -> serve_client_js()
-      ["health"] -> {
-        response.new(200)
-        |> response.set_header("content-type", "application/json")
-        |> response.set_body(
-          Bytes(bytes_tree.from_string("{\"status\":\"ok\"}")),
-        )
-      }
-      _ -> {
-        let path = req.path
-        case
-          string.starts_with(path, "/beacon_client_")
-          && string.ends_with(path, ".js")
-        {
-          True -> {
-            let name = string.drop_start(path, 1)
-            serve_hashed_client_js(name)
-          }
-          False -> {
-            case config.static_config {
-              Some(static_cfg) -> {
-                let if_none_match = case
-                  request.get_header(req, "if-none-match")
-                {
-                  Ok(val) -> val
-                  Error(Nil) -> ""
-                }
-                case
-                  static.serve_with_etag_check(
-                    static_cfg,
-                    req.path,
-                    if_none_match,
-                  )
-                {
-                  Ok(resp) -> resp
-                  Error(Nil) ->
-                    serve_page_or_ssr(
-                      config.page_html,
-                      config.ssr_factory,
-                      req.path,
-                    )
-                }
-              }
-              None ->
-                serve_page_or_ssr(
-                  config.page_html,
-                  config.ssr_factory,
-                  req.path,
-                )
-            }
-          }
-        }
-      }
+    // Try API handler first — user-defined routes take priority
+    case try_api_handler(config.api_handler, req) {
+      Some(resp) -> resp
+      None -> route_framework_request(config, req)
     }
   }
   case config.middlewares {
     [] -> core_handler
     mws -> middleware.pipeline(mws, core_handler)
+  }
+}
+
+/// Try the API handler if configured. Returns Some(response) if handled, None to fall through.
+fn try_api_handler(
+  api_handler: Option(
+    fn(Request(Connection)) -> Option(response.Response(ResponseBody)),
+  ),
+  req: Request(Connection),
+) -> Option(response.Response(ResponseBody)) {
+  case api_handler {
+    Some(handler) -> handler(req)
+    None -> None
+  }
+}
+
+/// Route a request through framework handlers: beacon_client.js, health, static, SSR.
+fn route_framework_request(
+  config: TransportConfig,
+  req: Request(Connection),
+) -> response.Response(ResponseBody) {
+  case request.path_segments(req) {
+    ["beacon_client.js"] -> serve_client_js()
+    ["health"] -> {
+      response.new(200)
+      |> response.set_header("content-type", "application/json")
+      |> response.set_body(
+        Bytes(bytes_tree.from_string("{\"status\":\"ok\"}")),
+      )
+    }
+    _ -> {
+      let path = req.path
+      case
+        string.starts_with(path, "/beacon_client_")
+        && string.ends_with(path, ".js")
+      {
+        True -> {
+          let name = string.drop_start(path, 1)
+          serve_hashed_client_js(name)
+        }
+        False -> {
+          case config.static_config {
+            Some(static_cfg) -> {
+              let if_none_match = case
+                request.get_header(req, "if-none-match")
+              {
+                Ok(val) -> val
+                Error(Nil) -> ""
+              }
+              case
+                static.serve_with_etag_check(
+                  static_cfg,
+                  req.path,
+                  if_none_match,
+                )
+              {
+                Ok(resp) -> resp
+                Error(Nil) ->
+                  serve_page_or_ssr(
+                    config.page_html,
+                    config.ssr_factory,
+                    req.path,
+                  )
+              }
+            }
+            None ->
+              serve_page_or_ssr(
+                config.page_html,
+                config.ssr_factory,
+                req.path,
+              )
+          }
+        }
+      }
+    }
   }
 }
 

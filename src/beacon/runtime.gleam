@@ -13,6 +13,8 @@ import beacon/patch
 import beacon/pubsub
 import beacon/route
 import beacon/transport
+import beacon/transport/server
+import gleam/http/request
 
 /// Cached serialized state for diffing.
 /// When substates are detected, each is tracked independently to skip unchanged diffs.
@@ -155,6 +157,12 @@ pub type RuntimeConfig(model, msg) {
     /// Called when a PubSub notification arrives on a dynamically subscribed topic.
     /// Receives the topic string so the handler can distinguish between sources.
     on_notify: option.Option(fn(String) -> msg),
+    /// Optional: request-aware init — replaces `init` when the HTTP request is available.
+    /// Used by ws_init to pass cookies/headers into server state initialization.
+    /// If set and a request is provided, this is used instead of `init`.
+    init_from_request: option.Option(
+      fn(request.Request(server.Connection)) -> #(model, Effect(msg)),
+    ),
   )
 }
 
@@ -1370,6 +1378,7 @@ pub fn connect_transport_with_ssr(
     ws_auth: option.None,
     ssr_factory: option.None,
     security_limits: transport.default_security_limits(),
+    api_handler: option.None,
   )
 }
 
@@ -1392,11 +1401,37 @@ pub fn start_and_connect(
   ),
   error.BeaconError,
 ) {
+  start_and_connect_with_request(config, conn_id, transport_subject, option.None)
+}
+
+/// Start a per-connection runtime with access to the HTTP request.
+/// When `req` is Some and `config.init_from_request` is set, uses the
+/// request-aware init instead of the static init function.
+pub fn start_and_connect_with_request(
+  config: RuntimeConfig(model, msg),
+  conn_id: transport.ConnectionId,
+  transport_subject: process.Subject(transport.InternalMessage),
+  req: option.Option(request.Request(server.Connection)),
+) -> Result(
+  #(
+    fn(transport.ConnectionId, transport.ClientMessage) -> Nil,
+    fn() -> Nil,
+  ),
+  error.BeaconError,
+) {
   log.info(
     "beacon.runtime",
     "Spawning runtime for " <> conn_id,
   )
-  case start(config) {
+  // Use init_from_request if both the request and the callback are available
+  let effective_config = case req, config.init_from_request {
+    Some(r), Some(init_fn) -> {
+      log.debug("beacon.runtime", "Using request-aware init for " <> conn_id)
+      RuntimeConfig(..config, init: fn() { init_fn(r) })
+    }
+    _, _ -> config
+  }
+  case start(effective_config) {
     Ok(runtime_subject) -> {
       // Register this connection with the new runtime
       process.send(
@@ -1503,8 +1538,9 @@ pub fn connect_transport_per_connection(
     runtime_factory: option.Some(fn(
       conn_id: transport.ConnectionId,
       transport_subject: process.Subject(transport.InternalMessage),
+      req: request.Request(server.Connection),
     ) {
-      case start_and_connect(config, conn_id, transport_subject) {
+      case start_and_connect_with_request(config, conn_id, transport_subject, option.Some(req)) {
         Ok(#(on_event, shutdown)) -> {
           let on_disconnect = fn(_cid: transport.ConnectionId) {
             shutdown()
@@ -1527,6 +1563,7 @@ pub fn connect_transport_per_connection(
     ws_auth: option.None,
     ssr_factory: option.None,
     security_limits: transport.default_security_limits(),
+    api_handler: option.None,
   )
 }
 

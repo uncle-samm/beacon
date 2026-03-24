@@ -7,7 +7,11 @@ import beacon/element
 import beacon/error
 import beacon/middleware
 import beacon/transport
+import beacon/transport/server.{type Connection, Bytes}
+import gleam/bytes_tree
 import gleam/erlang/process
+import gleam/http/request
+import gleam/http/response
 import gleam/int
 import gleam/option
 import gleam/string
@@ -53,6 +57,9 @@ fn test_app_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     dynamic_subscriptions: option.None, on_notify: option.None,
     security_limits: transport.default_security_limits(),
     head_html: option.None,
+    api_handler: option.None,
+    ws_auth: option.None,
+    init_from_request: option.None,
   )
 }
 
@@ -60,7 +67,7 @@ fn test_app_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
 
 pub fn http_get_root_returns_200_with_ssr_html_test() {
   start_httpc()
-  let port = 11_000 + unique_port()
+  let port = 11_000 + unique_port_offset()
   let assert Ok(_app) = application.start(test_app_config(port))
   process.sleep(100)
 
@@ -74,7 +81,7 @@ pub fn http_get_root_returns_200_with_ssr_html_test() {
 
 pub fn http_get_beacon_js_returns_javascript_test() {
   start_httpc()
-  let port = 11_100 + unique_port()
+  let port = 12_000 + unique_port_offset()
   let assert Ok(_app) = application.start(test_app_config(port))
   process.sleep(100)
 
@@ -88,7 +95,7 @@ pub fn http_get_beacon_js_returns_javascript_test() {
 
 pub fn http_get_has_security_headers_test() {
   start_httpc()
-  let port = 11_200 + unique_port()
+  let port = 13_000 + unique_port_offset()
   let assert Ok(_app) = application.start(test_app_config(port))
   process.sleep(100)
 
@@ -103,7 +110,7 @@ pub fn http_get_has_security_headers_test() {
 
 pub fn ws_connect_and_receive_mount_test() {
   start_httpc()
-  let port = 11_300 + unique_port()
+  let port = 14_000 + unique_port_offset()
   let assert Ok(_app) = application.start(test_app_config(port))
   process.sleep(100)
 
@@ -113,14 +120,14 @@ pub fn ws_connect_and_receive_mount_test() {
   let assert Ok(Nil) = ws_send(socket, "{\"type\":\"join\"}")
   // Receive mount response
   let assert Ok(response) = ws_recv(socket, 3000)
-  // Response should be a JSON mount message containing "count:0"
-  let assert True = string.contains(response, "mount")
+  // Response should be a JSON mount message with type field
+  let assert True = string.contains(response, "\"type\":\"mount\"")
   ws_close(socket)
 }
 
 pub fn ws_50_concurrent_connections_test() {
   start_httpc()
-  let port = 11_400 + unique_port()
+  let port = 15_000 + unique_port_offset()
   let assert Ok(_app) = application.start(test_app_config(port))
   process.sleep(200)
 
@@ -139,7 +146,7 @@ pub fn ws_50_concurrent_connections_test() {
 
 pub fn two_connections_have_independent_state_test() {
   start_httpc()
-  let port = 11_600 + unique_port()
+  let port = 17_000 + unique_port_offset()
   let assert Ok(_app) = application.start(test_app_config(port))
   process.sleep(200)
 
@@ -181,7 +188,7 @@ pub fn two_connections_have_independent_state_test() {
 
 pub fn auth_middleware_blocks_ws_upgrade_test() {
   start_httpc()
-  let port = 11_500 + unique_port()
+  let port = 16_000 + unique_port_offset()
   // Create an app with an auth middleware that always rejects
   let auth_mw = fn(_req, _next) {
     gleam_http_response_new(401)
@@ -203,6 +210,96 @@ pub fn auth_middleware_blocks_ws_upgrade_test() {
   let assert Ok(#(ws_status, _headers2, _body2)) =
     http_get("http://localhost:" <> int.to_string(port) <> "/ws")
   let assert 401 = ws_status
+}
+
+// ===== API Handler Integration Tests =====
+
+pub fn api_handler_serves_json_test() {
+  start_httpc()
+  let port = 18_000 + unique_port_offset()
+  let api_handler = fn(req: request.Request(Connection)) {
+    case request.path_segments(req) {
+      ["api", "test"] ->
+        option.Some(
+          response.new(200)
+          |> response.set_header("content-type", "application/json")
+          |> response.set_body(
+            Bytes(bytes_tree.from_string("{\"ok\":true}")),
+          ),
+        )
+      _ -> option.None
+    }
+  }
+  let config =
+    application.AppConfig(
+      ..test_app_config(port),
+      api_handler: option.Some(api_handler),
+    )
+  let assert Ok(_app) = application.start(config)
+  process.sleep(100)
+
+  let assert Ok(#(status, _headers, body)) =
+    http_get("http://localhost:" <> int.to_string(port) <> "/api/test")
+  let assert 200 = status
+  let assert True = string.contains(body, "{\"ok\":true}")
+}
+
+pub fn api_handler_fallthrough_to_ssr_test() {
+  start_httpc()
+  let port = 19_000 + unique_port_offset()
+  // API handler that only handles /api/* — everything else falls through
+  let api_handler = fn(req: request.Request(Connection)) {
+    case request.path_segments(req) {
+      ["api", ..] ->
+        option.Some(
+          response.new(200)
+          |> response.set_header("content-type", "application/json")
+          |> response.set_body(
+            Bytes(bytes_tree.from_string("{\"api\":true}")),
+          ),
+        )
+      _ -> option.None
+    }
+  }
+  let config =
+    application.AppConfig(
+      ..test_app_config(port),
+      api_handler: option.Some(api_handler),
+    )
+  let assert Ok(_app) = application.start(config)
+  process.sleep(100)
+
+  // Root path should fall through to SSR
+  let assert Ok(#(status, _headers, body)) =
+    http_get("http://localhost:" <> int.to_string(port) <> "/")
+  let assert 200 = status
+  // SSR page should contain rendered content, not API JSON
+  let assert True = string.contains(body, "count:0")
+  let assert True = string.contains(body, "Integration Test")
+}
+
+// ===== WebSocket Auth Integration Tests =====
+
+pub fn ws_auth_rejects_unauthorized_test() {
+  start_httpc()
+  let port = 20_000 + unique_port_offset()
+  // ws_auth that always rejects
+  let ws_auth = fn(_req: request.Request(Connection)) {
+    Error("not allowed")
+  }
+  let config =
+    application.AppConfig(
+      ..test_app_config(port),
+      ws_auth: option.Some(ws_auth),
+    )
+  let assert Ok(_app) = application.start(config)
+  process.sleep(100)
+
+  // WebSocket upgrade to /ws should be rejected with 401
+  // Use http_get on /ws — ws_auth runs before upgrade, returns 401 HTTP response
+  let assert Ok(#(status, _headers, _body)) =
+    http_get("http://localhost:" <> int.to_string(port) <> "/ws")
+  let assert 401 = status
 }
 
 // ===== Helpers =====
@@ -242,7 +339,7 @@ fn spawn_ws_clients(
           }
         })
       // Small delay to avoid overwhelming the server
-      process.sleep(5)
+      process.sleep(20)
       spawn_ws_clients(remaining - 1, port, result)
     }
   }
@@ -285,7 +382,7 @@ fn has_header(
   }
 }
 
-fn unique_port() -> Int {
+fn unique_port_offset() -> Int {
   abs(erlang_unique_pos()) % 500
 }
 

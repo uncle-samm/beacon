@@ -44,6 +44,7 @@ pub fn start_for_route(
         server_fns: dict.new(),
         dynamic_subscriptions: option.None,
         on_notify: option.None,
+        init_from_request: option.None,
       )
       runtime.start_and_connect(config, conn_id, transport_subject)
     }
@@ -60,6 +61,7 @@ pub fn start_for_route(
         server_fns: dict.new(),
         dynamic_subscriptions: option.None,
         on_notify: option.None,
+        init_from_request: option.None,
       )
       runtime.start_and_connect(config, conn_id, transport_subject)
     }
@@ -76,6 +78,7 @@ pub fn start_for_route(
         server_fns: dict.new(),
         dynamic_subscriptions: option.None,
         on_notify: option.None,
+        init_from_request: option.None,
       )
       runtime.start_and_connect(config, conn_id, transport_subject)
     }
@@ -92,6 +95,7 @@ pub fn start_for_route(
         server_fns: dict.new(),
         dynamic_subscriptions: option.None,
         on_notify: option.None,
+        init_from_request: option.None,
       )
       runtime.start_and_connect(config, conn_id, transport_subject)
     }

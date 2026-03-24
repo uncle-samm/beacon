@@ -44,6 +44,9 @@ fn test_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     dynamic_subscriptions: option.None, on_notify: option.None,
     security_limits: transport.default_security_limits(),
     head_html: option.None,
+    api_handler: option.None,
+    ws_auth: option.None,
+    init_from_request: option.None,
   )
 }
 

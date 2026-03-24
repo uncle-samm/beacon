@@ -313,6 +313,7 @@ fn generate_route_start_body(route: RouteDefinition) -> String {
     "        on_route_change: option.None,\n",
     "        dynamic_subscriptions: option.None,\n",
     "        on_notify: option.None,\n",
+    "        init_from_request: option.None,\n",
     "      )\n",
     "      runtime.start_and_connect(config, conn_id, transport_subject)",
   ])

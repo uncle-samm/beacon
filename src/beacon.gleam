@@ -21,6 +21,7 @@ import beacon/router/codegen as router_codegen
 import beacon/router/manager as route_manager
 import beacon/router/scanner as router_scanner
 import beacon/static
+import beacon/transport/server.{type Connection, type ResponseBody}
 
 /// A node in the virtual DOM tree. Re-exported from `beacon/element`.
 pub type Node(msg) =
@@ -33,6 +34,8 @@ import beacon/runtime
 import beacon/ssr
 import beacon/transport
 import gleam/erlang/process
+import gleam/http/request
+import gleam/http/response
 import gleam/list
 import gleam/int
 import gleam/option.{type Option, None, Some}
@@ -122,6 +125,20 @@ pub fn broadcast(topic: String) -> Nil {
   pubsub.broadcast(topic, Nil)
 }
 
+// ===== Cookie Helpers =====
+// Convenience re-exports from beacon/cookie for common use in ws_auth and api_routes.
+
+import beacon/cookie
+
+/// Get a cookie value from a request by name.
+/// Shorthand for `beacon/cookie.get(req, name)`.
+pub fn get_cookie(
+  req: request.Request(body),
+  name: String,
+) -> Result(String, Nil) {
+  cookie.get(req, name)
+}
+
 // ===== App Builder =====
 
 /// An app being configured. Use `app()` to create, then pipe through
@@ -157,6 +174,22 @@ pub opaque type AppBuilder(model, msg) {
     security_limits: transport.SecurityLimits,
     /// Optional: extra HTML to inject into `<head>` (stylesheets, meta tags, etc.).
     head_html: Option(String),
+    /// Optional: API route handler — runs BEFORE SSR/static file routing.
+    /// If it returns Some(response), that response is sent immediately.
+    /// If it returns None, the request falls through to SSR/static serving.
+    api_handler: Option(
+      fn(request.Request(Connection)) ->
+        Option(response.Response(ResponseBody)),
+    ),
+    /// Optional: WebSocket authentication function.
+    /// Runs before WS upgrade — Ok allows, Error(reason) rejects with 401.
+    ws_auth: Option(fn(request.Request(Connection)) -> Result(Nil, String)),
+    /// Optional: request-aware server state initializer.
+    /// Replaces init_server with a function that receives the HTTP request,
+    /// so it can read cookies, headers, etc. to populate server state.
+    ws_init: Option(
+      fn(request.Request(Connection)) -> model,
+    ),
   )
 }
 
@@ -190,6 +223,9 @@ pub fn app(
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
     head_html: None,
+    api_handler: None,
+    ws_auth: None,
+    ws_init: None,
   )
 }
 
@@ -220,6 +256,9 @@ pub fn app_with_effects(
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
     head_html: None,
+    api_handler: None,
+    ws_auth: None,
+    ws_init: None,
   )
 }
 
@@ -271,6 +310,9 @@ pub fn app_with_local(
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
     head_html: None,
+    api_handler: None,
+    ws_auth: None,
+    ws_init: None,
   )
 }
 
@@ -328,6 +370,9 @@ pub fn app_with_server(
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
     head_html: None,
+    api_handler: None,
+    ws_auth: None,
+    ws_init: None,
   )
 }
 
@@ -352,6 +397,83 @@ pub fn head_html(
   html: String,
 ) -> AppBuilder(model, msg) {
   AppBuilder(..builder, head_html: Some(html))
+}
+
+/// Register an API route handler.
+/// The handler runs BEFORE SSR/static file routing on every HTTP request.
+/// Return `Some(response)` to handle the request, `None` to fall through.
+///
+/// Use `beacon/transport/http.read_body(req, max_bytes)` to read POST bodies.
+///
+/// ```gleam
+/// import gleam/http
+/// import gleam/http/request
+/// import gleam/http/response
+/// import gleam/option.{None, Some}
+/// import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
+///
+/// beacon.app(init, update, view)
+/// |> beacon.api_routes(fn(req) {
+///   case req.method, request.path_segments(req) {
+///     http.Post, ["api", "login"] -> Some(handle_login(req))
+///     http.Get, ["api", "status"] -> Some(json_ok())
+///     _, _ -> None
+///   }
+/// })
+/// |> beacon.start(8080)
+/// ```
+pub fn api_routes(
+  builder: AppBuilder(model, msg),
+  handler: fn(request.Request(Connection)) ->
+    Option(response.Response(ResponseBody)),
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, api_handler: Some(handler))
+}
+
+/// Set WebSocket authentication.
+/// Runs before the WebSocket upgrade handshake — can read cookies, headers, etc.
+/// Return `Ok(Nil)` to allow the connection, `Error(reason)` to reject with 401.
+///
+/// ```gleam
+/// beacon.app(init, update, view)
+/// |> beacon.ws_auth(fn(req) {
+///   case beacon.get_cookie(req, "session_token") {
+///     Ok(token) -> validate_session(token)
+///     Error(Nil) -> Error("No session cookie")
+///   }
+/// })
+/// |> beacon.start(8080)
+/// ```
+pub fn ws_auth(
+  builder: AppBuilder(model, msg),
+  auth_fn: fn(request.Request(Connection)) -> Result(Nil, String),
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, ws_auth: Some(auth_fn))
+}
+
+/// Set a request-aware server state initializer.
+/// Replaces both `init` and `init_server` with a function that receives the HTTP request
+/// from the WebSocket upgrade, so it can read cookies, headers, query params, etc.
+///
+/// Use with `app_with_server` to populate server state from session cookies:
+///
+/// ```gleam
+/// beacon.app_with_server(init, init_server, update, view)
+/// |> beacon.ws_init(fn(req) {
+///   case beacon.get_cookie(req, "session_token") {
+///     Ok(token) -> #(Model, ServerState(user_id: validate(token), ..))
+///     Error(Nil) -> #(Model, ServerState(user_id: None, ..))
+///   }
+/// })
+/// |> beacon.start(8080)
+/// ```
+///
+/// When set, `ws_init` replaces the default init entirely.
+pub fn ws_init(
+  builder: AppBuilder(model, msg),
+  init_fn: fn(request.Request(Connection)) -> model,
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, ws_init: Some(init_fn))
 }
 
 /// Set a model encoder for model_sync.
@@ -393,13 +515,14 @@ pub fn on_route_change(
   AppBuilder(..builder, on_route_change: Some(handler))
 }
 
-/// Create a redirect effect — navigates the client to a new URL.
+/// Create a redirect effect — navigates the client to a new URL via pushState.
 /// Use this in update to redirect after login, logout, etc.
 /// The effect sends a ServerNavigate message to ONLY the triggering client
 /// (not broadcast to all connections).
+/// Must be called within an effect context (inside update).
+/// SECURITY: Only use with validated paths. Never pass raw user input.
 pub fn redirect(path: String) -> effect.Effect(msg) {
   effect.from(fn(_dispatch) {
-    // Send redirect to the specific connection that triggered this effect
     case runtime.get_redirect_target() {
       option.Some(subject) ->
         process.send(
@@ -410,6 +533,39 @@ pub fn redirect(path: String) -> effect.Effect(msg) {
         log.debug(
           "beacon",
           "No redirect target available (effect ran outside connection context)",
+        )
+        Nil
+      }
+    }
+  })
+}
+
+/// Create a hard redirect effect — navigates via window.location.href (full page reload).
+/// Unlike `redirect` (which uses pushState), this triggers a real HTTP request.
+/// Use when the browser needs to receive HTTP headers (e.g., Set-Cookie after login).
+/// SECURITY: Only relative paths (starting with /) are allowed by the client.
+///
+/// ```gleam
+/// fn update(model, server, msg) {
+///   case msg {
+///     LoginSuccess(token) ->
+///       #(model, server, beacon.hard_redirect("/api/auth/session/" <> token))
+///     _ -> #(model, server, effect.none())
+///   }
+/// }
+/// ```
+pub fn hard_redirect(path: String) -> effect.Effect(msg) {
+  effect.from(fn(_dispatch) {
+    case runtime.get_redirect_target() {
+      option.Some(subject) ->
+        process.send(
+          subject,
+          transport.SendHardNavigate(path: path),
+        )
+      option.None -> {
+        log.debug(
+          "beacon",
+          "No hard_redirect target available (effect ran outside connection context)",
         )
         Nil
       }
@@ -600,6 +756,13 @@ fn start_validated(
       on_notify: builder.on_notify,
       security_limits: builder.security_limits,
       head_html: builder.head_html,
+      api_handler: builder.api_handler,
+      ws_auth: builder.ws_auth,
+      init_from_request: case builder.ws_init {
+        Some(ws_init_fn) ->
+          Some(fn(req) { #(ws_init_fn(req), effect.none()) })
+        None -> None
+      },
     )
   case application.start(config) {
     Ok(_app) -> {
@@ -773,6 +936,7 @@ pub fn start_router(
       runtime_factory: Some(fn(
         conn_id: transport.ConnectionId,
         transport_subject: process.Subject(transport.InternalMessage),
+        _req: request.Request(Connection),
       ) {
         route_manager.start(conn_id, transport_subject, dispatcher)
       }),
@@ -782,6 +946,7 @@ pub fn start_router(
       ws_auth: None,
       ssr_factory: Some(ssr_factory),
       security_limits: builder.security_limits,
+      api_handler: None,
     )
 
   case transport.start(transport_config) {
@@ -821,6 +986,7 @@ fn auto_generate_routes(routes_dir: String) -> Nil {
                 "beacon",
                 "Routes generation failed: " <> error.to_string(err),
               )
+              Nil
             }
           }
           case router_codegen.generate_dispatcher(routes, "src/generated/route_dispatcher.gleam") {
@@ -836,14 +1002,17 @@ fn auto_generate_routes(routes_dir: String) -> Nil {
                 "beacon",
                 "Dispatcher generation failed: " <> error.to_string(err),
               )
+              Nil
             }
           }
         }
-        Error(err) ->
+        Error(err) -> {
           log.error(
             "beacon",
             "Route scanning failed: " <> error.to_string(err),
           )
+          Nil
+        }
       }
     }
     _ -> {
@@ -881,36 +1050,78 @@ fn do_list_append(a: List(x), b: List(x)) -> List(x)
 @external(erlang, "beacon_auto_build_ffi", "hot_reload_codec")
 fn hot_reload_codec() -> Nil
 
-/// Auto-build client JS and codec if not already built.
-/// Generates beacon_codec.gleam and compiles it, then builds the JS bundle.
+/// Build client JS if not already built or if source changed.
+///
+/// Two modes based on app structure:
+/// 1. Apps with Model/Msg/update/view in one file → builds codec + runtime (local events work)
+/// 2. Apps with split files or app_with_server → builds runtime only (server-rendered)
+///
+/// Both modes produce the same runtime (WS, morphing, events, navigation).
+/// The only difference is whether client-side model encoding is available.
 fn auto_build_client_js() -> Nil {
-  case simplifile.is_file("priv/static/beacon_client.manifest") {
-    Ok(True) -> {
-      log.info("beacon", "Client JS already built")
+  case client_js_is_fresh() {
+    True -> {
+      log.info("beacon", "Client JS up to date")
       Nil
     }
-    _ -> {
-      log.info("beacon", "Auto-building client JS...")
+    False -> {
+      log.info("beacon", "Building client JS...")
+      // Try codec build first (single-file apps with Model/Msg)
       build.auto_build()
-      // Recompile and hot-reload the codec into the running BEAM
-      let _ = build.run_gleam_build()
-      hot_reload_codec()
-      Nil
+      case simplifile.is_file("priv/static/beacon_client.manifest") {
+        Ok(True) -> {
+          let _ = build.run_gleam_build()
+          hot_reload_codec()
+          Nil
+        }
+        _ -> {
+          // No scannable app module (multi-file, app_with_server, etc.)
+          log.info(
+            "beacon",
+            "No single-file Model/Msg found — building runtime-only client JS",
+          )
+          build.build_base_client()
+          Nil
+        }
+      }
     }
   }
 }
+
+/// Check if the client JS bundle is fresh (manifest exists and is newer than source).
+fn client_js_is_fresh() -> Bool {
+  case simplifile.is_file("priv/static/beacon_client.manifest") {
+    Ok(True) -> {
+      // Manifest exists — check if beacon source has been updated since last build.
+      // Compare manifest mtime against beacon_client_ffi.mjs mtime.
+      case is_source_newer_than_manifest() {
+        True -> {
+          log.info("beacon", "Client JS source changed — rebuilding")
+          False
+        }
+        False -> True
+      }
+    }
+    _ -> False
+  }
+}
+
+/// Check if the beacon client FFI source is newer than the manifest.
+/// Uses Erlang file:read_file_info to compare modification times.
+@external(erlang, "beacon_build_ffi", "is_source_newer_than_manifest")
+fn is_source_newer_than_manifest() -> Bool
 
 /// Build the base client JS for routed apps.
 /// Unlike auto_build_client_js, this builds ONLY the base runtime
 /// (WebSocket, morphing, event delegation) WITHOUT app-specific codecs.
 /// Each route has different Model/Msg types, so a global codec would be wrong.
 fn auto_build_base_client_js() -> Nil {
-  case simplifile.is_file("priv/static/beacon_client.manifest") {
-    Ok(True) -> {
+  case client_js_is_fresh() {
+    True -> {
       log.info("beacon", "Client JS already built")
       Nil
     }
-    _ -> {
+    False -> {
       log.info("beacon", "Building base client JS for router...")
       build.build_base_client()
       Nil

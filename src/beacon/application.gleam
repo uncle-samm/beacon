@@ -16,11 +16,15 @@ import beacon/ssr
 import beacon/state_manager
 import beacon/static
 import beacon/transport
+import beacon/transport/server.{type Connection, type ResponseBody}
 import gleam/erlang/process
+import gleam/http/request.{type Request}
+import gleam/http/response
 import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/otp/static_supervisor as supervisor
+import gleam/string
 import gleam/otp/supervision
 
 /// Configuration for starting a Beacon application.
@@ -64,6 +68,21 @@ pub type AppConfig(model, msg) {
     /// Optional: extra HTML to inject into `<head>` (stylesheets, meta tags, etc.).
     /// Example: `Some("<link rel=\"stylesheet\" href=\"/static/styles.css\">")`
     head_html: Option(String),
+    /// Optional: API route handler — runs BEFORE SSR/static file routing.
+    /// If it returns Some(response), that response is sent immediately.
+    /// If it returns None, the request falls through to SSR/static serving.
+    api_handler: Option(
+      fn(Request(Connection)) ->
+        Option(response.Response(ResponseBody)),
+    ),
+    /// Optional: WebSocket authentication function.
+    /// Runs before WS upgrade — Ok allows, Error(reason) rejects with 401.
+    ws_auth: Option(fn(Request(Connection)) -> Result(Nil, String)),
+    /// Optional: request-aware init — replaces init when HTTP request is available.
+    /// Used by ws_init to pass cookies/headers into server state initialization.
+    init_from_request: Option(
+      fn(Request(Connection)) -> #(model, effect.Effect(msg)),
+    ),
   )
 }
 
@@ -145,6 +164,7 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       on_route_change: config.on_route_change,
       dynamic_subscriptions: config.dynamic_subscriptions,
       on_notify: config.on_notify,
+      init_from_request: config.init_from_request,
     )
 
   // Create transport with per-connection runtime factory
@@ -170,6 +190,8 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       static_config: static_cfg,
       security_limits: config.security_limits,
       ssr_factory: ssr_factory,
+      api_handler: config.api_handler,
+      ws_auth: config.ws_auth,
     )
   case transport.start(transport_config) {
     Ok(transport_pid) -> {
@@ -229,12 +251,12 @@ pub fn start_supervised(
         Error(err) -> Error(err)
       }
     }
-    Error(_err) -> {
+    Error(err) -> {
       log.error(
         "beacon.application",
-        "Failed to start supervisor",
+        "Failed to start supervisor: " <> string.inspect(err),
       )
-      Error(error.ConfigError(reason: "Supervisor start failed"))
+      Error(error.ConfigError(reason: "Supervisor start failed: " <> string.inspect(err)))
     }
   }
 }

@@ -53,6 +53,9 @@ pub fn start_counter_app(
       on_notify: option.None,
       security_limits: transport.default_security_limits(),
       head_html: option.None,
+      api_handler: option.None,
+      ws_auth: option.None,
+      init_from_request: option.None,
     )
   application.start(config)
 }
@@ -102,6 +105,9 @@ pub fn start_ticker_app(
       on_notify: option.None,
       security_limits: transport.default_security_limits(),
       head_html: option.None,
+      api_handler: option.None,
+      ws_auth: option.None,
+      init_from_request: option.None,
     )
   application.start(config)
 }
