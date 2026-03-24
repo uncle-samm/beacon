@@ -81,7 +81,7 @@ pub type App {
 /// Creates a supervision tree:
 /// - State manager (ETS-backed)
 /// - Runtime (MVU loop actor)
-/// - Transport (HTTP + WebSocket via Mist)
+/// - Transport (HTTP + WebSocket via beacon/transport/server)
 ///
 /// Uses `one_for_one` strategy: if one child crashes, only that child restarts.
 pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {

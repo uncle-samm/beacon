@@ -66,7 +66,7 @@ pub type EnumTypeInfo {
 }
 
 /// A computed field — a server-side derived value from Model.
-/// Detected by @computed attribute on public functions.
+/// Detected automatically: public functions with signature fn(Model) -> T.
 /// Computed values are included in model_sync JSON but NOT in client encode_model.
 pub type ComputedField {
   ComputedField(

@@ -169,9 +169,9 @@ For production, use `gleam run` directly — no file watcher, no HMR overhead.
 
 The build system automatically strips server-only code from the client JS bundle. Three mechanisms keep secrets server-side:
 
-1. **`@server` attribute** on constants — excluded from the client bundle
-2. **`server_` prefix** on constants — excluded from the client bundle
-3. **`pub type Server`** — private server-side state that never reaches the client
+1. **`server_` prefix** on constants — excluded from the client bundle
+2. **`pub type Server`** — private server-side state that never reaches the client
+3. **Server-module references** — code referencing `store`, `effect`, `pubsub`, `process` is automatically excluded
 
 Code referencing server-only modules (`store`, `effect`, `pubsub`, `process`) is automatically detected and excluded.
 
