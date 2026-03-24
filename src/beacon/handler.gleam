@@ -11,6 +11,7 @@
 /// in a single BEAM process (the runtime actor). No cross-process leaking.
 
 import beacon/error
+import beacon/log
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/string
@@ -120,10 +121,16 @@ fn extract_value(data: String) -> String {
     [_, rest] -> {
       case string.split(rest, "\"") {
         [value, ..] -> value
-        _ -> ""
+        _ -> {
+          log.warning("beacon.handler", "Failed to extract value from inner split: " <> data)
+          ""
+        }
       }
     }
-    _ -> ""
+    _ -> {
+      log.warning("beacon.handler", "Failed to extract value from event data: " <> data)
+      ""
+    }
   }
 }
 

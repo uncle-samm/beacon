@@ -1511,7 +1511,8 @@ pub fn connect_transport_per_connection(
           }
           #(on_event, on_disconnect)
         }
-        Error(_err) -> {
+        Error(err) -> {
+          log.error("beacon.runtime", "Failed to start per-connection runtime: " <> error.to_string(err))
           // Return no-op handlers
           #(fn(_: transport.ConnectionId, _: transport.ClientMessage) { Nil }, fn(
             _: transport.ConnectionId,

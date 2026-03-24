@@ -247,7 +247,8 @@ acceptor_loop(ListenSocket, HandlerFun) ->
             try
                 HandlerFun(Socket)
             catch
-                _Class:_Reason ->
+                Class:Reason ->
+                    logger:error("beacon.server handler crashed: ~p:~p", [Class, Reason]),
                     gen_tcp:close(Socket)
             end;
         {error, closed} ->

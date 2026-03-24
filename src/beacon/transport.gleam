@@ -634,7 +634,10 @@ fn ws_loop_inner(
           )
         }
         FrameClose(close_state) -> {
-          let _ = server.send_close_frame(close_state.socket)
+          case server.send_close_frame(close_state.socket) {
+            Ok(Nil) -> Nil
+            Error(reason) -> log.warning("beacon.transport", "Failed to send close frame to " <> close_state.id <> ": " <> reason)
+          }
           server.close(close_state.socket)
           cleanup_connection(close_state)
         }
@@ -756,7 +759,10 @@ fn check_origin(req: Request(Connection)) -> Result(Nil, String) {
       let origin_host = extract_host_from_origin(origin)
       let request_host = case request.get_header(req, "host") {
         Ok(h) -> h
-        Error(Nil) -> ""
+        Error(Nil) -> {
+          log.warning("beacon.transport", "Missing Host header for origin check")
+          ""
+        }
       }
       case origin_host == request_host {
         True -> Ok(Nil)
@@ -936,7 +942,10 @@ fn per_connection_handler(socket: Socket, config: TransportConfig) -> Nil {
           case check_middleware(req, config.middlewares) {
             Ok(Nil) -> handle_ws_request(socket, req, config)
             Error(resp) -> {
-              let _ = transport_http.write_response(socket, resp)
+              case transport_http.write_response(socket, resp) {
+                Ok(Nil) -> Nil
+                Error(reason) -> log.error("beacon.transport", "Failed to write middleware rejection: " <> reason)
+              }
               server.close(socket)
             }
           }

@@ -123,7 +123,10 @@ fn serve_file(
         }
       }
     }
-    Error(_) -> Error(Nil)
+    Error(_err) -> {
+      log.debug("beacon.static", "File not found: " <> path)
+      Error(Nil)
+    }
   }
 }
 

@@ -270,7 +270,10 @@ fn wait_for_shutdown() -> Nil {
 fn shutdown_timeout() -> Int {
   case get_env_int("BEACON_SHUTDOWN_TIMEOUT") {
     Ok(ms) -> ms
-    Error(_reason) -> 5000
+    Error(reason) -> {
+      log.debug("beacon.application", "BEACON_SHUTDOWN_TIMEOUT not set: " <> reason <> ", using 5000ms")
+      5000
+    }
   }
 }
 
