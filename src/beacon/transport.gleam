@@ -27,6 +27,7 @@ import gleam/http/request.{type Request}
 import gleam/http/response
 import gleam/int
 import gleam/json
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 import simplifile
@@ -401,6 +402,10 @@ const one_second_native = 1_000_000_000
 /// (no ack sent) to prevent heartbeat flooding.
 const max_heartbeats_per_second = 2
 
+/// Maximum number of events in a single batch message.
+/// Prevents clients from sending unbounded arrays that consume server memory.
+const max_batch_size = 100
+
 /// Check per-connection rate limit: max 50 events per 1-second window.
 /// Returns the updated state and whether the event was rate limited.
 fn check_rate_limit(state: ConnectionState) -> #(ConnectionState, Bool) {
@@ -492,6 +497,55 @@ fn handle_ws_text_decode(
           log.debug("beacon.transport", "Heartbeat from " <> state.id)
           send_ws_message(new_state, ServerHeartbeatAck)
           new_state
+        }
+      }
+    }
+    Ok(ClientEventBatch(events) as msg) -> {
+      // Reject oversized batches before any further processing
+      let batch_len = list.length(events)
+      case batch_len > max_batch_size {
+        True -> {
+          log.warning(
+            "beacon.transport",
+            "Batch too large from "
+              <> state.id
+              <> " ("
+              <> int.to_string(batch_len)
+              <> " events, max "
+              <> int.to_string(max_batch_size)
+              <> ")",
+          )
+          send_ws_message(state, ServerError(reason: "Batch too large"))
+          state
+        }
+        False -> {
+          // Check rate limit before dispatching
+          let #(new_state, rate_limited) = check_rate_limit(state)
+          case rate_limited {
+            True -> {
+              log.warning(
+                "beacon.transport",
+                "Rate limited connection "
+                  <> state.id
+                  <> " ("
+                  <> int.to_string(new_state.event_count)
+                  <> " events/sec)",
+              )
+              send_ws_message(new_state, ServerError(reason: "Rate limited"))
+              new_state
+            }
+            False -> {
+              log.debug(
+                "beacon.transport",
+                "Event from "
+                  <> new_state.id
+                  <> ": "
+                  <> client_message_type(msg),
+              )
+              new_state.on_event(new_state.id, msg)
+              new_state
+            }
+          }
         }
       }
     }

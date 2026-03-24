@@ -93,7 +93,7 @@ pub fn save(file: UploadedFile, directory: String) -> Result(String, String) {
   let path = directory <> "/" <> safe_name
   case write_file(path, file.data) {
     Ok(Nil) -> Ok(path)
-    Error(_) -> Error("Failed to save file: " <> path)
+    Error(reason) -> Error("Failed to save file: " <> path <> " (" <> reason <> ")")
   }
 }
 
@@ -228,7 +228,7 @@ fn extract_header_value(
 }
 
 @external(erlang, "beacon_upload_ffi", "write_file")
-fn write_file(path: String, data: BitArray) -> Result(Nil, Nil)
+fn write_file(path: String, data: BitArray) -> Result(Nil, String)
 
 @external(erlang, "beacon_upload_ffi", "binary_split")
 fn binary_split(data: BitArray, separator: BitArray) -> List(BitArray)
