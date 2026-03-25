@@ -1476,6 +1476,26 @@ fn generate_server_field_encoder(
     "Float" -> "json.float(" <> accessor <> ")"
     "Bool" -> "json.bool(" <> accessor <> ")"
     "String" -> "json.string(" <> accessor <> ")"
+    "Option" -> {
+      // Option(T) -> case val { Some(v) -> encode(v), None -> json.null() }
+      let inner_encoder = case f.inner_type {
+        "Int" -> "json.int(v)"
+        "Float" -> "json.float(v)"
+        "Bool" -> "json.bool(v)"
+        "String" -> "json.string(v)"
+        inner ->
+          case find_enum_type(analysis.enum_types, inner, f.inner_module) {
+            Ok(et) ->
+              "json.string(" <> encoder_name(et.module, et.name) <> "(v))"
+            Error(_) ->
+              case find_custom_type(analysis.custom_types, inner, f.inner_module) {
+                Ok(ct) -> encoder_name(ct.module, ct.name) <> "(v)"
+                Error(_) -> "json.string(v)"
+              }
+          }
+      }
+      "case " <> accessor <> " { option.Some(v) -> " <> inner_encoder <> "\n      option.None -> json.null() }"
+    }
     "List" ->
       case f.inner_type {
         "Int" -> "json.array(" <> accessor <> ", json.int)"
@@ -1510,7 +1530,17 @@ fn generate_server_field_encoder(
               <> "("
               <> accessor
               <> ")"
-            Error(_) -> "json.string(" <> accessor <> ")"
+            Error(_) -> {
+              log.warning(
+                "beacon.build",
+                "Unknown type '"
+                  <> f.type_name
+                  <> "' for field '"
+                  <> f.name
+                  <> "' — using string.inspect (may not round-trip correctly)",
+              )
+              "json.string(gleam_string.inspect(" <> accessor <> "))"
+            }
           }
       }
   }
@@ -1685,6 +1715,8 @@ import "
     <> ext_imports_section
     <> "import gleam/dynamic/decode
 import gleam/json
+import gleam/option
+import gleam/string as gleam_string
 
 "
     <> string.join(custom_encoders, "\n\n")

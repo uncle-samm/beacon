@@ -364,3 +364,40 @@ pub type ServerState {
   let assert False =
     list.any(analysis.model_fields, fn(f) { f.name == "db_pool" })
 }
+
+// === Option Type Detection ===
+
+pub fn option_fields_detected_correctly_test() {
+  let source =
+    "
+import gleam/option
+
+pub type Model {
+  Model(
+    name: String,
+    email: option.Option(String),
+    age: option.Option(Int),
+    active: Bool,
+  )
+}
+pub type Msg {
+  SetName(String)
+}
+pub fn update(model: Model, msg: Msg) -> Model {
+  model
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let email_field =
+    list.find(analysis.model_fields, fn(f) { f.name == "email" })
+  let assert Ok(ef) = email_field
+  let assert True = ef.type_name == "Option"
+  let assert True = ef.inner_type == "String"
+
+  let age_field =
+    list.find(analysis.model_fields, fn(f) { f.name == "age" })
+  let assert Ok(af) = age_field
+  let assert True = af.type_name == "Option"
+  let assert True = af.inner_type == "Int"
+}
