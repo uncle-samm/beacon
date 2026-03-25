@@ -1988,6 +1988,21 @@ fn server_decoder_for_field(
     "Float" -> "decode.float"
     "Bool" -> "decode.bool"
     "String" -> "decode.string"
+    "Option" ->
+      case field.inner_type {
+        "Int" -> "decode.optional(decode.int)"
+        "Float" -> "decode.optional(decode.float)"
+        "Bool" -> "decode.optional(decode.bool)"
+        "String" -> "decode.optional(decode.string)"
+        inner ->
+          case find_custom_type(custom_types, inner, field.inner_module) {
+            Ok(ct) ->
+              "decode.optional(server_"
+              <> decoder_name(ct.module, ct.name)
+              <> "())"
+            Error(_) -> "decode.optional(decode.string)"
+          }
+      }
     "List" ->
       case field.inner_type {
         "Int" -> "decode.list(decode.int)"
@@ -2034,6 +2049,13 @@ fn generate_server_custom_decoder(
         "Float" -> "decode.float"
         "Bool" -> "decode.bool"
         "String" -> "decode.string"
+        "Option" ->
+          case f.inner_type {
+            "Int" -> "decode.optional(decode.int)"
+            "Float" -> "decode.optional(decode.float)"
+            "Bool" -> "decode.optional(decode.bool)"
+            _ -> "decode.optional(decode.string)"
+          }
         _ ->
           case find_enum_type(enum_types, f.type_name, f.module) {
             Ok(_) -> "decode.string"
@@ -2150,29 +2172,8 @@ fn generate_type_encoder(
   let fn_name = encoder_name(ct.module, ct.name)
   let field_encoders =
     list.map(ct.fields, fn(f) {
-      let encoder = case f.type_name {
-        "Int" -> "json.int(s." <> f.name <> ")"
-        "Float" -> "json.float(s." <> f.name <> ")"
-        "Bool" -> "json.bool(s." <> f.name <> ")"
-        "String" -> "json.string(s." <> f.name <> ")"
-        _ ->
-          // Check if it's an enum type
-          case find_enum_type(analysis.enum_types, f.type_name, f.module) {
-            Ok(et) ->
-              "json.string("
-              <> encoder_name(et.module, et.name)
-              <> "(s."
-              <> f.name
-              <> "))"
-            Error(_) ->
-              // Try encoding as enum via encode_<type> function (backward compat)
-              "json.string(encode_"
-              <> string.lowercase(f.type_name)
-              <> "(s."
-              <> f.name
-              <> "))"
-          }
-      }
+      // Reuse the same encoder logic as top-level Model fields
+      let encoder = generate_server_field_encoder("s", f, analysis)
       "    #(\"" <> f.name <> "\", " <> encoder <> ")"
     })
   "fn "
