@@ -7,11 +7,44 @@
 
 ## Current Status
 
-**Active Milestone:** 86 — ws_init Hook (COMPLETE)
-**Last Completed:** 86 — ws_init Hook (Request-Aware Server State)
+**Active Milestone:** 88 — End-to-End Build & Security Tests
+**Last Completed:** 87 — Auto Model Encoder for `app_with_server`
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (667 tests passed, 0 failures)
+**Test Status:** GREEN (689 tests passed, 0 failures)
 **Linter:** PASSING (zero violations)
+
+### Milestone 88: End-to-End Build & Security Tests ✅
+> Added 19 new tests covering build integration (privacy stripping, codec generation,
+> enhanced bundling) and security regression tests for all 15 audit findings.
+
+- [x] Build integration tests — privacy stripping, codec generation, enhanced bundling
+- [x] Security regression tests — all 15 security audit findings covered
+- [x] Test quality audit fixes — honesty, gaps, weak assertions
+- [x] TigerStyle compliance — 9 violations fixed
+- [x] `gleam build` — zero warnings
+- [x] `gleam test` — 689 passed, 0 failures
+
+### Milestone 87: Auto Model Encoder for `app_with_server` ✅
+> Without a model encoder, `app_with_server` can't push ANY updates to the client — not clicks,
+> not background effects, nothing. The build system generates `beacon_codec.gleam` but (a) never
+> compiles it for `app_with_server` apps, and (b) the generated codec has wrong type signature
+> (`Model` instead of `#(Model, Server)`).
+
+- [x] Phase 1: Fix codec type signature — add `has_server` branches to `generate_codec_module`, `generate_substate_encoders`, `generate_server_decode_model` in `build.gleam`
+- [x] Phase 2: Compile codec after `build_base_client()` — call `run_gleam_build()` + `hot_reload_codec()` when `beacon_codec.gleam` exists
+- [x] Phase 3: Tests — `app_with_server_background_effect_pushes_update_test`, `app_with_server_user_event_pushes_update_test` (670 total)
+- [x] Phase 4: `gleam build` — zero warnings
+- [x] Phase 5: `gleam test` — 670 passed, 0 failures
+- [x] Phase 6: Scanner — `find_app_module` two-pass search for multi-file/app_with_server apps
+- [x] Phase 7: Build simplification — `analyze_app()`, `generate_codec()`, `try_enhanced_bundle()` separated; `auto_build_client_js()` linearized
+
+**Architecture:** Codec generation and JS bundling are now independent concerns. `generate_codec()` always runs when a Model type is found. `try_enhanced_bundle()` only succeeds for single-file apps. When enhanced fails, `build_base_client()` builds runtime-only JS. Codec is always compiled + hot-reloaded regardless of which JS bundle was built. Three-way case matching on `#(has_local, has_server)` ensures the codec accepts `#(Model, Server)` and only encodes Model fields.
+
+**Files modified:**
+- `src/beacon/build.gleam` — `has_server` branches in 3 codec generators; `analyze_app()`, `generate_codec()`, `try_enhanced_bundle()` public API; `find_app_module` two-pass + `collect_gleam_files` helper
+- `src/beacon.gleam` — `auto_build_client_js()` simplified to linear flow
+- `test/beacon/runtime_test.gleam` — 2 new tests: background effect + user event push updates with `#(Model, Server)` model
+- `beacon_client/src/beacon_client_ffi.mjs` — removed debug log from mount handler
 
 ### Milestone 86: ws_init Hook (Request-Aware Server State) ✅
 > Thread HTTP request from WS upgrade into runtime init. Add `beacon.ws_init(fn(Request) -> model)`

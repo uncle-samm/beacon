@@ -47,6 +47,16 @@ fn apply_json_ops(
   ops_json: String,
 ) -> Result(String, String)
 
+/// Count the number of operations in a JSON ops string.
+/// Used for enforcing depth/size limits on client-sent patches.
+pub fn count_ops(ops_json: String) -> Int {
+  count_ops_ffi(ops_json)
+}
+
 /// Erlang FFI: check if ops are empty.
 @external(erlang, "beacon_patch_ffi", "is_empty_ops")
 fn is_empty_ops(ops_json: String) -> Bool
+
+/// Erlang FFI: count ops in a JSON array string.
+@external(erlang, "beacon_patch_ffi", "count_ops")
+fn count_ops_ffi(ops_json: String) -> Int

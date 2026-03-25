@@ -96,6 +96,10 @@ pub type Analysis {
     has_local: Bool,
     /// Whether the module has a Server type (private server-side state).
     has_server: Bool,
+    /// Module alias of the Server type (empty string if in primary file, e.g. "server_state").
+    server_module: String,
+    /// Type name of the Server type (e.g. "Server" or "ServerState").
+    server_type_name: String,
     /// Fields of the Server type (never sent to client).
     server_fields: List(TypeField),
     /// Fields of the Model type (for JSON codec generation).
@@ -154,20 +158,11 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
       }
 
       // Check for Server type (private server-side state)
-      let has_server = case find_custom_type(module, "Server") {
-        Ok(_) -> True
-        Error(_) -> False
-      }
-      let server_fields = case find_custom_type(module, "Server") {
-        Ok(server_type) -> extract_fields(server_type)
-        Error(_) -> {
-          log.debug(
-            "beacon.analyzer",
-            "No Server type found — server-side private state not used",
-          )
-          []
+      let #(has_server, server_module_alias, server_type_name, server_fields) =
+        case find_custom_type(module, "Server") {
+          Ok(server_type) -> #(True, "", "Server", extract_fields(server_type))
+          Error(_) -> #(False, "", "Server", [])
         }
-      }
 
       // Extract Model fields for JSON codec generation
       let model_fields = case find_custom_type(module, "Model") {
@@ -307,27 +302,35 @@ pub fn analyze(source: String) -> Result(Analysis, String) {
           }
         })
 
-      case msg_type, update_fn {
-        Ok(msg), Ok(func) -> {
-          let variants = classify_variants(msg, func)
-          Ok(Analysis(
-            msg_variants: variants,
-            has_local: has_local,
-            has_server: has_server,
-            server_fields: server_fields,
-            model_fields: model_fields,
-            has_direct_init: has_direct_init,
-            has_direct_update: has_direct_update,
-            custom_types: custom_types,
-            enum_types: enum_types,
-            substates: substates,
-            computed_fields: computed_fields,
-            imported_modules: [],
-          ))
+      // Classify Msg variants if both Msg type and update function are present.
+      // When either is missing (multi-file apps where Msg/update are in separate files),
+      // succeed with empty msg_variants — the codec only needs Model fields.
+      let variants = case msg_type, update_fn {
+        Ok(msg), Ok(func) -> classify_variants(msg, func)
+        _, _ -> {
+          log.debug(
+            "beacon.analyzer",
+            "No Msg type or update function in this file — codec-only analysis",
+          )
+          []
         }
-        Error(r), _ -> Error(r)
-        _, Error(r) -> Error(r)
       }
+      Ok(Analysis(
+        msg_variants: variants,
+        has_local: has_local,
+        has_server: has_server,
+        server_module: server_module_alias,
+        server_type_name: server_type_name,
+        server_fields: server_fields,
+        model_fields: model_fields,
+        has_direct_init: has_direct_init,
+        has_direct_update: has_direct_update,
+        custom_types: custom_types,
+        enum_types: enum_types,
+        substates: substates,
+        computed_fields: computed_fields,
+        imported_modules: [],
+      ))
     }
     Error(_) -> Error("Failed to parse source")
   }
@@ -455,8 +458,52 @@ pub fn analyze_multi(
           }
         })
 
+      // Check external sources for Server type (multi-file apps may have it in a separate module)
+      let #(has_server, server_module_alias, server_type_name, server_fields) =
+        case analysis.has_server {
+          True -> #(True, analysis.server_module, analysis.server_type_name, analysis.server_fields)
+          False -> {
+          // Search external modules for a type named "Server" or "ServerState"
+          let ext_server =
+            list.find_map(external_sources, fn(ext) {
+              let #(alias, _module_path, ext_source) = ext
+              case glance.module(ext_source) {
+                Error(_) -> Error(Nil)
+                Ok(ext_module) -> {
+                  // Look for Server or ServerState type
+                  let server_type =
+                    list.find(ext_module.custom_types, fn(def) {
+                      let name = def.definition.name
+                      { name == "Server" || name == "ServerState" }
+                      && def.definition.publicity == glance.Public
+                    })
+                  case server_type {
+                    Ok(def) ->
+                      Ok(#(alias, def.definition.name, extract_fields(def.definition)))
+                    Error(Nil) -> Error(Nil)
+                  }
+                }
+              }
+            })
+          case ext_server {
+            Ok(#(srv_alias, srv_type_name, fields)) -> {
+              log.info(
+                "beacon.analyzer",
+                "Found " <> srv_type_name <> " type in external module: " <> srv_alias,
+              )
+              #(True, srv_alias, srv_type_name, fields)
+            }
+            Error(Nil) -> #(False, "", "Server", [])
+          }
+        }
+      }
+
       Ok(Analysis(
         ..analysis,
+        has_server: has_server,
+        server_module: server_module_alias,
+        server_type_name: server_type_name,
+        server_fields: server_fields,
         custom_types: all_custom_types,
         enum_types: all_enum_types,
         substates: substates,

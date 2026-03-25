@@ -314,6 +314,7 @@ fn generate_route_start_body(route: RouteDefinition) -> String {
     "        dynamic_subscriptions: option.None,\n",
     "        on_notify: option.None,\n",
     "        init_from_request: option.None,\n",
+    "        secret_key: \"\",\n",
     "      )\n",
     "      runtime.start_and_connect(config, conn_id, transport_subject)",
   ])

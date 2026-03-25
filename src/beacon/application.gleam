@@ -171,6 +171,7 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       dynamic_subscriptions: config.dynamic_subscriptions,
       on_notify: config.on_notify,
       init_from_request: config.init_from_request,
+      secret_key: config.secret_key,
     )
 
   // Create transport with per-connection runtime factory

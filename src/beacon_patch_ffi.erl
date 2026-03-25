@@ -1,5 +1,5 @@
 -module(beacon_patch_ffi).
--export([diff_json/2, apply_json_ops/2, is_empty_ops/1, merge_ops_json/1]).
+-export([diff_json/2, apply_json_ops/2, is_empty_ops/1, merge_ops_json/1, count_ops/1]).
 
 %% Diff two JSON strings and produce patch operations.
 %% Returns a JSON-encoded string of the ops array.
@@ -184,3 +184,14 @@ merge_ops_json(OpsList) ->
         json:decode(OpsJson)
     end, OpsList),
     iolist_to_binary(json:encode(AllOps)).
+
+%% Count the number of operations in a JSON ops string.
+%% Returns the length of the decoded array, or 0 on error.
+-spec count_ops(binary()) -> non_neg_integer().
+count_ops(OpsJson) ->
+    try
+        Ops = json:decode(OpsJson),
+        length(Ops)
+    catch
+        _:_ -> 0
+    end.

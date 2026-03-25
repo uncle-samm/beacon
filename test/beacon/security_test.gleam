@@ -67,8 +67,8 @@ pub fn deeply_nested_json_does_not_crash_test() {
   // DoS: deeply nested JSON shouldn't stack overflow
   let nested = string.repeat("{\"a\":", 100) <> "1" <> string.repeat("}", 100)
   let raw = "{\"type\":\"event\",\"name\":\"click\",\"data\":\"" <> nested <> "\",\"target_path\":\"0\"}"
-  // Should either decode or error, not crash
-  let _ = transport.decode_client_message(raw)
+  // Deeply nested JSON should be rejected, not crash
+  let assert Error(_) = transport.decode_client_message(raw)
 }
 
 pub fn event_with_script_injection_in_handler_id_test() {

@@ -163,6 +163,9 @@ pub type RuntimeConfig(model, msg) {
     init_from_request: option.Option(
       fn(request.Request(server.Connection)) -> #(model, Effect(msg)),
     ),
+    /// Secret key for session token HMAC verification.
+    /// Threaded from AppConfig — must not be empty when state recovery is enabled.
+    secret_key: String,
   )
 }
 
@@ -189,7 +192,7 @@ pub fn start(
             None -> discover_model_encoder()
           },
           deserialize_model: config.deserialize_model,
-          secret_key: "",
+          secret_key: config.secret_key,
           route_patterns: config.route_patterns,
           on_route_change: config.on_route_change,
           listener_subject: None,
@@ -351,7 +354,6 @@ fn handle_message(
           // Send SSR HTML for immediate display
           process.send(subject, transport.SendMount(payload: mount_html))
           // Send model JSON — client takes over rendering from here
-          // Always try fresh encoder (hot-reloaded codec may differ from init-time cache)
           let mount_serializer = case discover_model_encoder() {
             Some(f) -> Some(f)
             None -> state.serialize_model
@@ -620,7 +622,10 @@ fn handle_message(
             }
           }
         })
-      let _ = processed
+      log.debug(
+        "beacon.runtime",
+        "Batch processed " <> int.to_string(processed) <> " events",
+      )
       // Batch's last event already triggered broadcast via run_update_for
       actor.continue(final_state)
     }
@@ -809,7 +814,10 @@ fn discover_model_encoder() -> Option(fn(model) -> String) {
       )
       Some(encoder)
     }
-    Error(_) -> None
+    Error(_) -> {
+      log.debug("beacon.runtime", "No beacon_codec encoder available")
+      None
+    }
   }
 }
 
@@ -1092,10 +1100,36 @@ fn broadcast_model_sync_with_json(
   }
 }
 
+/// Maximum number of patch operations allowed in a single client message.
+/// Prevents clients from sending unbounded arrays that consume server memory.
+const max_ops_per_message = 1000
+
 /// Apply client-sent patch operations to the server model.
 /// The client already ran the update locally and sends the diff.
 /// Server applies the ops to stay in sync without re-running update.
 fn apply_client_ops(
+  state: RuntimeState(model, msg),
+  ops_json: String,
+  conn_id: transport.ConnectionId,
+) -> RuntimeState(model, msg) {
+  // Enforce ops count limit to prevent memory exhaustion from malicious clients
+  let ops_count = patch.count_ops(ops_json)
+  case ops_count > max_ops_per_message {
+    True -> {
+      log.warning(
+        "beacon.runtime",
+        "Rejecting patch with " <> int.to_string(ops_count)
+        <> " ops from " <> conn_id
+        <> " (max " <> int.to_string(max_ops_per_message) <> ")",
+      )
+      state
+    }
+    False -> apply_client_ops_inner(state, ops_json, conn_id)
+  }
+}
+
+/// Inner implementation of apply_client_ops, after ops count validation.
+fn apply_client_ops_inner(
   state: RuntimeState(model, msg),
   ops_json: String,
   conn_id: transport.ConnectionId,
@@ -1213,7 +1247,10 @@ fn discover_model_decoder() -> Option(fn(String) -> Result(model, String)) {
       )
       Some(decoder)
     }
-    Error(_) -> None
+    Error(_) -> {
+      log.debug("beacon.runtime", "No beacon_codec decoder available")
+      None
+    }
   }
 }
 

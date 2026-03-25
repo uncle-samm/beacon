@@ -116,9 +116,12 @@ pub fn view(model: Model, local: Local) { model }
   let assert False = analysis.has_direct_update
 }
 
-pub fn no_msg_type_error_test() {
+pub fn no_msg_type_succeeds_with_empty_variants_test() {
+  // When Msg type is missing (multi-file app), analysis succeeds with empty variants.
+  // The codec only needs Model fields — Msg is not required.
   let source = "pub fn update(m, msg) { m }\npub fn view(m) { m }\npub type Model { M }\n"
-  let assert Error(_) = analyzer.analyze(source)
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = analysis.msg_variants == []
 }
 
 fn find_variant(

@@ -45,6 +45,7 @@ pub fn start_for_route(
         dynamic_subscriptions: option.None,
         on_notify: option.None,
         init_from_request: option.None,
+        secret_key: "",
       )
       runtime.start_and_connect(config, conn_id, transport_subject)
     }
@@ -62,6 +63,7 @@ pub fn start_for_route(
         dynamic_subscriptions: option.None,
         on_notify: option.None,
         init_from_request: option.None,
+        secret_key: "",
       )
       runtime.start_and_connect(config, conn_id, transport_subject)
     }
@@ -79,6 +81,7 @@ pub fn start_for_route(
         dynamic_subscriptions: option.None,
         on_notify: option.None,
         init_from_request: option.None,
+        secret_key: "",
       )
       runtime.start_and_connect(config, conn_id, transport_subject)
     }
@@ -96,6 +99,7 @@ pub fn start_for_route(
         dynamic_subscriptions: option.None,
         on_notify: option.None,
         init_from_request: option.None,
+        secret_key: "",
       )
       runtime.start_and_connect(config, conn_id, transport_subject)
     }

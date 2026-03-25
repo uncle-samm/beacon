@@ -7,25 +7,8 @@ import gleam/string
 
 // === Codec Generation Correctness Tests ===
 // These verify the analyzer produces the right inputs for codec generation.
-
-pub fn codec_includes_all_model_fields_test() {
-  let source =
-    "
-pub type Model { Model(count: Int, name: String, active: Bool, rate: Float) }
-pub type Msg { Inc }
-pub fn update(model: Model, msg: Msg) -> Model {
-  case msg { Inc -> model }
-}
-pub fn view(model: Model) { model }
-"
-  let assert Ok(analysis) = analyzer.analyze(source)
-  let field_names = list.map(analysis.model_fields, fn(f) { f.name })
-  let assert True = list.contains(field_names, "count")
-  let assert True = list.contains(field_names, "name")
-  let assert True = list.contains(field_names, "active")
-  let assert True = list.contains(field_names, "rate")
-  let assert True = list.length(analysis.model_fields) == 4
-}
+// Note: Basic model field detection is tested in build_codec_test.gleam
+// (standard_app_codec_fields_test). Tests here cover complementary aspects.
 
 pub fn codec_field_types_correct_test() {
   let source =
@@ -50,28 +33,9 @@ pub fn view(model: Model) { model }
   let assert True = find("rate") == "Float"
 }
 
-pub fn codec_excludes_server_fields_test() {
-  let source =
-    "
-pub type Model { Model(count: Int) }
-pub type Server { Server(api_key: String, db: String) }
-pub type Msg { Inc }
-pub fn update(model: Model, msg: Msg) -> Model {
-  case msg { Inc -> model }
-}
-pub fn view(model: Model) { model }
-"
-  let assert Ok(analysis) = analyzer.analyze(source)
-  // Model fields should only contain count
-  let assert True = list.length(analysis.model_fields) == 1
-  let assert Ok(f) = list.first(analysis.model_fields)
-  let assert True = f.name == "count"
-  // Server fields are separate
-  let assert True = list.length(analysis.server_fields) == 2
-  // Server should NOT be in custom_types (handled separately)
-  let type_names = list.map(analysis.custom_types, fn(ct) { ct.name })
-  let assert False = list.contains(type_names, "Server")
-}
+// Note: Server field exclusion is tested in build_codec_test.gleam
+// (app_with_server_excludes_server_from_model_fields_test,
+//  server_fields_tracked_separately_test).
 
 pub fn codec_computed_fields_have_correct_types_test() {
   let source =

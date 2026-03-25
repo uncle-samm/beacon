@@ -365,6 +365,7 @@ pub fn start(port: Int) -> Result(Nil, error.BeaconError) {
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
       init_from_request: option.None,
+      secret_key: "",
     )
   case runtime.start(config) {
     Ok(runtime_subject) -> {

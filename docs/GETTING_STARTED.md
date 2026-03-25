@@ -23,6 +23,7 @@ gleam add beacon
 // src/my_app.gleam
 import beacon
 import beacon/html
+import gleam/int
 
 pub type Model {
   Model(count: Int)
@@ -249,6 +250,7 @@ beacon.app_with_server(init, init_server, update, view)
 - `update` receives both `model` and `server`, returns `#(model, server, Effect(msg))`
 - `view` receives only `model` -- server state is invisible to the view
 - Server state is never serialized, never sent to client, never in JS bundle
+- Model updates ARE automatically pushed to the client via an auto-generated codec -- the build system generates `beacon_codec.gleam` for `app_with_server` apps too, encoding only Model fields (never Server)
 
 ### Redirects
 

@@ -1053,37 +1053,32 @@ fn hot_reload_codec() -> Nil
 /// Build client JS if not already built or if source changed.
 ///
 /// Two modes based on app structure:
-/// 1. Apps with Model/Msg/update/view in one file → builds codec + runtime (local events work)
-/// 2. Apps with split files or app_with_server → builds runtime only (server-rendered)
+/// 1. Apps with Model/Msg/update/view in one file → builds codec + enhanced bundle (local events work)
+/// 2. Apps with split files or app_with_server → builds codec + runtime-only bundle (server-rendered)
 ///
+/// Both modes generate a codec (beacon_codec.gleam) for server-side model encoding.
 /// Both modes produce the same runtime (WS, morphing, events, navigation).
-/// The only difference is whether client-side model encoding is available.
+/// The difference is whether the enhanced bundle (view compiled to JS) is available.
 fn auto_build_client_js() -> Nil {
   case client_js_is_fresh() {
-    True -> {
-      log.info("beacon", "Client JS up to date")
-      Nil
-    }
+    True -> Nil
     False -> {
       log.info("beacon", "Building client JS...")
-      // Try codec build first (single-file apps with Model/Msg)
+      // Analyze once, generate codec + try enhanced bundle separately
       build.auto_build()
+      // If enhanced bundle succeeded (manifest exists), we're done.
+      // Otherwise build base client JS (runtime-only: WS, morphing, events).
       case simplifile.is_file("priv/static/beacon_client.manifest") {
-        Ok(True) -> {
-          let _ = build.run_gleam_build()
-          hot_reload_codec()
-          Nil
-        }
+        Ok(True) -> Nil
         _ -> {
-          // No scannable app module (multi-file, app_with_server, etc.)
-          log.info(
-            "beacon",
-            "No single-file Model/Msg found — building runtime-only client JS",
-          )
+          log.info("beacon", "Building runtime-only client JS")
           build.build_base_client()
-          Nil
         }
       }
+      // Compile codec (if generated) + hot-reload
+      let _ = build.run_gleam_build()
+      hot_reload_codec()
+      Nil
     }
   }
 }

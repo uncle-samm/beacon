@@ -198,7 +198,7 @@ Files: `beacon_client.gleam` (Gleam types), `beacon_client_ffi.mjs` (JS runtime)
 - **`cookie.gleam`** — Cookie parsing and setting utilities (parse, get, set, delete with secure defaults).
 
 ### Build Tooling
-- **`build.gleam`** — Client JS codegen: `gleam run -m beacon/build`. Compiles user Gleam to JS client bundle. Auto-builds before starting examples.
+- **`build.gleam`** — Client JS codegen: `gleam run -m beacon/build`. Codec generation and JS bundling are independent concerns. Three public functions: `generate_codec()` (always runs when Model type is found), `try_enhanced_bundle()` (only succeeds for single-file apps), `analyze_app()` (Glance-based analysis). Two-pass `find_app_module` search: first looks for full app (Model + Msg + update + view in one file), then falls back to Model-only for multi-file/app_with_server apps.
 - **`build/analyzer.gleam`** — Glance-based source analysis for codegen. Extracts message types, model fields, event handlers from user source.
 - **`lint.gleam`** — Custom Glance-based linter enforcing engineering principles: no `todo`/`panic`, no silent catch-alls, logging requirements.
 
@@ -319,11 +319,11 @@ beacon_client/
     beacon_client.gleam         # Client Gleam types
     beacon_client_ffi.mjs       # Client JS runtime (WS, events, morphing)
     beacon_client/patch.mjs     # Client-side JSON diff/apply
-examples/                       # 18 example apps (counter, chat, kanban, snake, etc.)
+examples/                       # 19 example apps (counter, chat, kanban, snake, etc.)
 test/                           # Tests mirroring src structure
 ```
 
-48 Gleam modules + 28 Erlang FFI files + 4 client JS/Gleam files.
+47 Gleam modules + 29 Erlang FFI files + 4 client JS/Gleam files.
 
 ## Design Patterns Implemented
 

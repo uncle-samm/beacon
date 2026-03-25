@@ -78,6 +78,7 @@ fn counter_config() -> runtime.RuntimeConfig(CounterModel, CounterMsg) {
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
       init_from_request: option.None,
+      secret_key: "",
   )
 }
 
@@ -132,8 +133,8 @@ pub fn runtime_accepts_client_connect_test() {
   let assert Ok(mount_msg) = process.selector_receive(selector, 500)
   case mount_msg {
     transport.SendMount(payload: payload) -> {
-      // Mount should contain the initial counter view with "0"
-      let assert True = string.contains(payload, "0")
+      // Mount should contain the initial counter view with "0" rendered in element
+      let assert True = string.contains(payload, ">0<")
     }
     _ -> panic as "Expected SendMount after connect + join"
   }
@@ -164,8 +165,8 @@ pub fn runtime_sends_mount_on_join_test() {
   let assert Ok(mount_msg) = process.selector_receive(selector, 500)
   case mount_msg {
     transport.SendMount(payload: payload) -> {
-      // The counter view renders int.to_string(model.count), so mount should contain "0"
-      let assert True = string.contains(payload, "0")
+      // The counter view renders int.to_string(model.count), so mount should contain "0" in element
+      let assert True = string.contains(payload, ">0<")
     }
     _ -> panic as "Expected SendMount message on join"
   }
@@ -319,6 +320,7 @@ pub fn runtime_effect_dispatches_message_test() {
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
       init_from_request: option.None,
+      secret_key: "",
     )
 
   let assert Ok(subject) = runtime.start(config)
@@ -385,6 +387,7 @@ pub fn runtime_survives_view_crash_test() {
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
       init_from_request: option.None,
+      secret_key: "",
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -475,6 +478,7 @@ pub fn state_recovery_from_token_test() {
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
       init_from_request: option.None,
+      secret_key: "",
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -559,10 +563,10 @@ pub fn state_recovery_from_token_test() {
     process.new_selector()
     |> process.select(transport_subject2)
   let assert Ok(mount_msg) = process.selector_receive(selector, 1000)
-  // The mount payload should be a Rendered JSON containing "3"
+  // The mount payload should be a Rendered JSON containing "3" in element
   case mount_msg {
     transport.SendMount(payload: payload) -> {
-      let assert True = string.contains(payload, "3")
+      let assert True = string.contains(payload, ">3<")
     }
     _ -> {
       // Should have received a mount — fail explicitly
@@ -587,6 +591,7 @@ pub fn model_sync_sent_after_event_test() {
       on_route_change: option.None,
       dynamic_subscriptions: option.None, on_notify: option.None,
       init_from_request: option.None,
+      secret_key: "",
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -874,6 +879,7 @@ pub fn server_state_not_in_model_sync_test() {
       dynamic_subscriptions: option.None,
       on_notify: option.None,
       init_from_request: option.None,
+      secret_key: "",
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -898,6 +904,159 @@ pub fn server_state_not_in_model_sync_test() {
   list.each(model_syncs, fn(json) {
     let assert False = string.contains(json, "secret_api_key")
     let assert True = string.contains(json, "count")
+  })
+}
+
+// === app_with_server Model Encoder Tests ===
+
+pub fn app_with_server_background_effect_pushes_update_test() {
+  // Verify that background effects (EffectDispatched) push model updates
+  // to the client when serialize_model is set for #(Model, Server).
+  let config =
+    runtime.RuntimeConfig(
+      init: fn() {
+        #(#(CounterModel(count: 0), "server_secret"), effect.none())
+      },
+      update: fn(combined, msg) {
+        let #(model, server) = combined
+        case msg {
+          Increment -> #(#(CounterModel(count: model.count + 1), server), effect.none())
+          _ -> #(#(model, server), effect.none())
+        }
+      },
+      view: fn(combined) {
+        let #(model, _server) = combined
+        element.el("div", [], [element.text(int.to_string(model.count))])
+      },
+      decode_event: option.Some(counter_decode_event),
+      serialize_model: option.Some(fn(combined: #(CounterModel, String)) {
+        let #(model, _server) = combined
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
+      deserialize_model: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
+      init_from_request: option.None,
+      secret_key: "",
+    )
+  let assert Ok(subject) = runtime.start(config)
+  let transport_subject = process.new_subject()
+
+  // Connect and join
+  process.send(subject, runtime.ClientConnected(conn_id: "bg_conn", subject: transport_subject))
+  process.sleep(20)
+  process.send(subject, runtime.ClientJoined(conn_id: "bg_conn", token: "", path: "/"))
+  process.sleep(100)
+  // Drain mount + initial model_sync
+  let _ = drain_messages(transport_subject, [])
+
+  // Simulate background effect dispatching a message
+  process.send(subject, runtime.EffectDispatched(message: Increment))
+  process.sleep(100)
+
+  // Should receive a patch or model_sync with updated count
+  let msgs = drain_messages(transport_subject, [])
+  let updates = list.filter(msgs, fn(m) {
+    case m {
+      transport.SendPatch(..) -> True
+      transport.SendModelSync(..) -> True
+      _ -> False
+    }
+  })
+  // Must have at least one update pushed to client
+  let assert True = list.length(updates) >= 1
+  // Verify the update contains count:1, not server_secret
+  let update_jsons = list.filter_map(msgs, fn(m) {
+    case m {
+      transport.SendModelSync(model_json: json, ..) -> Ok(json)
+      transport.SendPatch(ops_json: json, ..) -> Ok(json)
+      _ -> Error(Nil)
+    }
+  })
+  list.each(update_jsons, fn(json) {
+    let assert False = string.contains(json, "server_secret")
+  })
+}
+
+pub fn app_with_server_user_event_pushes_update_test() {
+  // Verify that user events (ClientEventReceived) push model updates
+  // to the client when serialize_model is set for #(Model, Server).
+  let config =
+    runtime.RuntimeConfig(
+      init: fn() {
+        #(#(CounterModel(count: 0), "private_key"), effect.none())
+      },
+      update: fn(combined, msg) {
+        let #(model, server) = combined
+        case msg {
+          Increment -> #(#(CounterModel(count: model.count + 1), server), effect.none())
+          _ -> #(#(model, server), effect.none())
+        }
+      },
+      view: fn(combined) {
+        let #(model, _server) = combined
+        element.el("div", [], [element.text(int.to_string(model.count))])
+      },
+      decode_event: option.Some(counter_decode_event),
+      serialize_model: option.Some(fn(combined: #(CounterModel, String)) {
+        let #(model, _server) = combined
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
+      deserialize_model: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
+      init_from_request: option.None,
+      secret_key: "",
+    )
+  let assert Ok(subject) = runtime.start(config)
+  let transport_subject = process.new_subject()
+
+  // Connect and join — view renders button with on_click handler
+  process.send(subject, runtime.ClientConnected(conn_id: "evt_conn", subject: transport_subject))
+  process.sleep(20)
+  process.send(subject, runtime.ClientJoined(conn_id: "evt_conn", token: "", path: "/"))
+  process.sleep(100)
+  // Drain mount + initial model_sync
+  let _ = drain_messages(transport_subject, [])
+
+  // Send a client event (simulating button click)
+  // handler_id "increment" matches counter_decode_event
+  process.send(subject, runtime.ClientEventReceived(
+    conn_id: "evt_conn",
+    event_name: "click",
+    handler_id: "increment",
+    event_data: "",
+    target_path: "",
+    clock: 1,
+    ops: "",
+  ))
+  process.sleep(100)
+
+  // Should receive a patch or model_sync with updated count
+  let msgs = drain_messages(transport_subject, [])
+  let updates = list.filter(msgs, fn(m) {
+    case m {
+      transport.SendPatch(..) -> True
+      transport.SendModelSync(..) -> True
+      _ -> False
+    }
+  })
+  // Must have at least one update pushed to client
+  let assert True = list.length(updates) >= 1
+  // Verify no server secret leaked
+  let update_jsons = list.filter_map(msgs, fn(m) {
+    case m {
+      transport.SendModelSync(model_json: json, ..) -> Ok(json)
+      transport.SendPatch(ops_json: json, ..) -> Ok(json)
+      _ -> Error(Nil)
+    }
+  })
+  list.each(update_jsons, fn(json) {
+    let assert False = string.contains(json, "private_key")
   })
 }
 
@@ -1097,6 +1256,7 @@ pub fn on_update_effect_is_invoked_test() {
       dynamic_subscriptions: option.None,
       on_notify: option.None,
       init_from_request: option.None,
+      secret_key: "",
     )
   let assert Ok(subject) = runtime.start(config)
   let transport_subject = process.new_subject()
@@ -1187,6 +1347,7 @@ pub fn init_from_request_replaces_default_init_test() {
       dynamic_subscriptions: option.None,
       on_notify: option.None,
       init_from_request: option.Some(init_from_req),
+      secret_key: "",
     )
 
   // Use start_and_connect_with_request which should use init_from_request
@@ -1235,6 +1396,7 @@ pub fn init_from_request_none_uses_default_init_test() {
       dynamic_subscriptions: option.None,
       on_notify: option.None,
       init_from_request: option.None,
+      secret_key: "",
     )
 
   // start_and_connect (no request) should use default init (count:0)
@@ -1253,7 +1415,7 @@ pub fn init_from_request_none_uses_default_init_test() {
       case m {
         transport.SendModelSync(model_json: json, ..) ->
           string.contains(json, "\"count\":0")
-        transport.SendMount(payload: p) -> string.contains(p, "0")
+        transport.SendMount(payload: p) -> string.contains(p, ">0<")
         _ -> False
       }
     })
@@ -1282,6 +1444,7 @@ pub fn mount_html_reflects_ws_init_model_test() {
       dynamic_subscriptions: option.None,
       on_notify: option.None,
       init_from_request: option.Some(init_from_req),
+      secret_key: "",
     )
 
   let fake_req =
