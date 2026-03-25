@@ -265,11 +265,10 @@ fn resolve_sibling_sources(
                 // Derive alias from filename: "server_state.gleam" -> "server_state"
                 let alias =
                   string.replace(entry, ".gleam", "")
-                // Derive module_path relative to src/
-                let module_path = case string.split(file_path, "src/") {
-                  [_, rest] -> string.replace(rest, ".gleam", "")
-                  _ -> alias
-                }
+                // Module path is just the filename (no .gleam) — siblings are in the
+                // same directory as the primary file, so no directory prefix needed.
+                // The codec generator prepends the base_import_dir when generating imports.
+                let module_path = alias
                 Ok(#(alias, module_path, source))
               }
               Error(_) -> Error(Nil)
