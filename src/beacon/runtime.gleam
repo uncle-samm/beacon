@@ -690,25 +690,23 @@ fn run_update_for(
   let #(new_model, effects) = state.update(state.model, msg)
   log.debug("beacon.runtime", "Model updated")
 
-  // Render view to populate handler registry (needed for event resolution).
-  // We don't send the HTML — client renders from model JSON.
+  // Render view — needed for handler registry AND for HTML morph (server-rendered apps).
   handler.start_render()
-  let new_registry = case rescue(fn() { new_model |> state.view }) {
-    Ok(_vdom) -> handler.finish_render()
+  let #(new_registry, new_html) = case rescue(fn() { new_model |> state.view }) {
+    Ok(vdom) -> #(handler.finish_render(), Some(element.to_string(vdom)))
     Error(reason) -> {
       log.error("beacon.runtime", "View rendering failed: " <> reason)
       let _ = handler.finish_render()
-      // Keep old registry if view crashes
-      case state.handler_registry {
+      let fallback_registry = case state.handler_registry {
         Some(r) -> r
         None -> handler.finish_render()
       }
+      #(fallback_registry, None)
     }
   }
 
   // State-over-the-wire: send model JSON to all clients (as patches when possible).
-  // Try per-substate diffing first (only diffs changed substates).
-  // Falls back to full-model diff if no substate encoders available.
+  // Falls back to HTML morph if no serializer is available (app_with_server, runtime-only).
   let serializer = case discover_model_encoder() {
     Some(f) -> Some(f)
     None -> state.serialize_model
@@ -716,7 +714,6 @@ fn run_update_for(
   let new_model_json = case serializer {
     Some(serialize) -> {
       let json = serialize(new_model)
-      // Check model size bounds before broadcasting
       case check_model_size(json, "run_update") {
         True -> Some(json)
         False -> None
@@ -730,9 +727,23 @@ fn run_update_for(
       model: new_model,
       handler_registry: Some(new_registry),
     )
-  // Attempt per-substate broadcast, fall back to full-model broadcast
-  let new_cached =
-    broadcast_with_substates(broadcast_state, new_model, new_model_json)
+  // If we have a serializer, use model_sync/patches. Otherwise send HTML morph.
+  let new_cached = case new_model_json {
+    Some(_) ->
+      broadcast_with_substates(broadcast_state, new_model, new_model_json)
+    None ->
+      case new_html {
+        Some(html) -> {
+          // No serializer — send re-rendered HTML via mount morph (LiveView-style)
+          log.debug("beacon.runtime", "No serializer, sending HTML morph")
+          let _ = dict.each(broadcast_state.connections, fn(_conn_id, subject) {
+            process.send(subject, transport.SendMount(payload: html))
+          })
+          broadcast_state.cached_model
+        }
+        None -> broadcast_state.cached_model
+      }
+  }
   let new_state =
     RuntimeState(
       ..broadcast_state,
