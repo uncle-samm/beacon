@@ -1502,6 +1502,14 @@ fn generate_server_field_encoder(
         "Float" -> "json.array(" <> accessor <> ", json.float)"
         "Bool" -> "json.array(" <> accessor <> ", json.bool)"
         "String" -> "json.array(" <> accessor <> ", json.string)"
+        "" -> {
+          // Unknown inner type (e.g., tuples, complex generics)
+          log.warning(
+            "beacon.build",
+            "List field '" <> f.name <> "' has unknown inner type — using string.inspect",
+          )
+          "json.array(" <> accessor <> ", fn(x) { json.string(gleam_string.inspect(x)) })"
+        }
         inner ->
           case find_custom_type(analysis.custom_types, inner, f.inner_module) {
             Ok(ct) ->
@@ -1510,7 +1518,13 @@ fn generate_server_field_encoder(
               <> ", "
               <> encoder_name(ct.module, ct.name)
               <> ")"
-            Error(_) -> "json.array(" <> accessor <> ", json.string)"
+            Error(_) -> {
+              log.warning(
+                "beacon.build",
+                "List field '" <> f.name <> "' has unresolved inner type '" <> inner <> "' — using string.inspect",
+              )
+              "json.array(" <> accessor <> ", fn(x) { json.string(gleam_string.inspect(x)) })"
+            }
           }
       }
     _ ->
@@ -1586,6 +1600,12 @@ fn generate_codec_module(
     list.filter_map(analysis.model_fields, fn(f) {
       case f.type_name {
         "List" ->
+          case find_custom_type(analysis.custom_types, f.inner_type, f.inner_module) {
+            Ok(ct) -> Ok(generate_type_encoder(module_name, ct, analysis))
+            Error(_) -> Error(Nil)
+          }
+        "Option" ->
+          // Option(CustomType) needs an encoder for the inner type
           case find_custom_type(analysis.custom_types, f.inner_type, f.inner_module) {
             Ok(ct) -> Ok(generate_type_encoder(module_name, ct, analysis))
             Error(_) -> Error(Nil)
