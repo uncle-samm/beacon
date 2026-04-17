@@ -157,6 +157,21 @@ pub fn resolve_transitive_external_sources(
   sources
 }
 
+/// Resolve all transitive Beacon framework sources reachable from copied source text.
+/// Only `beacon/*` imports are followed; the root `beacon` module is generated separately.
+pub fn resolve_transitive_framework_sources(
+  sources: List(String),
+  beacon_root: String,
+) -> List(#(String, String, String)) {
+  let direct_sources =
+    list.flat_map(sources, fn(source) {
+      resolve_framework_sources(source, beacon_root)
+    })
+  let #(sources, _seen) =
+    walk_framework_sources(direct_sources, beacon_root, [], [])
+  sources
+}
+
 fn walk_external_sources(
   pending: List(#(String, String, String)),
   source_root: String,
@@ -174,6 +189,77 @@ fn walk_external_sources(
           walk_external_sources(
             list.append(child_sources, rest),
             source_root,
+            [module_path, ..seen],
+            [#(alias, module_path, ext_source), ..acc],
+          )
+        }
+      }
+    }
+  }
+}
+
+fn resolve_framework_sources(
+  source: String,
+  beacon_root: String,
+) -> List(#(String, String, String)) {
+  case glance.module(source) {
+    Error(_) -> []
+    Ok(module) ->
+      list.filter_map(module.imports, fn(def) {
+        let import_ = def.definition
+        let mod_path = import_.module
+        case string.starts_with(mod_path, "beacon/") {
+          True -> {
+            let file_path = beacon_root <> "/src/" <> mod_path <> ".gleam"
+            case simplifile.read(file_path) {
+              Ok(ext_source) -> {
+                let alias = case import_.alias {
+                  option.Some(glance.Named(name)) -> name
+                  option.Some(glance.Discarded(name)) -> name
+                  option.None -> {
+                    case string.split(mod_path, "/") |> list.last {
+                      Ok(name) -> name
+                      Error(_) -> mod_path
+                    }
+                  }
+                }
+                Ok(#(alias, mod_path, ext_source))
+              }
+              Error(err) -> {
+                log.warning(
+                  "beacon.build",
+                  "Could not read framework module "
+                    <> mod_path
+                    <> ": "
+                    <> string.inspect(err),
+                )
+                Error(Nil)
+              }
+            }
+          }
+          False -> Error(Nil)
+        }
+      })
+  }
+}
+
+fn walk_framework_sources(
+  pending: List(#(String, String, String)),
+  beacon_root: String,
+  seen: List(String),
+  acc: List(#(String, String, String)),
+) -> #(List(#(String, String, String)), List(String)) {
+  case pending {
+    [] -> #(list.reverse(acc), seen)
+    [ext, ..rest] -> {
+      let #(alias, module_path, ext_source) = ext
+      case list.contains(seen, module_path) {
+        True -> walk_framework_sources(rest, beacon_root, seen, acc)
+        False -> {
+          let child_sources = resolve_framework_sources(ext_source, beacon_root)
+          walk_framework_sources(
+            list.append(child_sources, rest),
+            beacon_root,
             [module_path, ..seen],
             [#(alias, module_path, ext_source), ..acc],
           )
@@ -249,19 +335,29 @@ fn compile_module(path: String, source: String) -> Nil {
       let module_path = extract_module_path(path)
       generate_codec_module(module_path, analysis, source)
 
-      // Build enhanced bundle: view + decode_model compiled to JS
-      // Required for state-over-the-wire — client renders view locally
-      log.info("beacon.build", "Building enhanced bundle...")
-      case build_enhanced_bundle(path, source, analysis) {
-        Ok(Nil) -> log.info("beacon.build", "Enhanced bundle ready")
-        Error(reason) -> {
-          // Enhanced build failed — do NOT fall back to runtime-only bundle.
-          // SSR HTML still works; user just won't have interactivity until they fix the build.
-          log.error(
+      case can_build_enhanced_bundle(source, analysis) {
+        True -> {
+          // Build enhanced bundle: view + decode_model compiled to JS
+          // Required for state-over-the-wire — client renders view locally
+          log.info("beacon.build", "Building enhanced bundle...")
+          case build_enhanced_bundle(path, source, analysis) {
+            Ok(Nil) -> log.info("beacon.build", "Enhanced bundle ready")
+            Error(reason) -> {
+              // Enhanced build failed — do NOT fall back to runtime-only bundle.
+              // SSR HTML still works; user just won't have interactivity until they fix the build error above.
+              log.error(
+                "beacon.build",
+                "Enhanced build FAILED: "
+                  <> reason
+                  <> " — no client JS will be produced. Fix the build error above.",
+              )
+            }
+          }
+        }
+        False -> {
+          log.info(
             "beacon.build",
-            "Enhanced build FAILED: "
-              <> reason
-              <> " — no client JS will be produced. Fix the build error above.",
+            "Skipping enhanced bundle for app_with_server or multi-file app; runtime client will use SSR morphing only.",
           )
         }
       }
@@ -305,6 +401,7 @@ fn analyze_app(
 fn resolve_sibling_sources(
   primary_path: String,
 ) -> List(#(String, String, String)) {
+  let root_dir = source_root(primary_path)
   let dir = case string.split(primary_path, "/") |> list.reverse {
     [_, ..rest] -> string.join(list.reverse(rest), "/")
     _ -> "."
@@ -323,10 +420,11 @@ fn resolve_sibling_sources(
               Ok(source) -> {
                 // Derive alias from filename: "server_state.gleam" -> "server_state"
                 let alias = string.replace(entry, ".gleam", "")
-                // Module path is just the filename (no .gleam) — siblings are in the
-                // same directory as the primary file, so no directory prefix needed.
-                // The codec generator prepends the base_import_dir when generating imports.
-                let module_path = alias
+                // Preserve the real module path relative to the source root so
+                // generated imports stay valid for nested app directories.
+                let module_path =
+                  string.replace(file_path, root_dir <> "/", "")
+                  |> string.replace(".gleam", "")
                 Ok(#(alias, module_path, source))
               }
               Error(_) -> Error(Nil)
@@ -353,13 +451,40 @@ pub fn generate_codec() -> Result(Nil, String) {
 }
 
 /// Try to build the enhanced client JS bundle (view + update compiled to JS).
-/// Returns Error if the app isn't suitable for enhanced builds (multi-file, app_with_server).
+/// Skips and returns Ok(Nil) for app shapes that are intentionally server-rendered.
 pub fn try_enhanced_bundle() -> Result(Nil, String) {
   case analyze_app("src") {
-    Ok(#(path, source, analysis)) ->
-      build_enhanced_bundle(path, source, analysis)
+    Ok(#(path, source, analysis)) -> {
+      case can_build_enhanced_bundle(source, analysis) {
+        True -> build_enhanced_bundle(path, source, analysis)
+        False -> {
+          log.info(
+            "beacon.build",
+            "Skipping enhanced bundle for app_with_server or multi-file app; runtime client will use SSR morphing only.",
+          )
+          Ok(Nil)
+        }
+      }
+    }
     Error(reason) -> Error(reason)
   }
+}
+
+/// Determine whether the app shape supports an enhanced client bundle.
+/// Enhanced bundles require a full single-file app surface, and are skipped
+/// for app_with_server / multi-file apps that intentionally stay server-rendered.
+pub fn can_build_enhanced_bundle(
+  source: String,
+  analysis: analyzer.Analysis,
+) -> Bool {
+  !analysis.has_server
+  && string.contains(source, "pub type Model")
+  && string.contains(source, "pub type Msg")
+  && {
+    string.contains(source, "pub fn update")
+    || string.contains(source, "pub fn make_update")
+  }
+  && string.contains(source, "pub fn view")
 }
 
 /// Create all required directories for the enhanced build.
@@ -464,41 +589,25 @@ fn build_enhanced_bundle(
                     resolve_transitive_external_sources(source, app_base_dir)
                   list.each(external_sources, fn(ext) {
                     let #(_alias, module_path, _source_text) = ext
-                    let src_path =
-                      app_base_dir <> "/" <> module_path <> ".gleam"
-                    // Create target directory if needed
-                    let target_dir = case
-                      string.split(module_path, "/") |> list.reverse
-                    {
-                      [_, ..rest] ->
-                        case list.reverse(rest) {
-                          [] -> ""
-                          parts -> string.join(parts, "/")
-                        }
-                      _ -> ""
-                    }
-                    case target_dir {
-                      "" -> Nil
-                      d -> {
-                        case
-                          simplifile.create_directory_all(dir <> "/src/" <> d)
-                        {
-                          Ok(Nil) -> Nil
-                          Error(err) ->
-                            log.warning(
-                              "beacon.build",
-                              "Failed to create directory "
-                                <> dir
-                                <> "/src/"
-                                <> d
-                                <> ": "
-                                <> string.inspect(err),
-                            )
-                        }
-                      }
-                    }
-                    copy_file(
-                      src_path,
+                    copy_module_source(
+                      app_base_dir <> "/" <> module_path <> ".gleam",
+                      dir <> "/src/" <> module_path <> ".gleam",
+                    )
+                  })
+
+                  // Copy Beacon framework modules referenced by copied user modules.
+                  let framework_sources =
+                    resolve_transitive_framework_sources(
+                      [
+                        client_source,
+                        ..list.map(external_sources, fn(ext) { ext.2 })
+                      ],
+                      beacon_root,
+                    )
+                  list.each(framework_sources, fn(ext) {
+                    let #(_alias, module_path, _source_text) = ext
+                    copy_module_source(
+                      beacon_root <> "/src/" <> module_path <> ".gleam",
                       dir <> "/src/" <> module_path <> ".gleam",
                     )
                   })
@@ -709,6 +818,31 @@ fn copy_file(from: String, to: String) -> Nil {
         "Could not copy " <> from <> ": " <> string.inspect(err),
       )
   }
+}
+
+fn copy_module_source(from: String, to: String) -> Nil {
+  let target_dir = case string.split(to, "/") |> list.reverse {
+    [_, ..rest] ->
+      case list.reverse(rest) {
+        [] -> ""
+        parts -> string.join(parts, "/")
+      }
+    _ -> ""
+  }
+  case target_dir {
+    "" -> Nil
+    d -> {
+      case simplifile.create_directory_all(d) {
+        Ok(Nil) -> Nil
+        Error(err) ->
+          log.warning(
+            "beacon.build",
+            "Failed to create directory " <> d <> ": " <> string.inspect(err),
+          )
+      }
+    }
+  }
+  copy_file(from, to)
 }
 
 /// Generate the JS-target beacon.gleam with event helpers using beacon_client/handler.
@@ -1029,7 +1163,7 @@ fn generate_entry_point(
     "app.Model(" <> string.join(default_model_args, ", ") <> ")"
 
   // Generate external module imports for the entry point
-  let entry_ext_imports = generate_external_imports(analysis, source, "", False)
+  let entry_ext_imports = generate_external_imports(analysis, source, False)
   let entry_ext_imports_section = case entry_ext_imports {
     "" -> ""
     imports -> imports <> "\n"
@@ -1628,7 +1762,6 @@ fn find_enum_type(
 pub fn generate_external_imports(
   analysis: analyzer.Analysis,
   source: String,
-  base_import: String,
   include_server_fields: Bool,
 ) -> String {
   let local_fields = case find_local_fields(source) {
@@ -1658,10 +1791,21 @@ pub fn generate_external_imports(
     _, _ -> modules_from_fields
   }
 
-  list.filter_map(modules_with_server, fn(alias) {
+  let enum_modules =
+    list.filter_map(analysis.enum_types, fn(et) {
+      case et.module {
+        "" -> Error(Nil)
+        mod -> Ok(mod)
+      }
+    })
+    |> list.unique
+
+  let modules_to_import =
+    list.unique(list.append(modules_with_server, enum_modules))
+
+  list.filter_map(modules_to_import, fn(alias) {
     case list.find(analysis.imported_modules, fn(im) { im.alias == alias }) {
-      Ok(im) ->
-        Ok("import " <> base_import <> im.module_path <> " as " <> im.alias)
+      Ok(im) -> Ok("import " <> im.module_path <> " as " <> im.alias)
       Error(_) -> Error(Nil)
     }
   })
@@ -2061,16 +2205,7 @@ fn generate_codec_module(
     })
 
   // Generate import statements for external modules
-  let base_import_dir = case string.split(module_path, "/") |> list.reverse {
-    [_, ..rest] ->
-      case list.reverse(rest) {
-        [] -> ""
-        parts -> string.join(parts, "/") <> "/"
-      }
-    _ -> ""
-  }
-  let ext_imports =
-    generate_external_imports(analysis, source, base_import_dir, True)
+  let ext_imports = generate_external_imports(analysis, source, True)
   let ext_imports_section = case ext_imports {
     "" -> ""
     imports -> imports <> "\n"

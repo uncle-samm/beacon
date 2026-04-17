@@ -79,6 +79,24 @@ pub fn resolve_transitive_external_sources_recurses_through_user_modules_test() 
   }
 }
 
+pub fn resolve_transitive_framework_sources_recurses_through_beacon_modules_test() {
+  let source =
+    "
+import beacon/application
+
+pub type Model { Model }
+pub type Msg { Ping }
+
+pub fn update(model: Model, msg: Msg) -> Model { model }
+pub fn view(model: Model) { model }
+"
+
+  let sources = build.resolve_transitive_framework_sources([source], ".")
+  let module_paths = list.map(sources, fn(s) { s.1 })
+  let assert True = list.contains(module_paths, "beacon/application")
+  let assert True = list.contains(module_paths, "beacon/route")
+}
+
 pub fn generate_external_imports_emits_explicit_aliases_test() {
   let app_source =
     "
@@ -110,7 +128,55 @@ pub type AgentRunStatus {
       #("enums", "types/enums", enums_source),
     ])
 
-  let imports = build.generate_external_imports(analysis, app_source, "", False)
+  let imports = build.generate_external_imports(analysis, app_source, False)
+  let assert True = string.contains(imports, "import types/models as models")
+  let assert True = string.contains(imports, "import types/enums as enums")
+}
+
+pub fn generate_external_imports_preserves_nested_app_and_type_paths_test() {
+  let app_source =
+    "
+import server_state
+import types/models
+
+pub type Model { Model(service: models.ThreadService) }
+pub type Msg { Ping }
+pub fn update(model: Model, msg: Msg) -> Model { model }
+pub fn view(model: Model) { model }
+"
+  let server_source =
+    "
+import types/enums
+
+pub type ServerState {
+  ServerState(status: enums.AgentRunStatus)
+}
+"
+  let models_source =
+    "
+import types/enums
+
+pub type ThreadService {
+  ThreadService(status: enums.AgentRunStatus)
+}
+"
+  let enums_source =
+    "
+pub type AgentRunStatus {
+  Pending
+  Running
+}
+"
+  let assert Ok(analysis) =
+    analyzer.analyze_multi(app_source, [
+      #("server_state", "app/server_state", server_source),
+      #("models", "types/models", models_source),
+      #("enums", "types/enums", enums_source),
+    ])
+
+  let imports = build.generate_external_imports(analysis, app_source, False)
+  let assert True =
+    string.contains(imports, "import app/server_state as server_state")
   let assert True = string.contains(imports, "import types/models as models")
   let assert True = string.contains(imports, "import types/enums as enums")
 }

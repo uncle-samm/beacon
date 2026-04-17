@@ -1,6 +1,6 @@
 /// Build codec tests — verify the analysis pipeline produces correct
 /// codec inputs for every app type (standard, app_with_server, app_with_local, multi-file).
-
+import beacon/build
 import beacon/build/analyzer
 import gleam/list
 import gleam/string
@@ -31,10 +31,8 @@ pub fn view(model: Model) { model }
   let assert False = analysis.has_server
   let assert False = analysis.has_local
   let assert True = list.length(analysis.model_fields) == 3
-  let assert True =
-    list.any(analysis.model_fields, fn(f) { f.name == "count" })
-  let assert True =
-    list.any(analysis.model_fields, fn(f) { f.name == "name" })
+  let assert True = list.any(analysis.model_fields, fn(f) { f.name == "count" })
+  let assert True = list.any(analysis.model_fields, fn(f) { f.name == "name" })
   let assert True =
     list.any(analysis.model_fields, fn(f) { f.name == "active" })
 }
@@ -58,8 +56,7 @@ pub fn view(model: Model) { model }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert True = analysis.has_server
-  let assert True =
-    list.any(analysis.model_fields, fn(f) { f.name == "count" })
+  let assert True = list.any(analysis.model_fields, fn(f) { f.name == "count" })
   let assert True =
     list.any(analysis.model_fields, fn(f) { f.name == "username" })
   // Server fields must NOT be in model_fields
@@ -244,8 +241,7 @@ pub type Item {
 "
   let assert Ok(analysis) =
     analyzer.analyze_multi(app_source, [#("task", "task", external_source)])
-  let assert True =
-    list.any(analysis.model_fields, fn(f) { f.name == "items" })
+  let assert True = list.any(analysis.model_fields, fn(f) { f.name == "items" })
   let assert True =
     list.any(analysis.model_fields, fn(f) { f.name == "filter" })
   let assert True =
@@ -359,10 +355,63 @@ pub type ServerState {
   let assert True =
     list.any(analysis.server_fields, fn(f) { f.name == "api_key" })
   // Model fields unaffected
-  let assert True =
-    list.any(analysis.model_fields, fn(f) { f.name == "count" })
+  let assert True = list.any(analysis.model_fields, fn(f) { f.name == "count" })
   let assert False =
     list.any(analysis.model_fields, fn(f) { f.name == "db_pool" })
+}
+
+pub fn codec_imports_include_external_enum_modules_test() {
+  let app_source =
+    "
+import server_state
+import types/models
+
+pub type Model {
+  Model(service: models.ThreadService)
+}
+pub type Msg {
+  Ping
+}
+pub fn update(model: Model, msg: Msg) -> Model {
+  model
+}
+pub fn view(model: Model) { model }
+"
+  let server_source =
+    "
+import types/enums
+
+pub type ServerState {
+  ServerState(status: enums.AgentRunStatus)
+}
+"
+  let models_source =
+    "
+import types/enums
+
+pub type ThreadService {
+  ThreadService(status: enums.AgentRunStatus)
+}
+"
+  let enums_source =
+    "
+pub type AgentRunStatus {
+  Pending
+  Running
+}
+"
+  let assert Ok(analysis) =
+    analyzer.analyze_multi(app_source, [
+      #("server_state", "app/server_state", server_source),
+      #("models", "types/models", models_source),
+      #("enums", "types/enums", enums_source),
+    ])
+
+  let imports = build.generate_external_imports(analysis, app_source, True)
+  let assert True =
+    string.contains(imports, "import app/server_state as server_state")
+  let assert True = string.contains(imports, "import types/models as models")
+  let assert True = string.contains(imports, "import types/enums as enums")
 }
 
 // === Option Type Detection ===
@@ -395,8 +444,7 @@ pub fn view(model: Model) { model }
   let assert True = ef.type_name == "Option"
   let assert True = ef.inner_type == "String"
 
-  let age_field =
-    list.find(analysis.model_fields, fn(f) { f.name == "age" })
+  let age_field = list.find(analysis.model_fields, fn(f) { f.name == "age" })
   let assert Ok(af) = age_field
   let assert True = af.type_name == "Option"
   let assert True = af.inner_type == "Int"

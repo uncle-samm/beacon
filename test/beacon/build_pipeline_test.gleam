@@ -1,6 +1,6 @@
 /// Build pipeline tests — verify the analysis pipeline works correctly
 /// against real example apps and across rebuild scenarios.
-
+import beacon/build
 import beacon/build/analyzer
 import gleam/list
 import simplifile
@@ -8,13 +8,11 @@ import simplifile
 // === Example App Analysis Tests ===
 
 pub fn counter_example_analyzes_correctly_test() {
-  let assert Ok(source) =
-    simplifile.read("examples/counter/src/counter.gleam")
+  let assert Ok(source) = simplifile.read("examples/counter/src/counter.gleam")
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert False = analysis.has_server
   let assert False = analysis.has_local
-  let assert True =
-    list.any(analysis.model_fields, fn(f) { f.name == "count" })
+  let assert True = list.any(analysis.model_fields, fn(f) { f.name == "count" })
   let assert True =
     list.any(analysis.msg_variants, fn(v) { v.name == "Increment" })
   let assert True =
@@ -29,11 +27,9 @@ pub fn privacy_demo_analyzes_correctly_test() {
   let assert False = analysis.has_local
   let assert True = list.length(analysis.server_fields) >= 1
   // Model fields should NOT include server fields
-  let server_field_names =
-    list.map(analysis.server_fields, fn(f) { f.name })
+  let server_field_names = list.map(analysis.server_fields, fn(f) { f.name })
   list.each(server_field_names, fn(name) {
-    let assert False =
-      list.any(analysis.model_fields, fn(f) { f.name == name })
+    let assert False = list.any(analysis.model_fields, fn(f) { f.name == name })
   })
   let assert True = list.length(analysis.computed_fields) >= 1
 }
@@ -47,8 +43,7 @@ pub fn counter_local_analyzes_correctly_test() {
 }
 
 pub fn domains_multi_file_analyzes_correctly_test() {
-  let assert Ok(app_source) =
-    simplifile.read("examples/domains/src/app.gleam")
+  let assert Ok(app_source) = simplifile.read("examples/domains/src/app.gleam")
   let externals = case
     simplifile.read("examples/domains/src/domains/auth.gleam"),
     simplifile.read("examples/domains/src/domains/items.gleam")
@@ -137,13 +132,11 @@ pub fn view(model: Model) { model }
 "
   let assert Ok(a1) = analyzer.analyze(source_v1)
   let assert True = list.length(a1.model_fields) == 1
-  let assert False =
-    list.any(a1.model_fields, fn(f) { f.name == "name" })
+  let assert False = list.any(a1.model_fields, fn(f) { f.name == "name" })
 
   let assert Ok(a2) = analyzer.analyze(source_v2)
   let assert True = list.length(a2.model_fields) == 2
-  let assert True =
-    list.any(a2.model_fields, fn(f) { f.name == "name" })
+  let assert True = list.any(a2.model_fields, fn(f) { f.name == "name" })
 }
 
 pub fn analysis_after_adding_server_type_detects_it_test() {
@@ -181,6 +174,39 @@ pub fn view(model: Model) { model }
 
   let assert Ok(a2) = analyzer.analyze(source_v2)
   let assert True = a2.has_server
-  let assert True =
-    list.any(a2.server_fields, fn(f) { f.name == "api_key" })
+  let assert True = list.any(a2.server_fields, fn(f) { f.name == "api_key" })
+}
+
+pub fn enhanced_bundle_supported_for_standard_app_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Inc }
+pub fn update(model: Model, msg: Msg) -> Model { model }
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = build.can_build_enhanced_bundle(source, analysis)
+}
+
+pub fn enhanced_bundle_skipped_for_app_with_server_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Server { Server(secret: String) }
+pub type Msg { Inc }
+pub fn update(model: Model, msg: Msg) -> Model { model }
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert False = build.can_build_enhanced_bundle(source, analysis)
+}
+
+pub fn enhanced_bundle_skipped_for_model_only_multi_file_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert False = build.can_build_enhanced_bundle(source, analysis)
 }
