@@ -5,7 +5,6 @@
 /// The client JS is the framework runtime (WS, event delegation, morphing).
 /// User code runs ONLY on the server. This is the LiveView model.
 /// No fallbacks — the build succeeds or fails loudly.
-
 import beacon/build/analyzer
 import beacon/log
 import glance
@@ -74,14 +73,14 @@ pub fn main() {
 /// Returns #(alias, module_path, source_text) triples for each resolved import.
 fn resolve_external_sources(
   source: String,
-  base_dir: String,
+  source_root: String,
 ) -> List(#(String, String, String)) {
   case glance.module(source) {
     Error(_) -> {
       log.warning(
         "beacon.build",
         "Failed to parse source for external module resolution in "
-          <> base_dir,
+          <> source_root,
       )
       []
     }
@@ -100,10 +99,10 @@ fn resolve_external_sources(
         {
           True -> Error(Nil)
           False -> {
-            // Resolve to file path: base_dir/src/<mod_path>.gleam
-            // For apps at src/app.gleam importing domains/auth,
-            // the file is at src/domains/auth.gleam
-            let file_path = base_dir <> "/" <> mod_path <> ".gleam"
+            // Resolve to file path relative to the project's source root.
+            // For apps at src/app/model.gleam importing app/route,
+            // the file is at src/app/route.gleam.
+            let file_path = source_root <> "/" <> mod_path <> ".gleam"
             case simplifile.read(file_path) {
               Ok(ext_source) -> {
                 // The alias is the last segment of the module path
@@ -146,6 +145,44 @@ fn resolve_external_sources(
   }
 }
 
+/// Resolve all transitive user-module sources reachable from a source file.
+/// This follows imports recursively and preserves each module at most once.
+pub fn resolve_transitive_external_sources(
+  source: String,
+  source_root: String,
+) -> List(#(String, String, String)) {
+  let direct_sources = resolve_external_sources(source, source_root)
+  let #(sources, _seen) =
+    walk_external_sources(direct_sources, source_root, [], [])
+  sources
+}
+
+fn walk_external_sources(
+  pending: List(#(String, String, String)),
+  source_root: String,
+  seen: List(String),
+  acc: List(#(String, String, String)),
+) -> #(List(#(String, String, String)), List(String)) {
+  case pending {
+    [] -> #(list.reverse(acc), seen)
+    [ext, ..rest] -> {
+      let #(alias, module_path, ext_source) = ext
+      case list.contains(seen, module_path) {
+        True -> walk_external_sources(rest, source_root, seen, acc)
+        False -> {
+          let child_sources = resolve_external_sources(ext_source, source_root)
+          walk_external_sources(
+            list.append(child_sources, rest),
+            source_root,
+            [module_path, ..seen],
+            [#(alias, module_path, ext_source), ..acc],
+          )
+        }
+      }
+    }
+  }
+}
+
 /// Extract the source directory (parent of the file) for import resolution.
 fn source_dir(path: String) -> String {
   case string.split(path, "/") |> list.reverse {
@@ -158,20 +195,45 @@ fn source_dir(path: String) -> String {
   }
 }
 
+/// Resolve the root source directory for a Gleam file.
+/// Examples:
+/// - `src/app.gleam` -> `src`
+/// - `src/app/model.gleam` -> `src`
+/// - `examples/domains/src/app.gleam` -> `examples/domains/src`
+pub fn source_root(path: String) -> String {
+  let parts = string.split(path, "/")
+  let root = source_root_parts(parts, [])
+  case root {
+    "" -> source_dir(path)
+    _ -> root
+  }
+}
+
+fn source_root_parts(parts: List(String), acc: List(String)) -> String {
+  case parts {
+    [] -> ""
+    [part, ..rest] -> {
+      let new_acc = [part, ..acc]
+      case part {
+        "src" -> string.join(list.reverse(new_acc), "/")
+        _ -> source_root_parts(rest, new_acc)
+      }
+    }
+  }
+}
+
 /// Compile a specific module — analyze, generate codec, build client JS.
 /// Only single-file apps (Model + Msg + update + view in one file) get an enhanced
 /// bundle with view compiled to JS. Multi-file and app_with_server apps get codec
 /// generation only; the client uses runtime-only JS (server-rendered).
 fn compile_module(path: String, source: String) -> Nil {
   // Resolve external module sources: imports + sibling files in same directory
-  let base_dir = source_dir(path)
-  let import_sources = resolve_external_sources(source, base_dir)
+  let base_dir = source_root(path)
+  let import_sources = resolve_transitive_external_sources(source, base_dir)
   let sibling_sources = resolve_sibling_sources(path)
   let import_paths = list.map(import_sources, fn(s) { s.1 })
   let extra_siblings =
-    list.filter(sibling_sources, fn(s) {
-      !list.contains(import_paths, s.1)
-    })
+    list.filter(sibling_sources, fn(s) { !list.contains(import_paths, s.1) })
   let external_sources = list.append(import_sources, extra_siblings)
   case analyzer.analyze_multi(source, external_sources) {
     Ok(analysis) -> {
@@ -191,15 +253,15 @@ fn compile_module(path: String, source: String) -> Nil {
       // Required for state-over-the-wire — client renders view locally
       log.info("beacon.build", "Building enhanced bundle...")
       case build_enhanced_bundle(path, source, analysis) {
-        Ok(Nil) ->
-          log.info("beacon.build", "Enhanced bundle ready")
+        Ok(Nil) -> log.info("beacon.build", "Enhanced bundle ready")
         Error(reason) -> {
           // Enhanced build failed — do NOT fall back to runtime-only bundle.
           // SSR HTML still works; user just won't have interactivity until they fix the build.
           log.error(
             "beacon.build",
-            "Enhanced build FAILED: " <> reason
-            <> " — no client JS will be produced. Fix the build error above.",
+            "Enhanced build FAILED: "
+              <> reason
+              <> " — no client JS will be produced. Fix the build error above.",
           )
         }
       }
@@ -214,21 +276,20 @@ fn compile_module(path: String, source: String) -> Nil {
 /// 1. Import-based: follows `import` statements from the primary file
 /// 2. Sibling scan: reads all .gleam files in the same directory (catches
 ///    ServerState, Msg, etc. in separate files not imported by the model file)
-fn analyze_app(dir: String) -> Result(#(String, String, analyzer.Analysis), String) {
+fn analyze_app(
+  dir: String,
+) -> Result(#(String, String, analyzer.Analysis), String) {
   case find_app_module(dir) {
     Ok(#(path, source)) -> {
-      let base_dir = source_dir(path)
-      let import_sources = resolve_external_sources(source, base_dir)
+      let base_dir = source_root(path)
+      let import_sources = resolve_transitive_external_sources(source, base_dir)
       // Also scan sibling files in the same directory as the primary file.
       // This catches ServerState/Msg in separate files not imported by model.gleam.
       let sibling_sources = resolve_sibling_sources(path)
       // Merge: import sources take priority (they have correct aliases from imports)
-      let import_paths =
-        list.map(import_sources, fn(s) { s.1 })
+      let import_paths = list.map(import_sources, fn(s) { s.1 })
       let extra_siblings =
-        list.filter(sibling_sources, fn(s) {
-          !list.contains(import_paths, s.1)
-        })
+        list.filter(sibling_sources, fn(s) { !list.contains(import_paths, s.1) })
       let all_external = list.append(import_sources, extra_siblings)
       case analyzer.analyze_multi(source, all_external) {
         Ok(analysis) -> Ok(#(path, source, analysis))
@@ -255,16 +316,13 @@ fn resolve_sibling_sources(
   case simplifile.read_directory(dir) {
     Ok(entries) ->
       list.filter_map(entries, fn(entry) {
-        case
-          string.ends_with(entry, ".gleam") && entry != primary_filename
-        {
+        case string.ends_with(entry, ".gleam") && entry != primary_filename {
           True -> {
             let file_path = dir <> "/" <> entry
             case simplifile.read(file_path) {
               Ok(source) -> {
                 // Derive alias from filename: "server_state.gleam" -> "server_state"
-                let alias =
-                  string.replace(entry, ".gleam", "")
+                let alias = string.replace(entry, ".gleam", "")
                 // Module path is just the filename (no .gleam) — siblings are in the
                 // same directory as the primary file, so no directory prefix needed.
                 // The codec generator prepends the base_import_dir when generating imports.
@@ -309,15 +367,27 @@ pub fn try_enhanced_bundle() -> Result(Nil, String) {
 fn create_build_directories(dir: String) -> Result(Nil, String) {
   case simplifile.create_directory_all(dir <> "/src/beacon") {
     Error(err) ->
-      Error("Failed to create " <> dir <> "/src/beacon: " <> string.inspect(err))
+      Error(
+        "Failed to create " <> dir <> "/src/beacon: " <> string.inspect(err),
+      )
     Ok(Nil) ->
       case simplifile.create_directory_all(dir <> "/src/beacon/template") {
         Error(err) ->
-          Error("Failed to create " <> dir <> "/src/beacon/template: " <> string.inspect(err))
+          Error(
+            "Failed to create "
+            <> dir
+            <> "/src/beacon/template: "
+            <> string.inspect(err),
+          )
         Ok(Nil) ->
           case simplifile.create_directory_all(dir <> "/src/beacon_client") {
             Error(err) ->
-              Error("Failed to create " <> dir <> "/src/beacon_client: " <> string.inspect(err))
+              Error(
+                "Failed to create "
+                <> dir
+                <> "/src/beacon_client: "
+                <> string.inspect(err),
+              )
             Ok(Nil) -> Ok(Nil)
           }
       }
@@ -347,154 +417,240 @@ fn build_enhanced_bundle(
       case create_build_directories(dir) {
         Error(reason) -> Error("Directory setup failed: " <> reason)
         Ok(Nil) -> {
-
-      // gleam.toml
-      let toml =
-        "name = \"beacon_client_app\"\nversion = \"0.1.0\"\ntarget = \"javascript\"\n\n[dependencies]\ngleam_stdlib = \">= 0.44.0 and < 2.0.0\"\ngleam_json = \">= 3.1.0 and < 4.0.0\"\n"
-      case simplifile.write(dir <> "/gleam.toml", toml) {
-        Error(err) -> Error("Failed to write gleam.toml: " <> string.inspect(err))
-        Ok(Nil) -> {
-
-      // Step 3: Write extracted pure source as app.gleam
-      case simplifile.write(dir <> "/src/app.gleam", client_source) {
-        Error(err) -> Error("Failed to write app.gleam: " <> string.inspect(err))
-        Ok(Nil) -> {
-
-      // Step 4: Copy pure beacon modules
-      copy_file(
-        beacon_root <> "/src/beacon/element.gleam",
-        dir <> "/src/beacon/element.gleam",
-      )
-      copy_file(
-        beacon_root <> "/src/beacon/html.gleam",
-        dir <> "/src/beacon/html.gleam",
-      )
-      copy_file(
-        beacon_root <> "/src/beacon/template/rendered.gleam",
-        dir <> "/src/beacon/template/rendered.gleam",
-      )
-
-      // Step 5: Copy beacon_client handler + FFI + patch module
-      copy_file(
-        beacon_root <> "/beacon_client/src/beacon_client/handler.gleam",
-        dir <> "/src/beacon_client/handler.gleam",
-      )
-      copy_file(
-        beacon_root <> "/beacon_client/src/beacon_client/patch.mjs",
-        dir <> "/src/beacon_client/patch.mjs",
-      )
-      copy_file(
-        beacon_root <> "/beacon_client/src/beacon_client_ffi.mjs",
-        dir <> "/src/beacon_client_ffi.mjs",
-      )
-
-      // Step 5.5: Copy external domain module files (for multi-file apps)
-      let app_base_dir = source_dir(path)
-      list.each(analysis.imported_modules, fn(im) {
-        let src_path = app_base_dir <> "/" <> im.module_path <> ".gleam"
-        // Create target directory if needed
-        let target_dir = case string.split(im.module_path, "/") |> list.reverse {
-          [_, ..rest] ->
-            case list.reverse(rest) {
-              [] -> ""
-              parts -> string.join(parts, "/")
-            }
-          _ -> ""
-        }
-        case target_dir {
-          "" -> Nil
-          d -> {
-            case simplifile.create_directory_all(dir <> "/src/" <> d) {
-              Ok(Nil) -> Nil
-              Error(err) ->
-                log.warning("beacon.build", "Failed to create directory " <> dir <> "/src/" <> d <> ": " <> string.inspect(err))
-            }
-          }
-        }
-        copy_file(src_path, dir <> "/src/" <> im.module_path <> ".gleam")
-      })
-
-      // Step 6: Generate JS beacon.gleam (event helpers using beacon_client/handler)
-      case simplifile.write(dir <> "/src/beacon.gleam", generate_js_beacon()) {
-        Error(err) -> Error("Failed to write beacon.gleam: " <> string.inspect(err))
-        Ok(Nil) -> {
-
-      // Step 7: Generate beacon_app_entry.gleam
-      // Check if update was extracted (pure update → LOCAL + optimistic)
-      let has_client_update = string.contains(client_source, "pub fn update(")
-      let entry = generate_entry_point(analysis, source, has_client_update)
-      case simplifile.write(dir <> "/src/beacon_app_entry.gleam", entry) {
-        Error(err) -> Error("Failed to write entry point: " <> string.inspect(err))
-        Ok(Nil) -> {
-
-      // Step 8: Compile JS project
-      let compile_result =
-        run_command("cd '" <> dir <> "' && gleam build 2>&1")
-      case string.contains(compile_result, "Compiled in") {
-        False ->
-          Error("JS compilation failed:\n" <> compile_result)
-        True -> {
-          // Step 9: Bundle with esbuild
-          case simplifile.create_directory_all("priv/static") {
+          // gleam.toml
+          let toml =
+            "name = \"beacon_client_app\"\nversion = \"0.1.0\"\ntarget = \"javascript\"\n\n[dependencies]\ngleam_stdlib = \">= 0.44.0 and < 2.0.0\"\ngleam_json = \">= 3.1.0 and < 4.0.0\"\n"
+          case simplifile.write(dir <> "/gleam.toml", toml) {
             Error(err) ->
-              Error("Failed to create priv/static: " <> string.inspect(err))
+              Error("Failed to write gleam.toml: " <> string.inspect(err))
             Ok(Nil) -> {
+              // Step 3: Write extracted pure source as app.gleam
+              case simplifile.write(dir <> "/src/app.gleam", client_source) {
+                Error(err) ->
+                  Error("Failed to write app.gleam: " <> string.inspect(err))
+                Ok(Nil) -> {
+                  // Step 4: Copy pure beacon modules
+                  copy_file(
+                    beacon_root <> "/src/beacon/element.gleam",
+                    dir <> "/src/beacon/element.gleam",
+                  )
+                  copy_file(
+                    beacon_root <> "/src/beacon/html.gleam",
+                    dir <> "/src/beacon/html.gleam",
+                  )
+                  copy_file(
+                    beacon_root <> "/src/beacon/template/rendered.gleam",
+                    dir <> "/src/beacon/template/rendered.gleam",
+                  )
 
-          // Entry point that sets window.BeaconApp
-          let entry_js =
-            "import { initClientAfterBoot } from './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\ninitClientAfterBoot();\n"
-          case simplifile.write(dir <> "/bundle_entry.mjs", entry_js) {
-            Error(err) -> Error("Failed to write bundle entry: " <> string.inspect(err))
-            Ok(Nil) -> {
+                  // Step 5: Copy beacon_client handler + FFI + patch module
+                  copy_file(
+                    beacon_root
+                      <> "/beacon_client/src/beacon_client/handler.gleam",
+                    dir <> "/src/beacon_client/handler.gleam",
+                  )
+                  copy_file(
+                    beacon_root <> "/beacon_client/src/beacon_client/patch.mjs",
+                    dir <> "/src/beacon_client/patch.mjs",
+                  )
+                  copy_file(
+                    beacon_root <> "/beacon_client/src/beacon_client_ffi.mjs",
+                    dir <> "/src/beacon_client_ffi.mjs",
+                  )
 
-          let hash = generate_safe_hash()
-          let filename = "beacon_client_" <> hash <> ".js"
-          // Clean old bundles before writing new one
-          case simplifile.get_files("priv/static") {
-            Ok(files) ->
-              list.each(files, fn(f) {
-                case string.contains(f, "beacon_client_") && string.ends_with(f, ".js") {
-                  True -> {
-                    case simplifile.delete(f) {
-                      Ok(Nil) -> Nil
-                      Error(err) ->
-                        log.warning("beacon.build", "Failed to delete old bundle " <> f <> ": " <> string.inspect(err))
+                  // Step 5.5: Copy transitive external module files.
+                  let app_base_dir = source_root(path)
+                  let external_sources =
+                    resolve_transitive_external_sources(source, app_base_dir)
+                  list.each(external_sources, fn(ext) {
+                    let #(_alias, module_path, _source_text) = ext
+                    let src_path =
+                      app_base_dir <> "/" <> module_path <> ".gleam"
+                    // Create target directory if needed
+                    let target_dir = case
+                      string.split(module_path, "/") |> list.reverse
+                    {
+                      [_, ..rest] ->
+                        case list.reverse(rest) {
+                          [] -> ""
+                          parts -> string.join(parts, "/")
+                        }
+                      _ -> ""
+                    }
+                    case target_dir {
+                      "" -> Nil
+                      d -> {
+                        case
+                          simplifile.create_directory_all(dir <> "/src/" <> d)
+                        {
+                          Ok(Nil) -> Nil
+                          Error(err) ->
+                            log.warning(
+                              "beacon.build",
+                              "Failed to create directory "
+                                <> dir
+                                <> "/src/"
+                                <> d
+                                <> ": "
+                                <> string.inspect(err),
+                            )
+                        }
+                      }
+                    }
+                    copy_file(
+                      src_path,
+                      dir <> "/src/" <> module_path <> ".gleam",
+                    )
+                  })
+
+                  // Step 6: Generate JS beacon.gleam (event helpers using beacon_client/handler)
+                  case
+                    simplifile.write(
+                      dir <> "/src/beacon.gleam",
+                      generate_js_beacon(),
+                    )
+                  {
+                    Error(err) ->
+                      Error(
+                        "Failed to write beacon.gleam: " <> string.inspect(err),
+                      )
+                    Ok(Nil) -> {
+                      // Step 7: Generate beacon_app_entry.gleam
+                      // Check if update was extracted (pure update → LOCAL + optimistic)
+                      let has_client_update =
+                        string.contains(client_source, "pub fn update(")
+                      let entry =
+                        generate_entry_point(
+                          analysis,
+                          source,
+                          has_client_update,
+                        )
+                      case
+                        simplifile.write(
+                          dir <> "/src/beacon_app_entry.gleam",
+                          entry,
+                        )
+                      {
+                        Error(err) ->
+                          Error(
+                            "Failed to write entry point: "
+                            <> string.inspect(err),
+                          )
+                        Ok(Nil) -> {
+                          // Step 8: Compile JS project
+                          let compile_result =
+                            run_command(
+                              "cd '" <> dir <> "' && gleam build 2>&1",
+                            )
+                          case string.contains(compile_result, "Compiled in") {
+                            False ->
+                              Error(
+                                "JS compilation failed:\n" <> compile_result,
+                              )
+                            True -> {
+                              // Step 9: Bundle with esbuild
+                              case
+                                simplifile.create_directory_all("priv/static")
+                              {
+                                Error(err) ->
+                                  Error(
+                                    "Failed to create priv/static: "
+                                    <> string.inspect(err),
+                                  )
+                                Ok(Nil) -> {
+                                  // Entry point that sets window.BeaconApp
+                                  let entry_js =
+                                    "import { initClientAfterBoot } from './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\ninitClientAfterBoot();\n"
+                                  case
+                                    simplifile.write(
+                                      dir <> "/bundle_entry.mjs",
+                                      entry_js,
+                                    )
+                                  {
+                                    Error(err) ->
+                                      Error(
+                                        "Failed to write bundle entry: "
+                                        <> string.inspect(err),
+                                      )
+                                    Ok(Nil) -> {
+                                      let hash = generate_safe_hash()
+                                      let filename =
+                                        "beacon_client_" <> hash <> ".js"
+                                      // Clean old bundles before writing new one
+                                      case simplifile.get_files("priv/static") {
+                                        Ok(files) ->
+                                          list.each(files, fn(f) {
+                                            case
+                                              string.contains(
+                                                f,
+                                                "beacon_client_",
+                                              )
+                                              && string.ends_with(f, ".js")
+                                            {
+                                              True -> {
+                                                case simplifile.delete(f) {
+                                                  Ok(Nil) -> Nil
+                                                  Error(err) ->
+                                                    log.warning(
+                                                      "beacon.build",
+                                                      "Failed to delete old bundle "
+                                                        <> f
+                                                        <> ": "
+                                                        <> string.inspect(err),
+                                                    )
+                                                }
+                                              }
+                                              False -> Nil
+                                            }
+                                          })
+                                        Error(_) -> Nil
+                                      }
+
+                                      let result =
+                                        run_command(
+                                          "cd '"
+                                          <> dir
+                                          <> "' && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/"
+                                          <> filename
+                                          <> " --minify 2>&1",
+                                        )
+                                      case
+                                        string.contains(result, "Done")
+                                        || string.contains(result, ".js")
+                                      {
+                                        True -> {
+                                          case
+                                            simplifile.write(
+                                              "priv/static/beacon_client.manifest",
+                                              filename,
+                                            )
+                                          {
+                                            Ok(Nil) -> Ok(Nil)
+                                            Error(err) ->
+                                              Error(
+                                                "Failed to write manifest: "
+                                                <> string.inspect(err),
+                                              )
+                                          }
+                                        }
+                                        False ->
+                                          Error("esbuild failed:\n" <> result)
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   }
-                  False -> Nil
                 }
-              })
-            Error(_) -> Nil
-          }
-
-          let result =
-            run_command(
-              "cd '" <> dir <> "' && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/" <> filename <> " --minify 2>&1",
-            )
-          case string.contains(result, "Done") || string.contains(result, ".js") {
-            True -> {
-              case simplifile.write("priv/static/beacon_client.manifest", filename) {
-                Ok(Nil) -> Ok(Nil)
-                Error(err) -> Error("Failed to write manifest: " <> string.inspect(err))
               }
             }
-            False -> Error("esbuild failed:\n" <> result)
-          }
-          }
-          }
-          }
           }
         }
-      }
-      }
-      }
-      }
-      }
-      }
-      }
-      }
-      }
-      }
       }
     }
   }
@@ -512,7 +668,13 @@ fn clean_codec_artifacts() -> Nil {
             case simplifile.delete(f) {
               Ok(Nil) -> Nil
               Error(err) ->
-                log.warning("beacon.build", "Failed to delete codec artifact " <> f <> ": " <> string.inspect(err))
+                log.warning(
+                  "beacon.build",
+                  "Failed to delete codec artifact "
+                    <> f
+                    <> ": "
+                    <> string.inspect(err),
+                )
             }
           }
           False -> Nil
@@ -535,11 +697,17 @@ fn copy_file(from: String, to: String) -> Nil {
       case simplifile.write(to, contents) {
         Ok(Nil) -> Nil
         Error(err) ->
-          log.error("beacon.build", "Failed to write " <> to <> ": " <> string.inspect(err))
+          log.error(
+            "beacon.build",
+            "Failed to write " <> to <> ": " <> string.inspect(err),
+          )
       }
     }
     Error(err) ->
-      log.warning("beacon.build", "Could not copy " <> from <> ": " <> string.inspect(err))
+      log.warning(
+        "beacon.build",
+        "Could not copy " <> from <> ": " <> string.inspect(err),
+      )
   }
 }
 
@@ -630,9 +798,7 @@ fn decoder_for_field(
         inner ->
           case find_custom_type(custom_types, inner, field.inner_module) {
             Ok(ct) ->
-              "decode.list("
-              <> decoder_name(ct.module, ct.name)
-              <> "())"
+              "decode.list(" <> decoder_name(ct.module, ct.name) <> "())"
             Error(_) -> "decode.list(decode.dynamic)"
           }
       }
@@ -716,12 +882,7 @@ fn generate_enum_decoder(et: analyzer.EnumTypeInfo) -> String {
   let fn_name = decoder_name(et.module, et.name)
   let arms =
     list.map(et.variants, fn(v) {
-      "    \""
-      <> string.lowercase(v)
-      <> "\" -> "
-      <> variant_prefix
-      <> "."
-      <> v
+      "    \"" <> string.lowercase(v) <> "\" -> " <> variant_prefix <> "." <> v
     })
   let first_variant = case et.variants {
     [first, ..] -> variant_prefix <> "." <> first
@@ -753,7 +914,13 @@ fn generate_entry_point(
     list.filter_map(analysis.model_fields, fn(f) {
       case f.type_name {
         "List" ->
-          case find_custom_type(analysis.custom_types, f.inner_type, f.inner_module) {
+          case
+            find_custom_type(
+              analysis.custom_types,
+              f.inner_type,
+              f.inner_module,
+            )
+          {
             Ok(ct) -> Ok(ct)
             Error(_) -> Error(Nil)
           }
@@ -772,20 +939,16 @@ fn generate_entry_point(
 
   // Generate enum decoders
   let enum_decoder_fns =
-    list.map(analysis.enum_types, fn(et) {
-      generate_enum_decoder(et)
-    })
+    list.map(analysis.enum_types, fn(et) { generate_enum_decoder(et) })
 
   let custom_decoders_code =
-    string.join(
-      list.append(custom_decoder_fns, enum_decoder_fns),
-      "\n\n",
-    )
+    string.join(list.append(custom_decoder_fns, enum_decoder_fns), "\n\n")
 
   // Generate model decoder
   let decode_fields =
     list.map(analysis.model_fields, fn(f) {
-      let decoder = decoder_for_field(f, analysis.custom_types, analysis.enum_types)
+      let decoder =
+        decoder_for_field(f, analysis.custom_types, analysis.enum_types)
       "    use "
       <> f.name
       <> " <- decode.field(\""
@@ -866,7 +1029,7 @@ fn generate_entry_point(
     "app.Model(" <> string.join(default_model_args, ", ") <> ")"
 
   // Generate external module imports for the entry point
-  let entry_ext_imports = generate_external_imports(analysis, "")
+  let entry_ext_imports = generate_external_imports(analysis, source, "", False)
   let entry_ext_imports_section = case entry_ext_imports {
     "" -> ""
     imports -> imports <> "\n"
@@ -932,8 +1095,7 @@ fn generate_client_encode_model(
   let model_fields = generate_client_encoder_fields(analysis)
   let custom_encoders_code = generate_client_custom_encoders(analysis)
   case analysis.has_local {
-    False ->
-      custom_encoders_code <> "
+    False -> custom_encoders_code <> "
 /// Encode model to JSON string for patch diffing.
 pub fn encode_model(model: app.Model, _local: Nil) -> String {
   json.object([
@@ -955,7 +1117,8 @@ pub fn encode_model(model: app.Model, _local: Nil) -> String {
       }
       // Build local field encoders using the same infrastructure as model fields
       // Need to create a temporary analysis-like context for Local fields
-      let local_field_strs = generate_field_encoders(local_fields, "local", analysis)
+      let local_field_strs =
+        generate_field_encoders(local_fields, "local", analysis)
       let all_fields = model_fields <> "\n" <> local_field_strs
       custom_encoders_code <> "
 /// Encode model+local to JSON for patch diffing.
@@ -999,14 +1162,17 @@ fn generate_field_encoders(
             "Bool" -> "json.array(" <> accessor <> ", json.bool)"
             "String" -> "json.array(" <> accessor <> ", json.string)"
             inner ->
-              case find_custom_type(analysis.custom_types, inner, f.inner_module) {
+              case
+                find_custom_type(analysis.custom_types, inner, f.inner_module)
+              {
                 Ok(ct) ->
                   "json.array("
                   <> accessor
                   <> ", client_"
                   <> encoder_name(ct.module, ct.name)
                   <> ")"
-                Error(_) -> "json.array(" <> accessor <> ", fn(_) { json.null() })"
+                Error(_) ->
+                  "json.array(" <> accessor <> ", fn(_) { json.null() })"
               }
           }
         _ ->
@@ -1018,7 +1184,9 @@ fn generate_field_encoders(
               <> accessor
               <> "))"
             Error(_) ->
-              case find_custom_type(analysis.custom_types, f.type_name, f.module) {
+              case
+                find_custom_type(analysis.custom_types, f.type_name, f.module)
+              {
                 Ok(ct) ->
                   "client_"
                   <> encoder_name(ct.module, ct.name)
@@ -1042,7 +1210,13 @@ fn generate_client_custom_encoders(analysis: analyzer.Analysis) -> String {
     list.filter_map(all_fields, fn(f) {
       case f.type_name {
         "List" ->
-          case find_custom_type(analysis.custom_types, f.inner_type, f.inner_module) {
+          case
+            find_custom_type(
+              analysis.custom_types,
+              f.inner_type,
+              f.inner_module,
+            )
+          {
             Ok(ct) -> Ok(ct)
             Error(_) -> Error(Nil)
           }
@@ -1096,7 +1270,13 @@ fn generate_client_custom_encoders(analysis: analyzer.Analysis) -> String {
       let fn_name = "client_" <> encoder_name(et.module, et.name)
       let arms =
         list.map(et.variants, fn(v) {
-          "    " <> variant_prefix <> "." <> v <> " -> \"" <> string.lowercase(v) <> "\""
+          "    "
+          <> variant_prefix
+          <> "."
+          <> v
+          <> " -> \""
+          <> string.lowercase(v)
+          <> "\""
         })
       "fn "
       <> fn_name
@@ -1160,10 +1340,7 @@ pub fn msg_affects_model(msg: app.Msg) -> Bool {
 
 /// Generate decode_local function for apps with Local type.
 /// Returns empty string if no Local type.
-fn generate_local_decoder(
-  analysis: analyzer.Analysis,
-  source: String,
-) -> String {
+fn generate_local_decoder(analysis: analyzer.Analysis, source: String) -> String {
   case analysis.has_local {
     False -> ""
     True -> {
@@ -1179,7 +1356,8 @@ fn generate_local_decoder(
       }
       let decode_fields =
         list.map(local_fields, fn(f) {
-          let decoder = decoder_for_field(f, analysis.custom_types, analysis.enum_types)
+          let decoder =
+            decoder_for_field(f, analysis.custom_types, analysis.enum_types)
           "    use "
           <> f.name
           <> " <- decode.field(\""
@@ -1240,13 +1418,20 @@ pub fn build_base_client() -> Nil {
   case simplifile.create_directory_all(dir) {
     Ok(Nil) -> Nil
     Error(err) -> {
-      log.error("beacon.build", "Failed to create " <> dir <> ": " <> string.inspect(err))
+      log.error(
+        "beacon.build",
+        "Failed to create " <> dir <> ": " <> string.inspect(err),
+      )
     }
   }
 
   // Ensure beacon_client is built (JS target)
   let bc_build_result =
-    run_command("cd '" <> beacon_root <> "/beacon_client' && gleam build --target javascript 2>&1")
+    run_command(
+      "cd '"
+      <> beacon_root
+      <> "/beacon_client' && gleam build --target javascript 2>&1",
+    )
   log.debug("beacon.build", "beacon_client build: " <> bc_build_result)
 
   // Resolve absolute path for the entry point import
@@ -1256,9 +1441,7 @@ pub fn build_base_client() -> Nil {
   // Create entry point — just import the client module.
   // It auto-boots via the data-beacon-auto script attribute detection.
   let entry_js =
-    "import '"
-    <> abs_bc_path
-    <> "/beacon_client/beacon_client_ffi.mjs';\n"
+    "import '" <> abs_bc_path <> "/beacon_client/beacon_client_ffi.mjs';\n"
   case simplifile.write(dir <> "/entry.mjs", entry_js) {
     Error(err) -> {
       log.error(
@@ -1282,12 +1465,21 @@ pub fn build_base_client() -> Nil {
           case simplifile.get_files("priv/static") {
             Ok(files) ->
               list.each(files, fn(f) {
-                case string.contains(f, "beacon_client_") && string.ends_with(f, ".js") {
+                case
+                  string.contains(f, "beacon_client_")
+                  && string.ends_with(f, ".js")
+                {
                   True -> {
                     case simplifile.delete(f) {
                       Ok(Nil) -> Nil
                       Error(err) ->
-                        log.warning("beacon.build", "Failed to delete old bundle " <> f <> ": " <> string.inspect(err))
+                        log.warning(
+                          "beacon.build",
+                          "Failed to delete old bundle "
+                            <> f
+                            <> ": "
+                            <> string.inspect(err),
+                        )
                     }
                   }
                   False -> Nil
@@ -1297,16 +1489,21 @@ pub fn build_base_client() -> Nil {
           }
           let result =
             run_command(
-              "cd '" <> dir <> "' && npx esbuild entry.mjs --bundle --format=iife --outfile=../../priv/static/" <> filename <> " --minify 2>&1",
+              "cd '"
+              <> dir
+              <> "' && npx esbuild entry.mjs --bundle --format=iife --outfile=../../priv/static/"
+              <> filename
+              <> " --minify 2>&1",
             )
-          case string.contains(result, "Done") || string.contains(result, ".js") {
+          case
+            string.contains(result, "Done") || string.contains(result, ".js")
+          {
             True -> {
-              case simplifile.write("priv/static/beacon_client.manifest", filename) {
+              case
+                simplifile.write("priv/static/beacon_client.manifest", filename)
+              {
                 Ok(Nil) -> {
-                  log.info(
-                    "beacon.build",
-                    "Base client JS built: " <> filename,
-                  )
+                  log.info("beacon.build", "Base client JS built: " <> filename)
                 }
                 Error(err) ->
                   log.error(
@@ -1338,9 +1535,10 @@ pub fn auto_build() -> Nil {
       // No app module found — error loudly, do NOT fall back to runtime-only bundle
       log.error(
         "beacon.build",
-        "No app module found in src/: " <> reason
-        <> " — no client JS will be produced. "
-        <> "Ensure your app has pub type Model (for codec-only mode) or pub type Model + pub type Msg + pub fn update + pub fn view in one file (for enhanced bundle).",
+        "No app module found in src/: "
+          <> reason
+          <> " — no client JS will be produced. "
+          <> "Ensure your app has pub type Model (for codec-only mode) or pub type Model + pub type Msg + pub fn update + pub fn view in one file (for enhanced bundle).",
       )
     }
   }
@@ -1395,7 +1593,9 @@ fn find_custom_type(
   name: String,
   module: String,
 ) -> Result(analyzer.CustomTypeInfo, Nil) {
-  case list.find(custom_types, fn(ct) { ct.name == name && ct.module == module }) {
+  case
+    list.find(custom_types, fn(ct) { ct.name == name && ct.module == module })
+  {
     Ok(ct) -> Ok(ct)
     Error(_) ->
       // Backward compat: if module is empty, try any matching name
@@ -1412,7 +1612,9 @@ fn find_enum_type(
   name: String,
   module: String,
 ) -> Result(analyzer.EnumTypeInfo, Nil) {
-  case list.find(enum_types, fn(ct) { ct.name == name && ct.module == module }) {
+  case
+    list.find(enum_types, fn(ct) { ct.name == name && ct.module == module })
+  {
     Ok(et) -> Ok(et)
     Error(_) ->
       case module {
@@ -1423,25 +1625,30 @@ fn find_enum_type(
 }
 
 /// Generate import statements for external modules used in the analysis.
-fn generate_external_imports(
+pub fn generate_external_imports(
   analysis: analyzer.Analysis,
+  source: String,
   base_import: String,
+  include_server_fields: Bool,
 ) -> String {
-  // Collect all unique module aliases referenced by model fields
-  let modules_from_fields =
-    list.filter_map(analysis.model_fields, fn(f) {
-      case f.module {
-        "" ->
-          case f.inner_module {
-            "" -> Error(Nil)
-            mod -> Ok(mod)
-          }
-        mod -> Ok(mod)
-      }
+  let local_fields = case find_local_fields(source) {
+    Ok(fields) -> fields
+    Error(_) -> []
+  }
+  let initial_fields =
+    list.append(analysis.model_fields, case include_server_fields {
+      True -> list.append(analysis.server_fields, local_fields)
+      False -> local_fields
     })
+
+  let modules_from_fields =
+    collect_external_modules_from_fields(
+      initial_fields,
+      analysis.custom_types,
+      [],
+    )
     |> list.unique
 
-  // Also include the server module if it's external
   let modules_with_server = case analysis.has_server, analysis.server_module {
     True, mod if mod != "" ->
       case list.contains(modules_from_fields, mod) {
@@ -1451,16 +1658,111 @@ fn generate_external_imports(
     _, _ -> modules_from_fields
   }
 
-  // Find the full module paths from imported_modules
   list.filter_map(modules_with_server, fn(alias) {
-    case
-      list.find(analysis.imported_modules, fn(im) { im.alias == alias })
-    {
-      Ok(im) -> Ok("import " <> base_import <> im.module_path)
+    case list.find(analysis.imported_modules, fn(im) { im.alias == alias }) {
+      Ok(im) ->
+        Ok("import " <> base_import <> im.module_path <> " as " <> im.alias)
       Error(_) -> Error(Nil)
     }
   })
   |> string.join("\n")
+}
+
+fn collect_external_modules_from_fields(
+  fields: List(analyzer.TypeField),
+  custom_types: List(analyzer.CustomTypeInfo),
+  seen_types: List(String),
+) -> List(String) {
+  case fields {
+    [] -> []
+    [field, ..rest] -> {
+      let field_aliases =
+        collect_external_modules_from_field(field, custom_types, seen_types)
+      let rest_aliases =
+        collect_external_modules_from_fields(rest, custom_types, seen_types)
+      list.unique(list.append(field_aliases, rest_aliases))
+    }
+  }
+}
+
+fn collect_external_modules_from_field(
+  field: analyzer.TypeField,
+  custom_types: List(analyzer.CustomTypeInfo),
+  seen_types: List(String),
+) -> List(String) {
+  let direct_aliases =
+    list.filter_map([field.module, field.inner_module], fn(mod) {
+      case mod {
+        "" -> Error(Nil)
+        _ -> Ok(mod)
+      }
+    })
+
+  case field.type_name {
+    "List" ->
+      case
+        find_custom_type(custom_types, field.inner_type, field.inner_module)
+      {
+        Ok(ct) ->
+          list.unique(list.append(
+            direct_aliases,
+            collect_external_modules_from_custom_type(
+              ct,
+              custom_types,
+              seen_types,
+            ),
+          ))
+        Error(_) -> direct_aliases
+      }
+    "Option" ->
+      case
+        find_custom_type(custom_types, field.inner_type, field.inner_module)
+      {
+        Ok(ct) ->
+          list.unique(list.append(
+            direct_aliases,
+            collect_external_modules_from_custom_type(
+              ct,
+              custom_types,
+              seen_types,
+            ),
+          ))
+        Error(_) -> direct_aliases
+      }
+    _ ->
+      case find_custom_type(custom_types, field.type_name, field.module) {
+        Ok(ct) ->
+          list.unique(list.append(
+            direct_aliases,
+            collect_external_modules_from_custom_type(
+              ct,
+              custom_types,
+              seen_types,
+            ),
+          ))
+        Error(_) -> direct_aliases
+      }
+  }
+}
+
+fn collect_external_modules_from_custom_type(
+  ct: analyzer.CustomTypeInfo,
+  custom_types: List(analyzer.CustomTypeInfo),
+  seen_types: List(String),
+) -> List(String) {
+  let key = ct.module <> "|" <> ct.name
+  case list.contains(seen_types, key) {
+    True -> []
+    False -> {
+      let next_seen = [key, ..seen_types]
+      let nested_aliases =
+        collect_external_modules_from_fields(ct.fields, custom_types, next_seen)
+      case ct.module {
+        "" -> nested_aliases
+        mod -> list.unique([mod, ..nested_aliases])
+      }
+    }
+  }
 }
 
 /// Generate a server-side encoder expression for a single field.
@@ -1488,13 +1790,19 @@ fn generate_server_field_encoder(
             Ok(et) ->
               "json.string(" <> encoder_name(et.module, et.name) <> "(v))"
             Error(_) ->
-              case find_custom_type(analysis.custom_types, inner, f.inner_module) {
+              case
+                find_custom_type(analysis.custom_types, inner, f.inner_module)
+              {
                 Ok(ct) -> encoder_name(ct.module, ct.name) <> "(v)"
                 Error(_) -> "json.string(v)"
               }
           }
       }
-      "case " <> accessor <> " { option.Some(v) -> " <> inner_encoder <> "\n      option.None -> json.null() }"
+      "case "
+      <> accessor
+      <> " { option.Some(v) -> "
+      <> inner_encoder
+      <> "\n      option.None -> json.null() }"
     }
     "List" ->
       case f.inner_type {
@@ -1506,9 +1814,13 @@ fn generate_server_field_encoder(
           // Unknown inner type (e.g., tuples, complex generics)
           log.warning(
             "beacon.build",
-            "List field '" <> f.name <> "' has unknown inner type — using string.inspect",
+            "List field '"
+              <> f.name
+              <> "' has unknown inner type — using string.inspect",
           )
-          "json.array(" <> accessor <> ", fn(x) { json.string(gleam_string.inspect(x)) })"
+          "json.array("
+          <> accessor
+          <> ", fn(x) { json.string(gleam_string.inspect(x)) })"
         }
         inner ->
           case find_custom_type(analysis.custom_types, inner, f.inner_module) {
@@ -1521,9 +1833,15 @@ fn generate_server_field_encoder(
             Error(_) -> {
               log.warning(
                 "beacon.build",
-                "List field '" <> f.name <> "' has unresolved inner type '" <> inner <> "' — using string.inspect",
+                "List field '"
+                  <> f.name
+                  <> "' has unresolved inner type '"
+                  <> inner
+                  <> "' — using string.inspect",
               )
-              "json.array(" <> accessor <> ", fn(x) { json.string(gleam_string.inspect(x)) })"
+              "json.array("
+              <> accessor
+              <> ", fn(x) { json.string(gleam_string.inspect(x)) })"
             }
           }
       }
@@ -1539,11 +1857,7 @@ fn generate_server_field_encoder(
         Error(_) ->
           // Check if it's a custom record type
           case find_custom_type(analysis.custom_types, f.type_name, f.module) {
-            Ok(ct) ->
-              encoder_name(ct.module, ct.name)
-              <> "("
-              <> accessor
-              <> ")"
+            Ok(ct) -> encoder_name(ct.module, ct.name) <> "(" <> accessor <> ")"
             Error(_) -> {
               log.warning(
                 "beacon.build",
@@ -1600,13 +1914,25 @@ fn generate_codec_module(
     list.filter_map(analysis.model_fields, fn(f) {
       case f.type_name {
         "List" ->
-          case find_custom_type(analysis.custom_types, f.inner_type, f.inner_module) {
+          case
+            find_custom_type(
+              analysis.custom_types,
+              f.inner_type,
+              f.inner_module,
+            )
+          {
             Ok(ct) -> Ok(generate_type_encoder(module_name, ct, analysis))
             Error(_) -> Error(Nil)
           }
         "Option" ->
           // Option(CustomType) needs an encoder for the inner type
-          case find_custom_type(analysis.custom_types, f.inner_type, f.inner_module) {
+          case
+            find_custom_type(
+              analysis.custom_types,
+              f.inner_type,
+              f.inner_module,
+            )
+          {
             Ok(ct) -> Ok(generate_type_encoder(module_name, ct, analysis))
             Error(_) -> Error(Nil)
           }
@@ -1660,7 +1986,10 @@ fn generate_codec_module(
     mod -> mod <> "." <> analysis.server_type_name
   }
 
-  let #(param_type, model_extract) = case analysis.has_local, analysis.has_server {
+  let #(param_type, model_extract) = case
+    analysis.has_local,
+    analysis.has_server
+  {
     True, _ -> #(
       "#(" <> module_name <> ".Model, " <> module_name <> ".Local)",
       "  let model = state.0\n  let local = state.1\n",
@@ -1684,20 +2013,41 @@ fn generate_codec_module(
       "    #(\"" <> cf.name <> "\", " <> encoder <> ")"
     })
 
-  let all_field_encoders = list.flatten([model_field_encoders, local_field_encoders, computed_field_encoders])
+  let all_field_encoders =
+    list.flatten([
+      model_field_encoders,
+      local_field_encoders,
+      computed_field_encoders,
+    ])
 
   // Generate server-side custom type decoders (for decode_model)
   let server_custom_decoders =
     list.filter_map(analysis.model_fields, fn(f) {
       case f.type_name {
         "List" ->
-          case find_custom_type(analysis.custom_types, f.inner_type, f.inner_module) {
-            Ok(ct) -> Ok(generate_server_custom_decoder(module_name, ct, analysis.enum_types))
+          case
+            find_custom_type(
+              analysis.custom_types,
+              f.inner_type,
+              f.inner_module,
+            )
+          {
+            Ok(ct) ->
+              Ok(generate_server_custom_decoder(
+                module_name,
+                ct,
+                analysis.enum_types,
+              ))
             Error(_) -> Error(Nil)
           }
         _ ->
           case find_custom_type(analysis.custom_types, f.type_name, f.module) {
-            Ok(ct) -> Ok(generate_server_custom_decoder(module_name, ct, analysis.enum_types))
+            Ok(ct) ->
+              Ok(generate_server_custom_decoder(
+                module_name,
+                ct,
+                analysis.enum_types,
+              ))
             Error(_) -> Error(Nil)
           }
       }
@@ -1719,47 +2069,39 @@ fn generate_codec_module(
       }
     _ -> ""
   }
-  let ext_imports = generate_external_imports(analysis, base_import_dir)
+  let ext_imports =
+    generate_external_imports(analysis, source, base_import_dir, True)
   let ext_imports_section = case ext_imports {
     "" -> ""
     imports -> imports <> "\n"
   }
 
-  let source =
-    "/// AUTO-GENERATED by beacon/build — do not edit manually.
+  let source = "/// AUTO-GENERATED by beacon/build — do not edit manually.
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
-import "
-    <> module_path
-    <> "\n"
-    <> ext_imports_section
-    <> "import gleam/dynamic/decode
+import " <> module_path <> "\n" <> ext_imports_section <> "import gleam/dynamic/decode
 import gleam/json
 import gleam/option
 import gleam/string as gleam_string
 
-"
-    <> string.join(custom_encoders, "\n\n")
-    <> "\n\n"
-    <> string.join(enum_encoders, "\n\n")
-    <> "\n\n"
-    <> string.join(server_custom_decoders, "\n\n")
-    <> "\n\n"
-    <> string.join(server_enum_decoders, "\n\n")
-    <> "\n\n/// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: "
-    <> param_type
-    <> ") -> String {\n"
-    <> model_extract
-    <> "  json.object([\n"
-    <> string.join(all_field_encoders, ",\n")
-    <> ",\n  ])\n  |> json.to_string\n}\n"
-    <> generate_server_decode_model(module_name, analysis, source)
-    <> generate_substate_encoders(module_name, analysis)
+" <> string.join(custom_encoders, "\n\n") <> "\n\n" <> string.join(
+      enum_encoders,
+      "\n\n",
+    ) <> "\n\n" <> string.join(server_custom_decoders, "\n\n") <> "\n\n" <> string.join(
+      server_enum_decoders,
+      "\n\n",
+    ) <> "\n\n/// Encode the Model to JSON for model_sync.
+pub fn encode_model(state: " <> param_type <> ") -> String {\n" <> model_extract <> "  json.object([\n" <> string.join(
+      all_field_encoders,
+      ",\n",
+    ) <> ",\n  ])\n  |> json.to_string\n}\n" <> generate_server_decode_model(
+      module_name,
+      analysis,
+      source,
+    ) <> generate_substate_encoders(module_name, analysis)
 
   case simplifile.write(codec_path, source) {
-    Ok(Nil) ->
-      log.info("beacon.build", "Generated codec: " <> codec_path)
+    Ok(Nil) -> log.info("beacon.build", "Generated codec: " <> codec_path)
     Error(err) ->
       log.error(
         "beacon.build",
@@ -1782,7 +2124,10 @@ fn generate_substate_encoders(
         "" -> module_name <> "." <> analysis.server_type_name
         mod -> mod <> "." <> analysis.server_type_name
       }
-      let #(param_type, model_extract) = case analysis.has_local, analysis.has_server {
+      let #(param_type, model_extract) = case
+        analysis.has_local,
+        analysis.has_server
+      {
         True, _ -> #(
           "#(" <> module_name <> ".Model, " <> module_name <> ".Local)",
           "  let model = state.0\n",
@@ -1837,8 +2182,7 @@ fn generate_substate_encoders(
         <> "]\n}\n"
 
       // Generate encode_flat_fields — only the NON-substate fields
-      let substate_field_names =
-        list.map(substates, fn(s) { s.field_name })
+      let substate_field_names = list.map(substates, fn(s) { s.field_name })
       let flat_fields =
         list.filter(analysis.model_fields, fn(f) {
           !list.contains(substate_field_names, f.name)
@@ -1875,7 +2219,8 @@ fn generate_server_decode_model(
   // Model decoder fields
   let model_decode_fields =
     list.map(analysis.model_fields, fn(f) {
-      let decoder = server_decoder_for_field(f, analysis.custom_types, analysis.enum_types)
+      let decoder =
+        server_decoder_for_field(f, analysis.custom_types, analysis.enum_types)
       "    use "
       <> f.name
       <> " <- decode.field(\""
@@ -1947,7 +2292,12 @@ fn generate_server_decode_model(
       }
       let local_decode_fields =
         list.map(local_fields, fn(f) {
-          let decoder = server_decoder_for_field(f, analysis.custom_types, analysis.enum_types)
+          let decoder =
+            server_decoder_for_field(
+              f,
+              analysis.custom_types,
+              analysis.enum_types,
+            )
           "    use "
           <> f.name
           <> " <- decode.field(\""
@@ -1972,7 +2322,11 @@ fn generate_server_decode_model(
         })
       let local_constructor = case local_constructor_args {
         [] -> module_name <> ".Local"
-        _ -> module_name <> ".Local(" <> string.join(local_constructor_args, ", ") <> ")"
+        _ ->
+          module_name
+          <> ".Local("
+          <> string.join(local_constructor_args, ", ")
+          <> ")"
       }
 
       "\n/// Decode a #(Model, Local) from JSON string (for applying client patches).\npub fn decode_model(json_str: String) -> Result(#("
@@ -2032,9 +2386,7 @@ fn server_decoder_for_field(
         inner ->
           case find_custom_type(custom_types, inner, field.inner_module) {
             Ok(ct) ->
-              "decode.list(server_"
-              <> decoder_name(ct.module, ct.name)
-              <> "())"
+              "decode.list(server_" <> decoder_name(ct.module, ct.name) <> "())"
             Error(_) -> "decode.list(decode.dynamic)"
           }
       }
@@ -2043,10 +2395,7 @@ fn server_decoder_for_field(
         Ok(_) -> "decode.string"
         Error(_) ->
           case find_custom_type(custom_types, field.type_name, field.module) {
-            Ok(ct) ->
-              "server_"
-              <> decoder_name(ct.module, ct.name)
-              <> "()"
+            Ok(ct) -> "server_" <> decoder_name(ct.module, ct.name) <> "()"
             Error(_) -> "decode.dynamic"
           }
       }
@@ -2129,12 +2478,7 @@ fn generate_server_enum_decoder(
   let fn_name = "server_" <> decoder_name(et.module, et.name)
   let arms =
     list.map(et.variants, fn(v) {
-      "    \""
-      <> string.lowercase(v)
-      <> "\" -> "
-      <> variant_prefix
-      <> "."
-      <> v
+      "    \"" <> string.lowercase(v) <> "\" -> " <> variant_prefix <> "." <> v
     })
   let first_variant = case et.variants {
     [first, ..] -> variant_prefix <> "." <> first
@@ -2239,10 +2583,7 @@ fn read_beacon_path_from_toml() -> Result(String, Nil) {
     Ok(contents) -> {
       let lines = string.split(contents, "\n")
       list.find_map(lines, fn(line) {
-        case
-          string.contains(line, "beacon")
-          && string.contains(line, "path")
-        {
+        case string.contains(line, "beacon") && string.contains(line, "path") {
           True -> {
             case string.split(line, "\"") {
               [_, path, ..] -> Ok(path)
@@ -2271,24 +2612,26 @@ fn find_app_module(dir: String) -> Result(#(String, String), String) {
   //    The codec only needs Model fields — the analyzer handles cross-file resolution.
   let all_files = collect_gleam_files(dir)
   // Pass 1: single-file app with all four
-  let full_match = list.find(all_files, fn(pair) {
-    let #(_path, source) = pair
-    let has_update =
-      string.contains(source, "pub fn update")
-      || string.contains(source, "pub fn make_update")
-    let has_view = string.contains(source, "pub fn view")
-    let has_model = string.contains(source, "pub type Model")
-    let has_msg = string.contains(source, "pub type Msg")
-    has_update && has_view && has_model && has_msg
-  })
+  let full_match =
+    list.find(all_files, fn(pair) {
+      let #(_path, source) = pair
+      let has_update =
+        string.contains(source, "pub fn update")
+        || string.contains(source, "pub fn make_update")
+      let has_view = string.contains(source, "pub fn view")
+      let has_model = string.contains(source, "pub type Model")
+      let has_msg = string.contains(source, "pub type Msg")
+      has_update && has_view && has_model && has_msg
+    })
   case full_match {
     Ok(found) -> Ok(found)
     Error(Nil) -> {
       // Pass 2: file with pub type Model (codec-only — enough for encode_model)
-      let model_match = list.find(all_files, fn(pair) {
-        let #(_path, source) = pair
-        string.contains(source, "pub type Model")
-      })
+      let model_match =
+        list.find(all_files, fn(pair) {
+          let #(_path, source) = pair
+          string.contains(source, "pub type Model")
+        })
       case model_match {
         Ok(found) -> {
           log.info(
@@ -2297,10 +2640,7 @@ fn find_app_module(dir: String) -> Result(#(String, String), String) {
           )
           Ok(found)
         }
-        Error(Nil) ->
-          Error(
-            "No module found with pub type Model",
-          )
+        Error(Nil) -> Error("No module found with pub type Model")
       }
     }
   }
@@ -2338,7 +2678,11 @@ fn collect_gleam_files(dir: String) -> List(#(String, String)) {
     Error(err) -> {
       log.warning(
         "beacon.build",
-        "Failed to read directory: " <> dir <> " (" <> string.inspect(err) <> ")",
+        "Failed to read directory: "
+          <> dir
+          <> " ("
+          <> string.inspect(err)
+          <> ")",
       )
       []
     }
@@ -2378,14 +2722,22 @@ fn extract_type_fields(
                     let m = case mod {
                       option.Some(m) -> m
                       option.None -> {
-                        log.debug("beacon.build", "No module qualifier for type field '" <> name <> "'")
+                        log.debug(
+                          "beacon.build",
+                          "No module qualifier for type field '" <> name <> "'",
+                        )
                         ""
                       }
                     }
                     let im = case inner_mod {
                       option.Some(im) -> im
                       option.None -> {
-                        log.debug("beacon.build", "No inner module qualifier for type field '" <> name <> "'")
+                        log.debug(
+                          "beacon.build",
+                          "No inner module qualifier for type field '"
+                            <> name
+                            <> "'",
+                        )
                         ""
                       }
                     }
@@ -2395,7 +2747,10 @@ fn extract_type_fields(
                     let m = case mod {
                       option.Some(m) -> m
                       option.None -> {
-                        log.debug("beacon.build", "No module qualifier for type field '" <> name <> "'")
+                        log.debug(
+                          "beacon.build",
+                          "No module qualifier for type field '" <> name <> "'",
+                        )
                         ""
                       }
                     }
@@ -2447,7 +2802,12 @@ fn generate_safe_hash() -> String {
   case is_hex_string(raw) && raw != "" {
     True -> raw
     False -> {
-      log.warning("beacon.build", "Hash output contained non-hex characters: " <> raw <> ", using fallback")
+      log.warning(
+        "beacon.build",
+        "Hash output contained non-hex characters: "
+          <> raw
+          <> ", using fallback",
+      )
       "00000000"
     }
   }

@@ -1,9 +1,10 @@
 /// Build system tests — verify codec generation produces correct output.
 /// Tests the build pipeline through the analyzer + codec generation.
-
+import beacon/build
 import beacon/build/analyzer
 import gleam/list
 import gleam/string
+import simplifile
 
 // === Codec Generation Correctness Tests ===
 // These verify the analyzer produces the right inputs for codec generation.
@@ -31,6 +32,87 @@ pub fn view(model: Model) { model }
   let assert True = find("name") == "String"
   let assert True = find("active") == "Bool"
   let assert True = find("rate") == "Float"
+}
+
+pub fn source_root_resolves_nested_app_modules_test() {
+  let assert "src" = build.source_root("src/app/model.gleam")
+  let assert "examples/domains/src" =
+    build.source_root("examples/domains/src/app.gleam")
+  let assert "src" = build.source_root("src/app.gleam")
+}
+
+pub fn resolve_transitive_external_sources_recurses_through_user_modules_test() {
+  let temp_root = "build/beacon_test_transitive_sources"
+  let src_root = temp_root <> "/src"
+  let app_path = src_root <> "/app.gleam"
+  let models_path = src_root <> "/types/models.gleam"
+  let enums_path = src_root <> "/types/enums.gleam"
+
+  case simplifile.delete(temp_root) {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+  }
+  let assert Ok(Nil) = simplifile.create_directory_all(src_root <> "/types")
+  let assert Ok(Nil) =
+    simplifile.write(
+      app_path,
+      "import types/models\npub type Model { Model(status: models.AgentRunStatus) }\n",
+    )
+  let assert Ok(Nil) =
+    simplifile.write(
+      models_path,
+      "import types/enums\npub type AgentRunStatus { Pending Running Done }\n",
+    )
+  let assert Ok(Nil) =
+    simplifile.write(enums_path, "pub type AgentType { Codex Gemini }\n")
+
+  let assert Ok(app_source) = simplifile.read(app_path)
+  let sources = build.resolve_transitive_external_sources(app_source, src_root)
+  let module_paths = list.map(sources, fn(s) { s.1 })
+  let assert True = list.contains(module_paths, "types/models")
+  let assert True = list.contains(module_paths, "types/enums")
+  let assert False = list.contains(module_paths, "app")
+
+  case simplifile.delete(temp_root) {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+  }
+}
+
+pub fn generate_external_imports_emits_explicit_aliases_test() {
+  let app_source =
+    "
+import types/models
+
+pub type Model { Model(service: models.ThreadService) }
+pub type Msg { Ping }
+pub fn update(model: Model, msg: Msg) -> Model { model }
+pub fn view(model: Model) { model }
+"
+  let models_source =
+    "
+import types/enums
+
+pub type ThreadService {
+  ThreadService(status: enums.AgentRunStatus)
+}
+"
+  let enums_source =
+    "
+pub type AgentRunStatus {
+  Pending
+  Running
+}
+"
+  let assert Ok(analysis) =
+    analyzer.analyze_multi(app_source, [
+      #("models", "types/models", models_source),
+      #("enums", "types/enums", enums_source),
+    ])
+
+  let imports = build.generate_external_imports(analysis, app_source, "", False)
+  let assert True = string.contains(imports, "import types/models as models")
+  let assert True = string.contains(imports, "import types/enums as enums")
 }
 
 // Note: Server field exclusion is tested in build_codec_test.gleam
@@ -83,7 +165,8 @@ pub fn view(model: Model) { model }
   let type_names = list.map(analysis.custom_types, fn(ct) { ct.name })
   let assert True = list.contains(type_names, "Item")
   // Item should have 2 fields
-  let assert Ok(item_type) = list.find(analysis.custom_types, fn(ct) { ct.name == "Item" })
+  let assert Ok(item_type) =
+    list.find(analysis.custom_types, fn(ct) { ct.name == "Item" })
   let assert True = list.length(item_type.fields) == 2
 }
 
