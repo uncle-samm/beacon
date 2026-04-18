@@ -5,20 +5,19 @@
 ///
 /// Reference: LiveView two-phase mount (dead render → live mount),
 /// Leptos SSR modes.
-
 import beacon/effect.{type Effect}
 import beacon/element.{type Node}
 import beacon/handler
 import beacon/log
 import beacon/route
-import gleam/option.{type Option, None, Some}
+import beacon/transport/server.{type ResponseBody, Bytes}
 import gleam/bit_array
 import gleam/bytes_tree
 import gleam/crypto
 import gleam/http/response.{type Response}
 import gleam/json
+import gleam/option.{type Option, None, Some}
 import gleam/string
-import beacon/transport/server.{type ResponseBody, Bytes}
 import simplifile
 
 /// Configuration for server-side rendering.
@@ -80,7 +79,8 @@ pub fn render_page(config: SsrConfig(model, msg)) -> RenderedPage {
   let token = create_session_token(config.secret_key)
 
   // Step 4: Build full HTML document
-  let html = build_html_document(config.title, view_html, token, config.head_html)
+  let html =
+    build_html_document(config.title, view_html, token, config.head_html)
 
   log.debug("beacon.ssr", "Dead render complete")
   RenderedPage(html: html, session_token: token)
@@ -127,7 +127,8 @@ pub fn render_page_for_path(
   let token = create_session_token(config.secret_key)
 
   // Step 5: Build HTML
-  let html = build_html_document(config.title, view_html, token, config.head_html)
+  let html =
+    build_html_document(config.title, view_html, token, config.head_html)
 
   log.debug("beacon.ssr", "Route-aware render complete for: " <> path)
   RenderedPage(html: html, session_token: token)
@@ -247,11 +248,34 @@ fn build_html_document(
   ])
 }
 
+/// Choose the directory that contains Beacon client assets.
+/// Prefer the consuming app's `priv/static` when it has a manifest, then fall
+/// back to Beacon's own priv dir for repo/dependency installs.
+pub fn choose_client_assets_dir(
+  has_local_manifest: Bool,
+  local_dir: String,
+  fallback_dir: String,
+) -> String {
+  case has_local_manifest {
+    True -> local_dir
+    False -> fallback_dir
+  }
+}
+
+/// Resolve the directory that contains Beacon client assets.
+pub fn client_assets_dir() -> String {
+  case simplifile.is_file("priv/static/beacon_client.manifest") {
+    Ok(True) ->
+      choose_client_assets_dir(True, "priv/static", beacon_priv_path("static"))
+    _ ->
+      choose_client_assets_dir(False, "priv/static", beacon_priv_path("static"))
+  }
+}
+
 /// Get the current client JS filename from the build manifest.
 /// The manifest is created by `gleam run -m beacon/build`.
-/// Resolves via `code:priv_dir(beacon)` so it works from consuming apps too.
 fn client_js_filename() -> String {
-  let manifest_path = beacon_priv_path("static/beacon_client.manifest")
+  let manifest_path = client_assets_dir() <> "/beacon_client.manifest"
   case simplifile.read(manifest_path) {
     Ok(name) -> string.trim(name)
     Error(err) -> {

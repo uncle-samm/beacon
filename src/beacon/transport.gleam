@@ -6,7 +6,6 @@
 /// instead of Mist. Direct gen_tcp for zero unnecessary abstraction layers.
 ///
 /// Reference: LiveView channel protocol, RFC 6455.
-
 import beacon/error
 import beacon/log
 import beacon/middleware
@@ -194,10 +193,7 @@ pub type TransportConfig {
     /// The factory receives the HTTP request so ws_init can read cookies/headers.
     runtime_factory: Option(
       fn(ConnectionId, process.Subject(InternalMessage), Request(Connection)) ->
-        #(
-          fn(ConnectionId, ClientMessage) -> Nil,
-          fn(ConnectionId) -> Nil,
-        ),
+        #(fn(ConnectionId, ClientMessage) -> Nil, fn(ConnectionId) -> Nil),
     ),
     /// Optional: WebSocket authentication function.
     /// If set, runs before upgrade — returns Ok to allow, Error to reject with 401.
@@ -214,8 +210,7 @@ pub type TransportConfig {
     /// If it returns Some(response), that response is sent immediately.
     /// If it returns None, the request falls through to normal routing.
     api_handler: Option(
-      fn(Request(Connection)) ->
-        Option(response.Response(ResponseBody)),
+      fn(Request(Connection)) -> Option(response.Response(ResponseBody)),
     ),
   )
 }
@@ -405,9 +400,7 @@ fn send_ws_message(state: ConnectionState, msg: ServerMessage) -> Nil {
     Error(_reason) -> {
       log.error(
         "beacon.transport",
-        "Failed to send message to "
-          <> state.id
-          <> ": send_text_frame failed",
+        "Failed to send message to " <> state.id <> ": send_text_frame failed",
       )
       Nil
     }
@@ -588,10 +581,7 @@ fn handle_ws_text_decode(
         False -> {
           log.debug(
             "beacon.transport",
-            "Event from "
-              <> new_state.id
-              <> ": "
-              <> client_message_type(msg),
+            "Event from " <> new_state.id <> ": " <> client_message_type(msg),
           )
           new_state.on_event(new_state.id, msg)
           new_state
@@ -675,7 +665,10 @@ fn cleanup_connection(state: ConnectionState) -> Nil {
 /// WebSocket receive loop — runs in the handler process.
 /// Receives TCP data and internal messages via a selector.
 /// This function never returns normally — it exits when the connection closes.
-fn ws_loop(state: ConnectionState, subject: process.Subject(InternalMessage)) -> Nil {
+fn ws_loop(
+  state: ConnectionState,
+  subject: process.Subject(InternalMessage),
+) -> Nil {
   let selector =
     process.new_selector()
     |> process.select(subject)
@@ -710,7 +703,14 @@ fn ws_loop_inner(
         FrameClose(close_state) -> {
           case server.send_close_frame(close_state.socket) {
             Ok(Nil) -> Nil
-            Error(reason) -> log.warning("beacon.transport", "Failed to send close frame to " <> close_state.id <> ": " <> reason)
+            Error(reason) ->
+              log.warning(
+                "beacon.transport",
+                "Failed to send close frame to "
+                  <> close_state.id
+                  <> ": "
+                  <> reason,
+              )
           }
           server.close(close_state.socket)
           cleanup_connection(close_state)
@@ -750,11 +750,7 @@ fn ws_loop_inner(
     SendPatch(ops_json, version, ack_clock) -> {
       send_ws_message(
         state,
-        ServerPatch(
-          ops_json: ops_json,
-          version: version,
-          ack_clock: ack_clock,
-        ),
+        ServerPatch(ops_json: ops_json, version: version, ack_clock: ack_clock),
       )
       ws_loop_inner(state, selector)
     }
@@ -840,7 +836,10 @@ fn check_origin(req: Request(Connection)) -> Result(Nil, String) {
       let request_host = case request.get_header(req, "host") {
         Ok(h) -> h
         Error(Nil) -> {
-          log.warning("beacon.transport", "Missing Host header for origin check")
+          log.warning(
+            "beacon.transport",
+            "Missing Host header for origin check",
+          )
           ""
         }
       }
@@ -895,11 +894,7 @@ fn handle_ws_request(
       // Check origin — prevents cross-site WebSocket hijacking
       case check_origin(req) {
         Error(reason) -> {
-          transport_http.write_error(
-            socket,
-            403,
-            "Forbidden: " <> reason,
-          )
+          transport_http.write_error(socket, 403, "Forbidden: " <> reason)
         }
         Ok(Nil) -> {
           // Check WebSocket auth if configured
@@ -984,9 +979,7 @@ fn route_framework_request(
     ["health"] -> {
       response.new(200)
       |> response.set_header("content-type", "application/json")
-      |> response.set_body(
-        Bytes(bytes_tree.from_string("{\"status\":\"ok\"}")),
-      )
+      |> response.set_body(Bytes(bytes_tree.from_string("{\"status\":\"ok\"}")))
     }
     _ -> {
       let path = req.path
@@ -1016,19 +1009,10 @@ fn route_framework_request(
               {
                 Ok(resp) -> resp
                 Error(Nil) ->
-                  serve_page_or_ssr(
-                    config.page_html,
-                    config.ssr_factory,
-                    req,
-                  )
+                  serve_page_or_ssr(config.page_html, config.ssr_factory, req)
               }
             }
-            None ->
-              serve_page_or_ssr(
-                config.page_html,
-                config.ssr_factory,
-                req,
-              )
+            None -> serve_page_or_ssr(config.page_html, config.ssr_factory, req)
           }
         }
       }
@@ -1051,7 +1035,11 @@ fn per_connection_handler(socket: Socket, config: TransportConfig) -> Nil {
             Error(resp) -> {
               case transport_http.write_response(socket, resp) {
                 Ok(Nil) -> Nil
-                Error(reason) -> log.error("beacon.transport", "Failed to write middleware rejection: " <> reason)
+                Error(reason) ->
+                  log.error(
+                    "beacon.transport",
+                    "Failed to write middleware rejection: " <> reason,
+                  )
               }
               server.close(socket)
             }
@@ -1073,10 +1061,7 @@ fn per_connection_handler(socket: Socket, config: TransportConfig) -> Nil {
       }
     }
     Error(reason) -> {
-      log.error(
-        "beacon.transport",
-        "Failed to read HTTP request: " <> reason,
-      )
+      log.error("beacon.transport", "Failed to read HTTP request: " <> reason)
       server.close(socket)
     }
   }
@@ -1141,7 +1126,7 @@ fn default_page_html() -> String {
 }
 
 fn get_client_js_filename() -> String {
-  let manifest_path = ssr.beacon_priv_path("static/beacon_client.manifest")
+  let manifest_path = ssr.client_assets_dir() <> "/beacon_client.manifest"
   case simplifile.read(manifest_path) {
     Ok(name) -> string.trim(name)
     Error(err) -> {
@@ -1159,9 +1144,11 @@ fn get_client_js_filename() -> String {
 }
 
 fn serve_client_js() -> response.Response(ResponseBody) {
-  let manifest_path = ssr.beacon_priv_path("static/beacon_client.manifest")
+  let assets_dir = ssr.client_assets_dir()
+  let manifest_path = assets_dir <> "/beacon_client.manifest"
   case simplifile.read(manifest_path) {
-    Ok(name) -> serve_js_file(ssr.beacon_priv_path("static/" <> string.trim(name)))
+    Ok(name) ->
+      serve_js_file(assets_dir <> "/" <> string.trim(name))
     Error(err) -> {
       log.error(
         "beacon.transport",
@@ -1171,18 +1158,16 @@ fn serve_client_js() -> response.Response(ResponseBody) {
       )
       response.new(500)
       |> response.set_body(
-        Bytes(
-          bytes_tree.from_string(
-            "Client JS not built. Run `gleam run -m beacon/build` first.",
-          ),
-        ),
+        Bytes(bytes_tree.from_string(
+          "Client JS not built. Run `gleam run -m beacon/build` first.",
+        )),
       )
     }
   }
 }
 
 fn serve_hashed_client_js(name: String) -> response.Response(ResponseBody) {
-  serve_js_file(ssr.beacon_priv_path("static/" <> name))
+  serve_js_file(ssr.client_assets_dir() <> "/" <> name)
 }
 
 fn serve_js_file(path: String) -> response.Response(ResponseBody) {
@@ -1209,11 +1194,9 @@ fn serve_js_file(path: String) -> response.Response(ResponseBody) {
       response.new(500)
       |> response.set_header("content-type", "text/plain")
       |> response.set_body(
-        Bytes(
-          bytes_tree.from_string(
-            "// beacon.js not found. Run: gleam run -m beacon/build\n",
-          ),
-        ),
+        Bytes(bytes_tree.from_string(
+          "// beacon.js not found. Run: gleam run -m beacon/build\n",
+        )),
       )
     }
   }
@@ -1226,9 +1209,7 @@ const default_acceptor_count = 10
 
 /// Start the transport layer — binds to the given port and begins
 /// accepting connections. Returns the server process Pid for monitoring.
-pub fn start(
-  config: TransportConfig,
-) -> Result(process.Pid, error.BeaconError) {
+pub fn start(config: TransportConfig) -> Result(process.Pid, error.BeaconError) {
   log.info(
     "beacon.transport",
     "Starting on port " <> int.to_string(config.port),
@@ -1244,9 +1225,7 @@ pub fn start(
     Some(_) -> Nil
   }
 
-  let handler_fn = fn(socket: Socket) {
-    per_connection_handler(socket, config)
-  }
+  let handler_fn = fn(socket: Socket) { per_connection_handler(socket, config) }
 
   case server.start(config.port, handler_fn, default_acceptor_count) {
     Ok(pid) -> {

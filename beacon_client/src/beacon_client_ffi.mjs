@@ -2,6 +2,8 @@
 // Event delegation, WebSocket, DOM morphing, Rendered format — all here.
 // When BeaconApp is available (compiled user code), runs updates LOCALLY.
 // Local-only events produce ZERO WebSocket traffic.
+// Keydown is the one delegated event that still gets forwarded when the
+// local update does not change the model, so server-side apps can react to it.
 
 import { Ok, Error as GleamError } from "./gleam.mjs";
 import { diffModels, applyOps } from "./beacon_client/patch.mjs";
@@ -37,6 +39,8 @@ let clientRegistry = null;
 let clientInitialized = false;
 let renderPending = false;  // RAF throttle: true when a render is scheduled
 let clientModelJson = null;  // Cached JSON representation for patch diffing
+let pendingSendQueue = [];
+let readyForServerEvents = false;
 
 // === Process Dictionary (handler registry storage) ===
 export function pd_set(key, value) { _pd[key] = value; return undefined; }
@@ -115,7 +119,8 @@ function handleEventLocally(handlerId, eventData, eventName, targetPath, clock) 
     clientLocal = updateResult[1];
     clientRender();
 
-    if (App.msg_affects_model(msg)) {
+    const affectsModel = App.msg_affects_model(msg);
+    if (affectsModel) {
       // MODEL event — applied optimistically, now diff and send ops
       let ops = "";
       if (oldModelJson && App.encode_model) {
@@ -135,6 +140,11 @@ function handleEventLocally(handlerId, eventData, eventName, targetPath, clock) 
         }
       }
       return { action: "send", ops };
+    } else if (eventName === "keydown") {
+      // Keydown events must still reach the server so server-side apps can
+      // respond to Enter / navigation keys even when the local update is
+      // model-neutral.
+      return { action: "send", ops: "" };
     } else {
       // LOCAL event — client-only, zero server traffic
       return { action: "local" };
@@ -159,21 +169,66 @@ export function boot(rootSelector) {
 
 // === WebSocket ===
 function connect(wsUrl) {
+  readyForServerEvents = false;
   ws = new WebSocket(wsUrl);
   ws.onopen = () => {
     reconnectAttempts = 0;
     startHeartbeat();
     const token = appRoot ? appRoot.getAttribute("data-beacon-token") || "" : "";
-    send({ type: "join", token, path: location.pathname + location.search });
+    sendNow({ type: "join", token, path: location.pathname + location.search });
   };
   ws.onmessage = (e) => handleMessage(e.data);
   ws.onclose = () => { stopHeartbeat(); scheduleReconnect(wsUrl); };
   ws.onerror = (e) => console.error("[beacon] WS error:", e);
 }
 
-function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
-// Debug: expose WS state for testing
-window.__beaconWsState = () => ws ? ws.readyState : -1;
+function send(msg) {
+  const encoded = JSON.stringify(msg);
+  if (readyForServerEvents && ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(encoded);
+      return;
+    } catch (e) {
+      console.error("[beacon] WS send failed, queueing message:", e);
+    }
+  }
+  pendingSendQueue.push(encoded);
+}
+
+function sendNow(msg) {
+  const encoded = JSON.stringify(msg);
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    pendingSendQueue.push(encoded);
+    return;
+  }
+  try {
+    ws.send(encoded);
+  } catch (e) {
+    console.error("[beacon] WS send failed, queueing message:", e);
+    pendingSendQueue.push(encoded);
+  }
+}
+
+function flushPendingSendQueue() {
+  if (!readyForServerEvents || !ws || ws.readyState !== WebSocket.OPEN || pendingSendQueue.length === 0) return;
+
+  while (pendingSendQueue.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
+    const encoded = pendingSendQueue.shift();
+    if (encoded === undefined) break;
+    try {
+      ws.send(encoded);
+    } catch (e) {
+      console.error("[beacon] WS flush failed, preserving pending queue:", e);
+      pendingSendQueue.unshift(encoded);
+      return;
+    }
+  }
+}
+// Debug: expose WS state for testing when running in a browser.
+if (typeof window !== "undefined") {
+  window.__beaconWsState = () => ws ? ws.readyState : -1;
+  window.__beaconConnectionReady = () => readyForServerEvents;
+}
 function startHeartbeat() { stopHeartbeat(); heartbeatTimer = setInterval(() => send({ type: "heartbeat" }), 30000); }
 function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } }
 function scheduleReconnect(wsUrl) {
@@ -214,6 +269,8 @@ function handleMount(payload) {
   hydrated = false;
   morphInnerHTML(appRoot, payload);
   attachEvents();
+  readyForServerEvents = true;
+  flushPendingSendQueue();
 }
 
 function handleModelSync(modelJson, version) {
@@ -251,6 +308,8 @@ function handleModelSync(modelJson, version) {
       // (requestAnimationFrame may not fire in background tabs)
       clientRenderNow();
       console.log("[beacon] Model synced v" + version);
+      readyForServerEvents = true;
+      flushPendingSendQueue();
     }
   } catch (e) {
     console.error("[beacon] Model sync decode failed:", e);
@@ -389,13 +448,43 @@ function morphNode(o, n) {
   if (o.nodeType === 3) { if (o.textContent !== n.textContent) o.textContent = n.textContent; return; }
   if (o.nodeType !== 1) return;
   morphAttributes(o, n);
-  if ((o.tagName === "INPUT" || o.tagName === "TEXTAREA" || o.tagName === "SELECT") && o === document.activeElement) return;
+  const isFormControl = o.tagName === "INPUT" || o.tagName === "TEXTAREA" || o.tagName === "SELECT";
+  if (isFormControl && o === document.activeElement) return;
   morphChildren(o, n);
+  if (isFormControl) syncFormControlState(o, n);
 }
 
 function morphAttributes(o, n) {
   for (let i = o.attributes.length - 1; i >= 0; i--) if (!n.hasAttribute(o.attributes[i].name)) o.removeAttribute(o.attributes[i].name);
   for (let i = 0; i < n.attributes.length; i++) { const nm = n.attributes[i].name, v = n.attributes[i].value; if (o.getAttribute(nm) !== v) o.setAttribute(nm, v); }
+}
+
+function syncFormControlState(o, n) {
+  if (o.tagName === "TEXTAREA") {
+    const nextValue = n.hasAttribute("value") ? n.getAttribute("value") : n.textContent;
+    if (o.value !== nextValue) o.value = nextValue;
+    return;
+  }
+
+  if (o.tagName === "INPUT") {
+    const type = (o.getAttribute("type") || "").toLowerCase();
+    if (type === "checkbox" || type === "radio") {
+      o.checked = n.hasAttribute("checked");
+      return;
+    }
+    if (type !== "file") {
+      const nextValue = n.hasAttribute("value") ? n.getAttribute("value") : "";
+      if (o.value !== nextValue) o.value = nextValue;
+    }
+    return;
+  }
+
+  if (o.tagName === "SELECT") {
+    for (let i = 0; i < o.options.length && i < n.options.length; i++) {
+      o.options[i].selected = n.options[i].selected;
+    }
+    if (o.value !== n.value) o.value = n.value;
+  }
 }
 
 function sameNode(a, b) { if (a.nodeType !== b.nodeType) return false; if (a.nodeType === 3) return true; if (a.nodeType !== 1) return false; if (a.tagName !== b.tagName) return false; if (a.id && b.id) return a.id === b.id; return true; }
@@ -564,6 +653,7 @@ function attachEvents() {
     let t = e.target;
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-keydown")) {
+        if (e.key === "Enter" && !e.shiftKey) e.preventDefault();
         dispatchEvent("keydown", t.getAttribute("data-beacon-event-keydown"), JSON.stringify({ value: e.key }), getPath(t));
         return;
       }

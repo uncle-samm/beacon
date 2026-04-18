@@ -61,6 +61,7 @@ pub fn init(
 /// Handle an event from the DOM.
 pub fn handle_event(
   state: ClientState(model, local, msg),
+  event_name: String,
   handler_id: String,
   event_data: String,
 ) -> ClientState(model, local, msg) {
@@ -78,10 +79,10 @@ pub fn handle_event(
 
       // Check if Model changed — if so, sync with server
       let new_clock = state.event_clock + 1
-      case state.msg_affects_model(msg) {
+      case should_send_to_server(event_name, state.msg_affects_model, msg) {
         True -> {
           // Send to server for authoritative processing
-          send_model_update(handler_id, event_data, new_clock)
+          send_model_update(event_name, handler_id, event_data, new_clock)
           log("Event " <> handler_id <> " → server (model changed)")
         }
         False -> {
@@ -101,6 +102,20 @@ pub fn handle_event(
       log("Handler error: " <> reason)
       state
     }
+  }
+}
+
+/// Decide whether an event should be forwarded to the server.
+/// Keydown events are always forwarded so server-side apps can react to them
+/// even when their local update is model-neutral.
+pub fn should_send_to_server(
+  event_name: String,
+  msg_affects_model: fn(msg) -> Bool,
+  msg: msg,
+) -> Bool {
+  case msg_affects_model(msg) {
+    True -> True
+    False -> event_name == "keydown"
   }
 }
 
@@ -162,9 +177,16 @@ fn get_ws_url() -> String {
   "ws://localhost:8080/ws"
 }
 
-fn send_model_update(handler_id: String, data: String, clock: Int) -> Nil {
+fn send_model_update(
+  event_name: String,
+  handler_id: String,
+  data: String,
+  clock: Int,
+) -> Nil {
   let msg =
-    "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\""
+    "{\"type\":\"event\",\"name\":\""
+    <> event_name
+    <> "\",\"handler_id\":\""
     <> handler_id
     <> "\",\"data\":"
     <> data

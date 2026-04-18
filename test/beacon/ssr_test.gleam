@@ -70,6 +70,16 @@ pub fn render_page_includes_script_tag_test() {
   let assert True = str_contains(page.html, "data-beacon-auto")
 }
 
+pub fn choose_client_assets_dir_prefers_local_manifest_test() {
+  let assert "priv/static" =
+    ssr.choose_client_assets_dir(True, "priv/static", "fallback/static")
+}
+
+pub fn choose_client_assets_dir_falls_back_when_missing_test() {
+  let assert "fallback/static" =
+    ssr.choose_client_assets_dir(False, "priv/static", "fallback/static")
+}
+
 pub fn render_page_includes_beacon_app_root_test() {
   let page = ssr.render_page(test_config())
   let assert True = str_contains(page.html, "id=\"beacon-app\"")
@@ -137,25 +147,32 @@ pub fn verify_tampered_token_test() {
 pub fn render_page_for_path_renders_route_specific_html_test() {
   // Test that different paths produce different SSR content
   // Using the existing TestModel/TestMsg types with a route-aware update
-  let config = ssr.SsrConfig(
-    init: fn() { #(TestModel(name: "default"), effect.none()) },
-    view: test_view,
-    secret_key: "test-secret-key-at-least-32-chars-long!!",
-    title: "Route Test",
-    head_html: option.None,
-  )
+  let config =
+    ssr.SsrConfig(
+      init: fn() { #(TestModel(name: "default"), effect.none()) },
+      view: test_view,
+      secret_key: "test-secret-key-at-least-32-chars-long!!",
+      title: "Route Test",
+      head_html: option.None,
+    )
   let patterns = [route.pattern("/"), route.pattern("/about")]
-  let on_route_change = option.Some(fn(r: route.Route) -> TestMsg {
-    // We can't actually change the model here since TestMsg is NoOp,
-    // but we verify the function is called
-    let _ = r
-    NoOp
-  })
-  let update = fn(model: TestModel, _msg: TestMsg) {
-    #(model, effect.none())
-  }
+  let on_route_change =
+    option.Some(fn(r: route.Route) -> TestMsg {
+      // We can't actually change the model here since TestMsg is NoOp,
+      // but we verify the function is called
+      let _ = r
+      NoOp
+    })
+  let update = fn(model: TestModel, _msg: TestMsg) { #(model, effect.none()) }
 
-  let page = ssr.render_page_for_path(config, "/about", patterns, on_route_change, update)
+  let page =
+    ssr.render_page_for_path(
+      config,
+      "/about",
+      patterns,
+      on_route_change,
+      update,
+    )
   // Should contain the view HTML
   let assert True = str_contains(page.html, "Hello, default!")
   // Should have a session token
@@ -179,31 +196,42 @@ pub fn head_html_none_renders_no_extra_content_test() {
 }
 
 pub fn head_html_injects_stylesheet_link_test() {
-  let config = ssr.SsrConfig(
-    init: test_init,
-    view: test_view,
-    secret_key: "test-secret-key-at-least-32-chars-long!!",
-    title: "CSS Test",
-    head_html: option.Some("<link rel=\"stylesheet\" href=\"/static/styles.css\">"),
-  )
+  let config =
+    ssr.SsrConfig(
+      init: test_init,
+      view: test_view,
+      secret_key: "test-secret-key-at-least-32-chars-long!!",
+      title: "CSS Test",
+      head_html: option.Some(
+        "<link rel=\"stylesheet\" href=\"/static/styles.css\">",
+      ),
+    )
   let page = ssr.render_page(config)
-  let assert True = str_contains(page.html, "<link rel=\"stylesheet\" href=\"/static/styles.css\">")
+  let assert True =
+    str_contains(
+      page.html,
+      "<link rel=\"stylesheet\" href=\"/static/styles.css\">",
+    )
   // The link tag should be in the head section (after title, before </head>)
   let assert Ok(title_pos) = string_index_of(page.html, "</title>")
-  let assert Ok(link_pos) = string_index_of(page.html, "<link rel=\"stylesheet\"")
+  let assert Ok(link_pos) =
+    string_index_of(page.html, "<link rel=\"stylesheet\"")
   let assert Ok(head_close_pos) = string_index_of(page.html, "</head>")
   let assert True = title_pos < link_pos
   let assert True = link_pos < head_close_pos
 }
 
 pub fn head_html_multiple_tags_test() {
-  let config = ssr.SsrConfig(
-    init: test_init,
-    view: test_view,
-    secret_key: "test-secret-key-at-least-32-chars-long!!",
-    title: "Multi Head Test",
-    head_html: option.Some("<link rel=\"stylesheet\" href=\"/a.css\"><meta name=\"theme-color\" content=\"#000\">"),
-  )
+  let config =
+    ssr.SsrConfig(
+      init: test_init,
+      view: test_view,
+      secret_key: "test-secret-key-at-least-32-chars-long!!",
+      title: "Multi Head Test",
+      head_html: option.Some(
+        "<link rel=\"stylesheet\" href=\"/a.css\"><meta name=\"theme-color\" content=\"#000\">",
+      ),
+    )
   let page = ssr.render_page(config)
   let assert True = str_contains(page.html, "href=\"/a.css\"")
   let assert True = str_contains(page.html, "theme-color")
