@@ -449,9 +449,34 @@ function morphNode(o, n) {
   if (o.nodeType !== 1) return;
   morphAttributes(o, n);
   const isFormControl = o.tagName === "INPUT" || o.tagName === "TEXTAREA" || o.tagName === "SELECT";
-  if (isFormControl && o === document.activeElement) return;
+  if (isFormControl && o === document.activeElement) {
+    if (formControlValuesDiffer(o, n)) syncFormControlState(o, n);
+    return;
+  }
   morphChildren(o, n);
   if (isFormControl) syncFormControlState(o, n);
+}
+
+function formControlValuesDiffer(o, n) {
+  if (o.tagName === "INPUT") {
+    const type = (o.getAttribute("type") || "").toLowerCase();
+    if (type === "checkbox" || type === "radio") return o.checked !== n.hasAttribute("checked");
+    if (type === "file") return false;
+    const nextValue = n.hasAttribute("value") ? n.getAttribute("value") : "";
+    return o.value !== nextValue;
+  }
+
+  if (o.tagName === "TEXTAREA") {
+    const nextValue = n.hasAttribute("value") ? n.getAttribute("value") : n.textContent;
+    return o.value !== nextValue;
+  }
+
+  if (o.tagName === "SELECT") {
+    if (o.value !== n.value) return true;
+    return Array.from(o.options).some((oOption, i) => n.options[i] && oOption.selected !== n.options[i].selected);
+  }
+
+  return false;
 }
 
 function morphAttributes(o, n) {
