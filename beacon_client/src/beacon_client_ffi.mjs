@@ -2,8 +2,9 @@
 // Event delegation, WebSocket, DOM morphing, Rendered format — all here.
 // When BeaconApp is available (compiled user code), runs updates LOCALLY.
 // Local-only events produce ZERO WebSocket traffic.
-// Keydown is the one delegated event that still gets forwarded when the
-// local update does not change the model, so server-side apps can react to it.
+// Keydown is forwarded for non-text targets, and text inputs/textareas only
+// forward Enter without Shift when not composing, so chat composers do not
+// flood the server while still supporting submit-by-enter.
 
 import { Ok, Error as GleamError } from "./gleam.mjs";
 import { diffModels, applyOps } from "./beacon_client/patch.mjs";
@@ -21,6 +22,8 @@ let eventClock = 0;
 let eventSendCount = 0;
 let eventSendWindowStart = 0;
 const MAX_EVENTS_PER_SECOND = 30;
+const INPUT_DEBOUNCE_MS = 80;
+const pendingInputEvents = new Map();
 
 function isEventRateLimited() {
   const now = Date.now();
@@ -418,15 +421,19 @@ function morphInnerHTML(container, html) {
         restored = container.querySelector(`${focusedTag}[placeholder="${CSS.escape(placeholder)}"]`);
       }
     }
-    if (restored && restored !== document.activeElement) {
-      restored.focus();
+    if (restored) {
+      if (restored !== document.activeElement) {
+        restored.focus();
+      }
+      // Preserve active typing only while an input event is still debounced.
+      // Once submit/Enter has flushed input, the server-rendered value is
+      // authoritative so cleared composers do not snap back to stale text.
+      if (pendingInputEvents.size > 0 && focusedValue !== undefined && restored.value !== focusedValue) {
+        restored.value = focusedValue;
+      }
       // Restore cursor position
       if (typeof selStart === "number" && restored.setSelectionRange) {
         try { restored.setSelectionRange(selStart, selEnd); } catch(e) { console.warn("[beacon] setSelectionRange failed:", e.message); }
-      }
-      // Restore value if morph overwrote it (server might be behind client)
-      if (focusedValue !== undefined && restored.value !== focusedValue) {
-        restored.value = focusedValue;
       }
     }
   }
@@ -448,6 +455,7 @@ function morphNode(o, n) {
   if (o.nodeType === 3) { if (o.textContent !== n.textContent) o.textContent = n.textContent; return; }
   if (o.nodeType !== 1) return;
   morphAttributes(o, n);
+  if (preservesChildren(o)) return;
   const isFormControl = o.tagName === "INPUT" || o.tagName === "TEXTAREA" || o.tagName === "SELECT";
   if (isFormControl && o === document.activeElement) {
     if (formControlValuesDiffer(o, n)) syncFormControlState(o, n);
@@ -455,6 +463,13 @@ function morphNode(o, n) {
   }
   morphChildren(o, n);
   if (isFormControl) syncFormControlState(o, n);
+}
+
+function preservesChildren(node) {
+  if (!node || !node.hasAttribute) return false;
+  if (node.hasAttribute("data-beacon-preserve-children")) return true;
+  const ignore = node.getAttribute("data-beacon-ignore");
+  return ignore === "children" || ignore === "true";
 }
 
 function formControlValuesDiffer(o, n) {
@@ -541,6 +556,32 @@ function dispatchEvent(eventName, hid, data, tp) {
   }
 }
 
+function dispatchInputEvent(hid, data, tp) {
+  const key = hid + "\n" + tp;
+  const existing = pendingInputEvents.get(key);
+  if (existing) clearTimeout(existing.timer);
+  const pending = {
+    hid,
+    data,
+    tp,
+    timer: setTimeout(() => {
+      pendingInputEvents.delete(key);
+      dispatchEvent("input", hid, data, tp);
+    }, INPUT_DEBOUNCE_MS),
+  };
+  pendingInputEvents.set(key, pending);
+}
+
+function flushPendingInputEvents() {
+  if (pendingInputEvents.size === 0) return;
+  const pending = Array.from(pendingInputEvents.values());
+  pendingInputEvents.clear();
+  for (const item of pending) {
+    clearTimeout(item.timer);
+    dispatchEvent("input", item.hid, item.data, item.tp);
+  }
+}
+
 function attachEvents() {
   if (!appRoot) return;
   appRoot.onclick = (e) => {
@@ -548,6 +589,7 @@ function attachEvents() {
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-click")) {
         e.preventDefault();
+        flushPendingInputEvents();
         dispatchEvent("click", t.getAttribute("data-beacon-event-click"), "{}", getPath(t));
         return;
       }
@@ -560,7 +602,7 @@ function attachEvents() {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-input")) {
         const hid = t.getAttribute("data-beacon-event-input");
         const data = JSON.stringify({ value: t.value || "" });
-        dispatchEvent("input", hid, data, getPath(t));
+        dispatchInputEvent(hid, data, getPath(t));
         return;
       }
       t = t.parentNode;
@@ -571,6 +613,7 @@ function attachEvents() {
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-submit")) {
         e.preventDefault();
+        flushPendingInputEvents();
         dispatchEvent("submit", t.getAttribute("data-beacon-event-submit"), "{}", getPath(t));
         return;
       }
@@ -678,7 +721,11 @@ function attachEvents() {
     let t = e.target;
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-keydown")) {
-        if (e.key === "Enter" && !e.shiftKey) e.preventDefault();
+        const isTextEntry = t.tagName === "INPUT" || t.tagName === "TEXTAREA";
+        const isEnterSubmit = e.key === "Enter" && !e.shiftKey && !e.isComposing;
+        if (isTextEntry && !isEnterSubmit) return;
+        if (isEnterSubmit) e.preventDefault();
+        flushPendingInputEvents();
         dispatchEvent("keydown", t.getAttribute("data-beacon-event-keydown"), JSON.stringify({ value: e.key }), getPath(t));
         return;
       }
