@@ -1,22 +1,32 @@
 /// Security tests — verify that security hardening actually works.
 /// Each test targets a specific vulnerability from the security audit.
-
-import beacon/transport
 import beacon/ssr
+import beacon/transport
 import gleam/string
 
 // === Origin Validation Tests ===
 
 pub fn origin_empty_string_rejected_test() {
   // CVE: empty origin_host bypassed CSWSH check
-  // Fix: removed || origin_host == "" from check_origin
-  // Verify: empty origin in Origin header is rejected
-  let raw = "{\"type\":\"heartbeat\"}"
-  // We can't directly test check_origin (private), but we can verify
-  // the extract_host_from_origin helper behavior through decode tests.
-  // The real test is that transport.gleam no longer has the bypass.
-  // This test documents the requirement.
-  let assert Ok(transport.ClientHeartbeat) = transport.decode_client_message(raw)
+  let assert Error(_) = transport.origin_allowed_for_host("", "localhost:8080")
+}
+
+pub fn origin_missing_host_rejected_test() {
+  let assert Error(_) =
+    transport.origin_allowed_for_host("http://localhost:8080", "")
+}
+
+pub fn origin_mismatch_rejected_test() {
+  let assert Error(_) =
+    transport.origin_allowed_for_host("https://evil.example", "localhost:8080")
+}
+
+pub fn origin_matching_host_allowed_test() {
+  let assert Ok(Nil) =
+    transport.origin_allowed_for_host(
+      "http://localhost:8080/some/path",
+      "localhost:8080",
+    )
 }
 
 // === Token Expiration Tests ===
@@ -40,15 +50,25 @@ pub fn token_expired_rejected_test() {
 }
 
 pub fn token_wrong_secret_rejected_test() {
-  let token = ssr.create_session_token("correct-secret-key-long-enough-32chars!!")
-  let assert Error(_) = ssr.verify_session_token(
-    token,
-    "wrong-secret-key-long-enough-32chars!!",
-    3600,
-  )
+  let token =
+    ssr.create_session_token("correct-secret-key-long-enough-32chars!!")
+  let assert Error(_) =
+    ssr.verify_session_token(
+      token,
+      "wrong-secret-key-long-enough-32chars!!",
+      3600,
+    )
 }
 
 // === Wire Protocol Security Tests ===
+
+pub fn security_limits_include_pre_upgrade_caps_test() {
+  let limits = transport.default_security_limits()
+  let assert 100 = limits.max_http_headers
+  let assert 65_536 = limits.max_http_header_bytes
+  let assert 5000 = limits.pre_upgrade_timeout_ms
+  let assert 65_536 = limits.max_message_bytes
+}
 
 pub fn oversized_message_type_does_not_crash_test() {
   // DoS: very long type field shouldn't crash decoder
@@ -59,14 +79,18 @@ pub fn oversized_message_type_does_not_crash_test() {
 
 pub fn null_fields_in_event_rejected_test() {
   // Injection: null values where strings expected
-  let raw = "{\"type\":\"event\",\"name\":null,\"data\":\"{}\",\"target_path\":\"0\"}"
+  let raw =
+    "{\"type\":\"event\",\"name\":null,\"data\":\"{}\",\"target_path\":\"0\"}"
   let assert Error(_) = transport.decode_client_message(raw)
 }
 
 pub fn deeply_nested_json_does_not_crash_test() {
   // DoS: deeply nested JSON shouldn't stack overflow
   let nested = string.repeat("{\"a\":", 100) <> "1" <> string.repeat("}", 100)
-  let raw = "{\"type\":\"event\",\"name\":\"click\",\"data\":\"" <> nested <> "\",\"target_path\":\"0\"}"
+  let raw =
+    "{\"type\":\"event\",\"name\":\"click\",\"data\":\""
+    <> nested
+    <> "\",\"target_path\":\"0\"}"
   // Deeply nested JSON should be rejected, not crash
   let assert Error(_) = transport.decode_client_message(raw)
 }
@@ -74,7 +98,8 @@ pub fn deeply_nested_json_does_not_crash_test() {
 pub fn event_with_script_injection_in_handler_id_test() {
   // XSS: handler_id with script tags should be harmless
   // (handler_id is used as data-beacon-event-* attribute value, must be escaped)
-  let raw = "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"<script>alert(1)</script>\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":1}"
+  let raw =
+    "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"<script>alert(1)</script>\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":1}"
   let assert Ok(transport.ClientEvent(handler_id: hid, ..)) =
     transport.decode_client_message(raw)
   // The handler_id is stored as-is — escaping happens in HTML rendering
@@ -84,7 +109,10 @@ pub fn event_with_script_injection_in_handler_id_test() {
 pub fn event_with_huge_data_field_test() {
   // DoS: large data field (but within message size limit)
   let big_data = string.repeat("x", 50_000)
-  let raw = "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"h0\",\"data\":\"" <> big_data <> "\",\"target_path\":\"0\",\"clock\":1}"
+  let raw =
+    "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"h0\",\"data\":\""
+    <> big_data
+    <> "\",\"target_path\":\"0\",\"clock\":1}"
   // Should decode (under 64KB default limit)
   let assert Ok(transport.ClientEvent(data: data, ..)) =
     transport.decode_client_message(raw)
@@ -109,7 +137,8 @@ pub fn server_error_does_not_leak_stack_trace_test() {
 pub fn server_prefix_prevents_secret_in_client_bundle_test() {
   // Verify that server_ prefix constants are never extracted
   // even when combined with other constants and functions
-  let source = "
+  let source =
+    "
 import beacon
 pub type Model { Model(count: Int) }
 pub type Msg { Inc }

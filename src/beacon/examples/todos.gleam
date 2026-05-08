@@ -1,6 +1,5 @@
 /// Todo app example — a full multi-feature Beacon application.
 /// Demonstrates: forms, validation, lists, filtering, memo, SSR, hydration.
-
 import beacon/effect
 import beacon/element
 import beacon/error
@@ -52,12 +51,7 @@ pub fn init() -> #(Model, effect.Effect(Msg)) {
     form.new("todo-secret-key-change-in-production!!")
     |> form.add_field("new_todo", "")
   #(
-    Model(
-      todos: [],
-      next_id: 1,
-      input_form: input_form,
-      filter: All,
-    ),
+    Model(todos: [], next_id: 1, input_form: input_form, filter: All),
     effect.none(),
   )
 }
@@ -114,8 +108,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
     }
 
     ClearCompleted -> {
-      let new_todos =
-        list.filter(model.todos, fn(item) { !item.completed })
+      let new_todos = list.filter(model.todos, fn(item) { !item.completed })
       #(Model(..model, todos: new_todos), effect.none())
     }
 
@@ -147,42 +140,32 @@ pub fn view(model: Model) -> element.Node(Msg) {
           element.attr("type", "text"),
           element.attr("name", "new_todo"),
           element.attr("placeholder", "What needs to be done?"),
-          element.attr(
-            "value",
-            form.get_value(model.input_form, "new_todo"),
-          ),
+          element.attr("value", form.get_value(model.input_form, "new_todo")),
           element.on("input", "update_input"),
         ],
         [],
       ),
-      element.el(
-        "button",
-        [element.on("click", "add_todo")],
-        [element.text("Add")],
-      ),
+      element.el("button", [element.on("click", "add_todo")], [
+        element.text("Add"),
+      ]),
     ]),
     // Validation errors
     render_form_errors(model.input_form),
     // Todo list
-    element.el("ul", [element.attr("class", "todo-list")],
-      list.map(visible_todos(model), fn(item) {
-        render_todo_item(item)
-      }),
+    element.el(
+      "ul",
+      [element.attr("class", "todo-list")],
+      list.map(visible_todos(model), fn(item) { render_todo_item(item) }),
     ),
     // Footer
     element.el("div", [element.attr("class", "todo-footer")], [
-      element.text(
-        int.to_string(active_count)
-        <> " item(s) left",
-      ),
+      element.text(int.to_string(active_count) <> " item(s) left"),
       render_filters(model.filter),
       case completed_count > 0 {
         True ->
-          element.el(
-            "button",
-            [element.on("click", "clear_completed")],
-            [element.text("Clear completed")],
-          )
+          element.el("button", [element.on("click", "clear_completed")], [
+            element.text("Clear completed"),
+          ])
         False -> element.el("span", [], [])
       },
     ]),
@@ -197,10 +180,13 @@ fn render_todo_item(item: TodoItem) -> element.Node(Msg) {
   }
   element.memo(
     "todo-" <> int.to_string(item.id),
-    [item.text, case item.completed {
-      True -> "t"
-      False -> "f"
-    }],
+    [
+      item.text,
+      case item.completed {
+        True -> "t"
+        False -> "f"
+      },
+    ],
     element.el("li", [element.attr("class", class)], [
       element.el(
         "input",
@@ -268,7 +254,9 @@ fn render_form_errors(f: form.Form) -> element.Node(Msg) {
     True -> {
       case form.get_field(f, "new_todo") {
         Ok(field) ->
-          element.el("div", [element.attr("class", "error")],
+          element.el(
+            "div",
+            [element.attr("class", "error")],
             list.map(field.errors, fn(err) {
               element.el("span", [], [element.text(err)])
             }),
@@ -306,9 +294,7 @@ pub fn decode_event(
           case int.parse(id_str) {
             Ok(id) -> Ok(ToggleTodo(id: id))
             Error(Nil) ->
-              Error(error.RuntimeError(
-                reason: "Invalid toggle id: " <> id_str,
-              ))
+              Error(error.RuntimeError(reason: "Invalid toggle id: " <> id_str))
           }
         }
         False -> {
@@ -363,9 +349,13 @@ pub fn start(port: Int) -> Result(Nil, error.BeaconError) {
       deserialize_model: option.None,
       route_patterns: [],
       on_route_change: option.None,
-      dynamic_subscriptions: option.None, on_notify: option.None,
+      on_route_leave: option.None,
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
+      on_notification: option.None,
       init_from_request: option.None,
       secret_key: "",
+      dev_mode: False,
     )
   case runtime.start(config) {
     Ok(runtime_subject) -> {
@@ -376,13 +366,15 @@ pub fn start(port: Int) -> Result(Nil, error.BeaconError) {
           secret_key: "todo-secret-key-change-in-production!!",
           title: "Beacon Todos",
           head_html: option.None,
+          dev_mode: False,
+          serialize_model: option.None,
         )
       let page = ssr.render_page(ssr_config)
       let transport_config =
         runtime.connect_transport_with_ssr(
           runtime_subject,
           port,
-          option.Some(page.html),
+          option.Some(page),
         )
       case transport.start(transport_config) {
         Ok(_pid) -> {

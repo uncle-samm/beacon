@@ -60,34 +60,29 @@ pub fn multiple_sessions_test() {
 // --- ETS State Manager Tests ---
 
 pub fn ets_start_test() {
-  let _manager =
-    state_manager.start_ets("beacon_test_ets_" <> unique_id())
+  let _manager = state_manager.start_ets("beacon_test_ets_" <> unique_id())
 }
 
 pub fn ets_put_and_get_test() {
-  let manager =
-    state_manager.start_ets("beacon_test_ets_pg_" <> unique_id())
+  let manager = state_manager.start_ets("beacon_test_ets_pg_" <> unique_id())
   state_manager.ets_put(manager, "s1", 42)
   let assert Ok(42) = state_manager.ets_get(manager, "s1")
 }
 
 pub fn ets_get_nonexistent_test() {
-  let manager =
-    state_manager.start_ets("beacon_test_ets_ne_" <> unique_id())
+  let manager = state_manager.start_ets("beacon_test_ets_ne_" <> unique_id())
   let assert Error(Nil) = state_manager.ets_get(manager, "nope")
 }
 
 pub fn ets_delete_test() {
-  let manager =
-    state_manager.start_ets("beacon_test_ets_del_" <> unique_id())
+  let manager = state_manager.start_ets("beacon_test_ets_del_" <> unique_id())
   state_manager.ets_put(manager, "s1", "data")
   state_manager.ets_delete(manager, "s1")
   let assert Error(Nil) = state_manager.ets_get(manager, "s1")
 }
 
 pub fn ets_count_test() {
-  let manager =
-    state_manager.start_ets("beacon_test_ets_cnt_" <> unique_id())
+  let manager = state_manager.start_ets("beacon_test_ets_cnt_" <> unique_id())
   let assert 0 = state_manager.ets_count(manager)
   state_manager.ets_put(manager, "s1", "a")
   state_manager.ets_put(manager, "s2", "b")
@@ -95,8 +90,7 @@ pub fn ets_count_test() {
 }
 
 pub fn ets_overwrite_test() {
-  let manager =
-    state_manager.start_ets("beacon_test_ets_ow_" <> unique_id())
+  let manager = state_manager.start_ets("beacon_test_ets_ow_" <> unique_id())
   state_manager.ets_put(manager, "s1", "old")
   state_manager.ets_put(manager, "s1", "new")
   let assert Ok("new") = state_manager.ets_get(manager, "s1")
@@ -110,10 +104,11 @@ pub fn ets_cross_process_access_test() {
   state_manager.ets_put(manager, "s1", 99)
   // Read from a different process
   let subject = process.new_subject()
-  let _ = process.spawn(fn() {
-    let result = state_manager.ets_get(manager, "s1")
-    process.send(subject, result)
-  })
+  let _ =
+    process.spawn(fn() {
+      let result = state_manager.ets_get(manager, "s1")
+      process.send(subject, result)
+    })
   let selector =
     process.new_selector()
     |> process.select(subject)

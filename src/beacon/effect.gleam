@@ -4,15 +4,25 @@
 ///
 /// Reference: Lustre's effect.gleam — same pattern (opaque type, from/none/batch),
 /// but Beacon's is simpler: only synchronous effects with dispatch callback.
-
 import gleam/erlang/process
+import gleam/int
 import gleam/list
 
 /// An effect is a list of callbacks that will be executed by the runtime.
 /// Each callback receives a `dispatch` function to send messages back to
 /// the update loop.
 pub opaque type Effect(msg) {
-  Effect(callbacks: List(fn(fn(msg) -> Nil) -> Nil))
+  Effect(callbacks: List(Callback(msg)))
+}
+
+type Callback(msg) {
+  SimpleCallback(run: fn(fn(msg) -> Nil) -> Nil)
+  KeyedCallback(key: String, run: fn(fn(msg) -> Nil) -> Nil)
+  CancelKeyCallback(key: String)
+}
+
+pub opaque type Cancel {
+  Cancel(key: String)
 }
 
 /// No effects to perform. Use when update doesn't need side effects.
@@ -32,16 +42,38 @@ pub fn none() -> Effect(msg) {
 /// })
 /// ```
 pub fn from(callback: fn(fn(msg) -> Nil) -> Nil) -> Effect(msg) {
-  Effect(callbacks: [callback])
+  Effect(callbacks: [SimpleCallback(run: callback)])
+}
+
+/// Associate an effect with a stable key so stale async completions can be dropped.
+pub fn keyed(key: String, inner: Effect(msg)) -> Effect(msg) {
+  Effect(
+    callbacks: list.map(inner.callbacks, fn(callback) {
+      case callback {
+        SimpleCallback(run) -> KeyedCallback(key: key, run: run)
+        KeyedCallback(_, run) -> KeyedCallback(key: key, run: run)
+        CancelKeyCallback(cancel_key) -> CancelKeyCallback(key: cancel_key)
+      }
+    }),
+  )
+}
+
+/// Wrap an effect in a generated cancel key and return the cancel token.
+pub fn cancellable(inner: Effect(msg)) -> #(Effect(msg), Cancel) {
+  let key = "cancel_" <> int.to_string(unique_integer())
+  #(keyed(key, inner), Cancel(key: key))
+}
+
+/// Cancel a previously created cancellable effect token.
+pub fn cancel(token: Cancel) -> Effect(msg) {
+  Effect(callbacks: [CancelKeyCallback(key: token.key)])
 }
 
 /// Combine multiple effects into one. All will be executed.
 /// No ordering guarantees between effects in the batch.
 pub fn batch(effects: List(Effect(msg))) -> Effect(msg) {
   let all_callbacks =
-    list.fold(effects, [], fn(acc, eff) {
-      list.append(acc, eff.callbacks)
-    })
+    list.fold(effects, [], fn(acc, eff) { list.append(acc, eff.callbacks) })
   Effect(callbacks: all_callbacks)
 }
 
@@ -50,15 +82,38 @@ pub fn batch(effects: List(Effect(msg))) -> Effect(msg) {
 pub fn map(effect: Effect(a), f: fn(a) -> b) -> Effect(b) {
   let mapped_callbacks =
     list.map(effect.callbacks, fn(callback) {
-      fn(dispatch: fn(b) -> Nil) { callback(fn(a) { dispatch(f(a)) }) }
+      case callback {
+        SimpleCallback(run) ->
+          SimpleCallback(run: fn(dispatch: fn(b) -> Nil) {
+            run(fn(a) { dispatch(f(a)) })
+          })
+        KeyedCallback(key, run) ->
+          KeyedCallback(key: key, run: fn(dispatch: fn(b) -> Nil) {
+            run(fn(a) { dispatch(f(a)) })
+          })
+        CancelKeyCallback(key) -> CancelKeyCallback(key: key)
+      }
     })
   Effect(callbacks: mapped_callbacks)
 }
 
 /// Execute all callbacks in the effect with the given dispatch function.
 /// Called by the runtime — not by user code.
-pub fn perform(effect: Effect(msg), dispatch: fn(msg) -> Nil) -> Nil {
-  list.each(effect.callbacks, fn(callback) { callback(dispatch) })
+pub fn perform(
+  effect: Effect(msg),
+  dispatch: fn(msg) -> Nil,
+  dispatch_keyed: fn(String, Int, msg) -> Nil,
+) -> Nil {
+  list.each(effect.callbacks, fn(callback) {
+    case callback {
+      SimpleCallback(run) -> run(dispatch)
+      KeyedCallback(key, run) -> {
+        let generation = register_key_generation(key)
+        run(fn(message) { dispatch_keyed(key, generation, message) })
+      }
+      CancelKeyCallback(key) -> cancel_key_generation(key)
+    }
+  })
 }
 
 /// Create a background effect that runs in a separate BEAM process.
@@ -76,10 +131,10 @@ pub fn perform(effect: Effect(msg), dispatch: fn(msg) -> Nil) -> Nil {
 /// ```
 pub fn background(callback: fn(fn(msg) -> Nil) -> Nil) -> Effect(msg) {
   Effect(callbacks: [
-    fn(dispatch) {
+    SimpleCallback(run: fn(dispatch) {
       let _ = process.spawn(fn() { callback(dispatch) })
       Nil
-    },
+    }),
   ])
 }
 
@@ -102,7 +157,7 @@ const max_timers = 10
 /// ```
 pub fn every(interval_ms: Int, make_msg: fn() -> msg) -> Effect(msg) {
   Effect(callbacks: [
-    fn(dispatch) {
+    SimpleCallback(run: fn(dispatch) {
       let current = get_timer_count()
       case current >= max_timers {
         True -> {
@@ -116,7 +171,7 @@ pub fn every(interval_ms: Int, make_msg: fn() -> msg) -> Effect(msg) {
           Nil
         }
       }
-    },
+    }),
   ])
 }
 
@@ -132,6 +187,18 @@ fn increment_timer_count() -> Nil
 /// Log a warning when the timer limit is reached.
 @external(erlang, "beacon_effect_ffi", "log_timer_limit_warning")
 fn log_timer_limit_warning(current: Int) -> Nil
+
+@external(erlang, "beacon_effect_ffi", "unique_integer")
+fn unique_integer() -> Int
+
+@external(erlang, "beacon_effect_ffi", "register_key_generation")
+fn register_key_generation(key: String) -> Int
+
+@external(erlang, "beacon_effect_ffi", "cancel_key_generation")
+fn cancel_key_generation(key: String) -> Nil
+
+@external(erlang, "beacon_effect_ffi", "is_current_key_generation")
+pub fn is_current_key_generation(key: String, generation: Int) -> Bool
 
 fn timer_loop(
   interval_ms: Int,
@@ -151,14 +218,14 @@ fn timer_loop(
 /// ```
 pub fn after(delay_ms: Int, make_msg: fn() -> msg) -> Effect(msg) {
   Effect(callbacks: [
-    fn(dispatch) {
+    SimpleCallback(run: fn(dispatch) {
       let _ =
         process.spawn(fn() {
           process.sleep(delay_ms)
           dispatch(make_msg())
         })
       Nil
-    },
+    }),
   ])
 }
 

@@ -111,6 +111,27 @@ pub fn delete_cookie_test() {
   should.be_true(contains(value, "Max-Age=0"))
 }
 
+pub fn delete_cookie_with_options_preserves_security_attributes_test() {
+  let opts =
+    cookie.CookieOptions(
+      max_age: Some(3600),
+      path: "/app",
+      http_only: True,
+      secure: True,
+      same_site: "Strict",
+    )
+  let resp =
+    response.new(200)
+    |> cookie.delete_with_options("session", opts)
+  let assert Ok(value) = find_header(resp.headers, "set-cookie")
+  should.be_true(contains(value, "session="))
+  should.be_true(contains(value, "Max-Age=0"))
+  should.be_true(contains(value, "Path=/app"))
+  should.be_true(contains(value, "HttpOnly"))
+  should.be_true(contains(value, "Secure"))
+  should.be_true(contains(value, "SameSite=Strict"))
+}
+
 pub fn default_options_test() {
   let opts = cookie.default_options()
   opts.http_only

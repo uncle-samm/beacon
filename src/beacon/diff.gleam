@@ -4,10 +4,9 @@
 ///
 /// Reference: Lustre's vdom/diff.gleam for the algorithm,
 /// LiveView's positional diff format for the wire protocol.
-
 import beacon/element.{
-  type Attr, type Node, ElementNode, EventAttr, HtmlAttr, MemoNode, NoneNode,
-  RawHtml, TextNode,
+  type Attr, type Node, ElementNode, EventAttr, HtmlAttr, KeyedNode, MemoNode,
+  NoneNode, RawHtml, TextNode,
 }
 import gleam/json
 import gleam/list
@@ -52,11 +51,7 @@ pub fn patches_to_json(patches: List(Patch)) -> json.Json {
 
 // --- Core diffing algorithm ---
 
-fn diff_nodes(
-  old: Node(msg),
-  new: Node(msg),
-  path: List(Int),
-) -> List(Patch) {
+fn diff_nodes(old: Node(msg), new: Node(msg), path: List(Int)) -> List(Patch) {
   case old, new {
     // Both NoneNodes — no change
     NoneNode, NoneNode -> []
@@ -86,6 +81,8 @@ fn diff_nodes(
     // Memo vs non-memo or vice versa — unwrap memo and diff the child
     MemoNode(_, _, old_child), _ -> diff_nodes(old_child, new, path)
     _, MemoNode(_, _, new_child) -> diff_nodes(old, new_child, path)
+    KeyedNode(_, old_child), _ -> diff_nodes(old_child, new, path)
+    _, KeyedNode(_, new_child) -> diff_nodes(old, new_child, path)
 
     // Both text nodes — check if content changed
     TextNode(old_content), TextNode(new_content) -> {
@@ -102,9 +99,9 @@ fn diff_nodes(
       case old_tag == new_tag {
         True -> {
           let reversed_path = list.reverse(path)
-          let attr_patches = diff_attributes(old_attrs, new_attrs, reversed_path)
-          let child_patches =
-            diff_children(old_children, new_children, path, 0)
+          let attr_patches =
+            diff_attributes(old_attrs, new_attrs, reversed_path)
+          let child_patches = diff_children(old_children, new_children, path, 0)
           list.append(attr_patches, child_patches)
         }
         // Different tags — replace entirely
@@ -185,7 +182,7 @@ fn find_removed_attrs(
       False ->
         case old_attr {
           HtmlAttr(name, _) -> Ok(RemoveAttribute(path: path, name: name))
-          EventAttr(event_name, _) ->
+          EventAttr(event_name, _, _) ->
             Ok(RemoveEvent(path: path, event_name: event_name))
         }
     }
@@ -205,12 +202,13 @@ fn find_added_or_changed_attrs(
         case new_attr {
           HtmlAttr(name, value) ->
             Ok(SetAttribute(path: path, name: name, value: value))
-          EventAttr(event_name, handler_id) ->
+          EventAttr(event_name, handler_id, _) -> {
             Ok(SetEvent(
               path: path,
               event_name: event_name,
               handler_id: handler_id,
             ))
+          }
         }
     }
   })
@@ -230,7 +228,7 @@ fn attr_unchanged_in(attr: Attr, attrs: List(Attr)) -> Bool {
 fn attr_same_key(a: Attr, b: Attr) -> Bool {
   case a, b {
     HtmlAttr(name_a, _), HtmlAttr(name_b, _) -> name_a == name_b
-    EventAttr(event_a, _), EventAttr(event_b, _) -> event_a == event_b
+    EventAttr(event_a, _, _), EventAttr(event_b, _, _) -> event_a == event_b
     _, _ -> False
   }
 }
@@ -296,4 +294,3 @@ fn patch_to_json(patch: Patch) -> json.Json {
 fn path_to_json(path: List(Int)) -> json.Json {
   json.array(path, json.int)
 }
-

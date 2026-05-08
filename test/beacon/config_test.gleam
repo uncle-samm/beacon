@@ -5,7 +5,8 @@ pub fn get_env_missing_test() {
 }
 
 pub fn get_env_or_default_test() {
-  let assert "fallback" = config.get_env_or("BEACON_TEST_NONEXISTENT_VAR", "fallback")
+  let assert "fallback" =
+    config.get_env_or("BEACON_TEST_NONEXISTENT_VAR", "fallback")
 }
 
 pub fn get_env_int_default_test() {

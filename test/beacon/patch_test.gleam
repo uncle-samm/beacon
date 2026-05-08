@@ -1,6 +1,5 @@
 /// Tests for the JSON Patch operations module.
 /// Verifies diffing, applying, and round-trip correctness.
-
 import beacon/log
 import beacon/patch
 import gleam/string
@@ -240,7 +239,8 @@ pub fn roundtrip_arrays_of_objects_test() {
 
 pub fn roundtrip_mixed_types_test() {
   log.configure()
-  let old = "{\"count\":0,\"name\":\"x\",\"active\":false,\"score\":1.5,\"tags\":[]}"
+  let old =
+    "{\"count\":0,\"name\":\"x\",\"active\":false,\"score\":1.5,\"tags\":[]}"
   let new =
     "{\"count\":7,\"name\":\"y\",\"active\":true,\"score\":3.14,\"tags\":[\"a\",\"b\"]}"
   let ops = patch.diff(old, new)

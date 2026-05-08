@@ -2,7 +2,6 @@
 /// processes for isolation and concurrent access.
 ///
 /// Reference: Reflex.dev substates, Architecture doc section 3.
-
 import beacon/log
 import gleam/erlang/process.{type Subject}
 import gleam/otp/actor
@@ -60,29 +59,20 @@ pub fn start(
   })
   |> actor.start
   |> result_map(fn(started) {
-    log.info(
-      "beacon.substate",
-      "Substate started: " <> config.name,
-    )
+    log.info("beacon.substate", "Substate started: " <> config.name)
     started.data
   })
 }
 
 /// Get the current state from a substate actor.
 /// This is a synchronous call that blocks until the response is received.
-pub fn get(
-  subject: Subject(SubstateMessage(state, msg)),
-  timeout: Int,
-) -> state {
+pub fn get(subject: Subject(SubstateMessage(state, msg)), timeout: Int) -> state {
   actor.call(subject, timeout, GetState)
 }
 
 /// Send an update message to a substate actor.
 /// This is asynchronous — it returns immediately.
-pub fn update(
-  subject: Subject(SubstateMessage(state, msg)),
-  msg: msg,
-) -> Nil {
+pub fn update(subject: Subject(SubstateMessage(state, msg)), msg: msg) -> Nil {
   process.send(subject, UpdateState(msg: msg))
 }
 
@@ -95,18 +85,13 @@ pub fn set(
 }
 
 /// Shut down a substate actor.
-pub fn shutdown(
-  subject: Subject(SubstateMessage(state, msg)),
-) -> Nil {
+pub fn shutdown(subject: Subject(SubstateMessage(state, msg))) -> Nil {
   process.send(subject, ShutdownSubstate)
 }
 
 // --- Internal ---
 
-fn result_map(
-  result: Result(a, e),
-  f: fn(a) -> b,
-) -> Result(b, e) {
+fn result_map(result: Result(a, e), f: fn(a) -> b) -> Result(b, e) {
   case result {
     Ok(a) -> Ok(f(a))
     Error(e) -> Error(e)

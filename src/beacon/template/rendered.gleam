@@ -4,7 +4,6 @@
 ///
 /// Reference: LiveView's Rendered struct with static/dynamic splitting,
 /// fingerprint-based change detection, and integer-keyed JSON wire format.
-
 import gleam/bit_array
 import gleam/int
 import gleam/json
@@ -29,10 +28,7 @@ pub type Rendered {
 /// A template like `<h1>{title}</h1><p>{body}</p>` becomes:
 ///   statics: ["<h1>", "</h1><p>", "</p>"]
 ///   dynamics: [title, body]
-pub fn build(
-  statics: List(String),
-  dynamics: List(String),
-) -> Rendered {
+pub fn build(statics: List(String), dynamics: List(String)) -> Rendered {
   let fingerprint = compute_fingerprint(statics)
   Rendered(fingerprint: fingerprint, statics: statics, dynamics: dynamics)
 }

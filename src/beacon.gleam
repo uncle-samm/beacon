@@ -10,34 +10,31 @@
 ///   |> beacon.start(8080)
 /// }
 /// ```
-
 import beacon/application
 import beacon/build
 import beacon/effect
 import beacon/element.{type Attr}
 import beacon/error
 import beacon/handler
-import beacon/router/codegen as router_codegen
-import beacon/router/manager as route_manager
-import beacon/router/scanner as router_scanner
-import beacon/static
+import beacon/notification.{type Notification}
 import beacon/transport/server.{type Connection, type ResponseBody}
 
 /// A node in the virtual DOM tree. Re-exported from `beacon/element`.
 pub type Node(msg) =
   element.Node(msg)
+
 import beacon/log
 import beacon/middleware
 import beacon/pubsub
 import beacon/route
 import beacon/runtime
-import beacon/ssr
 import beacon/transport
+import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
-import gleam/list
 import gleam/int
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 import simplifile
@@ -52,7 +49,7 @@ import simplifile
 /// ```
 pub fn on_click(msg: msg) -> Attr {
   let id = handler.register_simple(msg)
-  element.EventAttr(event_name: "click", handler_id: id)
+  element.EventAttr(event_name: "click", handler_id: id, debounce_ms: None)
 }
 
 /// Attach an input handler that extracts the value and passes it to your callback.
@@ -61,68 +58,99 @@ pub fn on_click(msg: msg) -> Attr {
 /// ```
 pub fn on_input(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: "input", handler_id: id)
+  element.EventAttr(event_name: "input", handler_id: id, debounce_ms: None)
+}
+
+/// Attach an input handler with a per-node debounce window in milliseconds.
+pub fn on_input_debounced(delay_ms: Int, callback: fn(String) -> msg) -> Attr {
+  let id = handler.register_parameterized(callback)
+  element.on_debounced("input", id, delay_ms)
 }
 
 /// Attach a submit handler.
 pub fn on_submit(msg: msg) -> Attr {
   let id = handler.register_simple(msg)
-  element.EventAttr(event_name: "submit", handler_id: id)
+  element.EventAttr(event_name: "submit", handler_id: id, debounce_ms: None)
 }
 
 /// Attach a change handler with value extraction.
 pub fn on_change(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: "change", handler_id: id)
+  element.EventAttr(event_name: "change", handler_id: id, debounce_ms: None)
+}
+
+/// Attach a focus handler.
+pub fn on_focus(msg: msg) -> Attr {
+  let id = handler.register_simple(msg)
+  element.EventAttr(event_name: "focus", handler_id: id, debounce_ms: None)
+}
+
+/// Attach a blur handler.
+pub fn on_blur(msg: msg) -> Attr {
+  let id = handler.register_simple(msg)
+  element.EventAttr(event_name: "blur", handler_id: id, debounce_ms: None)
 }
 
 /// Attach a mousedown handler that receives x,y coordinates as "x,y".
 pub fn on_mousedown(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: "mousedown", handler_id: id)
+  element.EventAttr(event_name: "mousedown", handler_id: id, debounce_ms: None)
 }
 
 /// Attach a mouseup handler.
 pub fn on_mouseup(msg: msg) -> Attr {
   let id = handler.register_simple(msg)
-  element.EventAttr(event_name: "mouseup", handler_id: id)
+  element.EventAttr(event_name: "mouseup", handler_id: id, debounce_ms: None)
 }
 
 /// Attach a mousemove handler that receives x,y coordinates as "x,y".
 pub fn on_mousemove(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: "mousemove", handler_id: id)
+  element.EventAttr(event_name: "mousemove", handler_id: id, debounce_ms: None)
 }
 
 /// Attach a keydown handler that receives the key name (e.g., "ArrowUp", "Enter", "a").
 pub fn on_keydown(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: "keydown", handler_id: id)
+  element.EventAttr(event_name: "keydown", handler_id: id, debounce_ms: None)
 }
 
 /// Attach a dragstart handler. The callback receives the element's `data-drag-id` value.
 /// Use with `html.attribute("draggable", "true")` and `html.attribute("data-drag-id", id)`.
 pub fn on_dragstart(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: "dragstart", handler_id: id)
+  element.EventAttr(event_name: "dragstart", handler_id: id, debounce_ms: None)
 }
 
 /// Attach a dragover handler. Automatically calls preventDefault to allow drops.
 pub fn on_dragover(msg: msg) -> Attr {
   let id = handler.register_simple(msg)
-  element.EventAttr(event_name: "dragover", handler_id: id)
+  element.EventAttr(event_name: "dragover", handler_id: id, debounce_ms: None)
 }
 
 /// Attach a drop handler. The callback receives the dragged element's `data-drag-id`.
 pub fn on_drop(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: "drop", handler_id: id)
+  element.EventAttr(event_name: "drop", handler_id: id, debounce_ms: None)
 }
 
 /// Broadcast a PubSub notification to a topic.
 /// All runtimes subscribed to this topic will receive their `on_pubsub` message.
 pub fn broadcast(topic: String) -> Nil {
   pubsub.broadcast(topic, Nil)
+}
+
+/// Broadcast a typed payload to a topic.
+pub fn broadcast_payload(topic: String, payload: a) -> Nil {
+  pubsub.broadcast(topic, payload)
+}
+
+/// Decode a notification payload into a concrete type.
+pub fn notification_payload(
+  notification: Notification,
+  decoder: decode.Decoder(a),
+) -> Result(a, List(decode.DecodeError)) {
+  decode.run(notification.payload, decoder)
 }
 
 // ===== Cookie Helpers =====
@@ -163,10 +191,15 @@ pub opaque type AppBuilder(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when the URL changes — produces a Msg for the update loop.
     on_route_change: Option(fn(route.Route) -> msg),
+    /// Called before a client-side route transition is applied.
+    /// Use this to cancel route-scoped work or tear down live surfaces.
+    on_route_leave: Option(fn(route.Route, route.Route) -> effect.Effect(msg)),
     /// Dynamic subscription function: model → list of topics.
     dynamic_subscriptions: Option(fn(model) -> List(String)),
     /// Topic-aware notification handler for dynamic subscriptions.
     on_notify: Option(fn(String) -> msg),
+    /// Typed notification handler for dynamic subscriptions.
+    on_notification: Option(fn(Notification) -> msg),
     /// Server-side effect handler — runs AFTER update on the server.
     /// Used to separate pure update logic (compiles to JS) from side effects (server only).
     on_update_effect: Option(fn(model, msg) -> effect.Effect(msg)),
@@ -178,8 +211,7 @@ pub opaque type AppBuilder(model, msg) {
     /// If it returns Some(response), that response is sent immediately.
     /// If it returns None, the request falls through to SSR/static serving.
     api_handler: Option(
-      fn(request.Request(Connection)) ->
-        Option(response.Response(ResponseBody)),
+      fn(request.Request(Connection)) -> Option(response.Response(ResponseBody)),
     ),
     /// Optional: WebSocket authentication function.
     /// Runs before WS upgrade — Ok allows, Error(reason) rejects with 401.
@@ -187,14 +219,16 @@ pub opaque type AppBuilder(model, msg) {
     /// Optional: request-aware server state initializer.
     /// Replaces init_server with a function that receives the HTTP request,
     /// so it can read cookies, headers, etc. to populate server state.
-    ws_init: Option(
-      fn(request.Request(Connection)) -> model,
-    ),
+    ws_init: Option(fn(request.Request(Connection)) -> model),
+    /// Enable framework-owned client tracing and diagnostics.
+    dev_mode: Bool,
   )
 }
 
-/// Create an app with simple init/update (no effects needed).
-/// `init` returns just a Model. `update` returns just a Model.
+/// Create an app whose state shape is only `Model`.
+///
+/// `Model` is server-authoritative state: SSR uses it for first paint, then the
+/// client receives model sync/patch updates and renders from generated code.
 /// ```gleam
 /// beacon.app(init, update, view) |> beacon.start(8080)
 /// ```
@@ -218,19 +252,25 @@ pub fn app(
     has_local: False,
     route_patterns: [],
     on_route_change: None,
+    on_route_leave: None,
     dynamic_subscriptions: None,
     on_notify: None,
+    on_notification: None,
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
     head_html: None,
     api_handler: None,
     ws_auth: None,
     ws_init: None,
+    dev_mode: False,
   )
 }
 
-/// Create an app with effect-returning init/update.
-/// Use this when you need effects, async work, or other side effects.
+/// Create an app whose `Model` update can return effects.
+///
+/// This is the same `Model` state shape as `app`, with an effect-capable
+/// `init`/`update` signature for async work, timers, broadcasts, and other side
+/// effects.
 pub fn app_with_effects(
   init: fn() -> #(model, effect.Effect(msg)),
   update: fn(model, msg) -> #(model, effect.Effect(msg)),
@@ -251,20 +291,29 @@ pub fn app_with_effects(
     has_local: False,
     route_patterns: [],
     on_route_change: None,
+    on_route_leave: None,
     dynamic_subscriptions: None,
     on_notify: None,
+    on_notification: None,
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
     head_html: None,
     api_handler: None,
     ws_auth: None,
     ws_init: None,
+    dev_mode: False,
   )
 }
 
-/// Create an app with separate Model (server/shared) and Local (client/instant) state.
-/// `init` returns the server Model. `init_local` derives initial Local from Model.
-/// `update` takes both and returns both — framework auto-infers what needs the server.
+/// Create an app whose state shape is `Model + Local`.
+///
+/// `Model` remains server-authoritative. `Local` is client-only per-tab state
+/// for drafts, dropdowns, focus state, and other instant UI. `init_local` derives
+/// initial `Local` from the initial `Model`.
+///
+/// The build analyzer classifies messages from `update`: `LOCAL` messages update
+/// only `Local` and produce zero WebSocket traffic, while `MODEL` and
+/// `MODEL+LOCAL` messages still sync the model through the server.
 ///
 /// ```gleam
 /// beacon.app_with_local(init, init_local, update, view) |> beacon.start(8080)
@@ -305,21 +354,27 @@ pub fn app_with_local(
     has_local: True,
     route_patterns: [],
     on_route_change: None,
+    on_route_leave: None,
     dynamic_subscriptions: None,
     on_notify: None,
+    on_notification: None,
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
     head_html: None,
     api_handler: None,
     ws_auth: None,
     ws_init: None,
+    dev_mode: False,
   )
 }
 
-/// Create an app with private server-side state.
-/// `init` returns the shared Model. `init_server` returns server-only state.
-/// `update` receives both Model and Server, returns both plus effects.
-/// `view` receives only Model — Server is never accessible in the view.
+/// Create an app whose state shape is `Model + Server`.
+///
+/// `Model` remains server-authoritative and client-rendered after SSR. `Server`
+/// is private per-session state for sessions, database handles, audit state, or
+/// secrets. `update` receives both `Model` and `Server`, returns both plus
+/// effects. `view` receives only `Model`, so `Server` is never accessible in the
+/// view.
 ///
 /// Server state is NEVER serialized, NEVER sent to client, NEVER in the JS bundle.
 /// Gleam's type system enforces this at compile time.
@@ -365,14 +420,17 @@ pub fn app_with_server(
     has_local: False,
     route_patterns: [],
     on_route_change: None,
+    on_route_leave: None,
     dynamic_subscriptions: None,
     on_notify: None,
+    on_notification: None,
     on_update_effect: None,
     security_limits: transport.default_security_limits(),
     head_html: None,
     api_handler: None,
     ws_auth: None,
     ws_init: None,
+    dev_mode: False,
   )
 }
 
@@ -382,6 +440,31 @@ pub fn title(
   t: String,
 ) -> AppBuilder(model, msg) {
   AppBuilder(..builder, title: t)
+}
+
+/// Preserve DOM identity across reorders and unrelated morphs.
+/// Pair with `preserve_children()` for client-owned DOM that must not remount.
+pub fn keyed(key: String, child: Node(msg)) -> Node(msg) {
+  element.keyed(key, child)
+}
+
+/// Preserve an element's children on the client while still allowing attribute updates.
+pub fn preserve_children() -> Attr {
+  element.attr("data-beacon-preserve-children", "true")
+}
+
+/// Restrict hook updates to a stable subset of attribute names.
+/// When omitted, Beacon compares all rendered attributes on the hook node.
+pub fn hook_watch(attr_names: List(String)) -> Attr {
+  element.attr("data-beacon-hook-watch", string.join(attr_names, ","))
+}
+
+/// Enable Beacon client dev tracing.
+pub fn dev_mode(
+  builder: AppBuilder(model, msg),
+  enabled: Bool,
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, dev_mode: enabled)
 }
 
 /// Inject custom HTML into the `<head>` of the SSR page.
@@ -403,7 +486,24 @@ pub fn head_html(
 /// The handler runs BEFORE SSR/static file routing on every HTTP request.
 /// Return `Some(response)` to handle the request, `None` to fall through.
 ///
+/// Prefer `beacon/api.routes` with `api.get`, `api.post`, and response helpers
+/// for ordinary JSON/text endpoints. Use this raw handler form when you need
+/// custom matching or transport-level control.
+///
 /// Use `beacon/transport/http.read_body(req, max_bytes)` to read POST bodies.
+///
+/// ```gleam
+/// import beacon/api
+///
+/// beacon.app(init, update, view)
+/// |> beacon.api_routes(api.routes([
+///   api.get("/api/status", fn(_req) { api.json(200, "{\"ok\":true}") }),
+///   api.post("/api/webhook", handle_webhook),
+/// ]))
+/// |> beacon.start(8080)
+/// ```
+///
+/// Raw handler example:
 ///
 /// ```gleam
 /// import gleam/http
@@ -500,9 +600,39 @@ pub fn routes(
   builder: AppBuilder(model, msg),
   patterns: List(String),
 ) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, route_patterns: list.map(patterns, route.pattern))
+}
+
+/// Register an explicit page manifest for the app.
+///
+/// This is the preferred route declaration API. Each `route.page` entry owns
+/// the URL pattern and the message to send when the route is entered.
+///
+/// ```gleam
+/// beacon.app(init, update, view)
+/// |> beacon.route_pages([
+///   route.page(
+///     "/",
+///     fn(r) { RouteChanged(r.path) },
+///     fn(model, _route) { home_view(model) },
+///   ),
+/// ])
+/// |> beacon.start(8080)
+/// ```
+pub fn route_pages(
+  builder: AppBuilder(model, msg),
+  pages: List(route.Page(model, msg)),
+) -> AppBuilder(model, msg) {
   AppBuilder(
     ..builder,
-    route_patterns: list.map(patterns, route.pattern),
+    route_patterns: route.page_patterns(pages),
+    on_route_change: Some(fn(resolved) {
+      // Invariant: `resolved` is produced by matching `route_patterns`, which
+      // are extracted from this same `pages` list. A mismatch means the app
+      // builder was corrupted, so startup/navigation must fail loudly.
+      let assert Ok(msg) = route.dispatch_page(pages, resolved)
+      msg
+    }),
   )
 }
 
@@ -515,6 +645,15 @@ pub fn on_route_change(
   AppBuilder(..builder, on_route_change: Some(handler))
 }
 
+/// Set the callback that runs before a client-side route transition is applied.
+/// This is not called on the initial page load.
+pub fn on_route_leave(
+  builder: AppBuilder(model, msg),
+  handler: fn(route.Route, route.Route) -> effect.Effect(msg),
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, on_route_leave: Some(handler))
+}
+
 /// Create a redirect effect — navigates the client to a new URL via pushState.
 /// Use this in update to redirect after login, logout, etc.
 /// The effect sends a ServerNavigate message to ONLY the triggering client
@@ -525,10 +664,7 @@ pub fn redirect(path: String) -> effect.Effect(msg) {
   effect.from(fn(_dispatch) {
     case runtime.get_redirect_target() {
       option.Some(subject) ->
-        process.send(
-          subject,
-          transport.SendNavigate(path: path),
-        )
+        process.send(subject, transport.SendNavigate(path: path))
       option.None -> {
         log.debug(
           "beacon",
@@ -558,10 +694,7 @@ pub fn hard_redirect(path: String) -> effect.Effect(msg) {
   effect.from(fn(_dispatch) {
     case runtime.get_redirect_target() {
       option.Some(subject) ->
-        process.send(
-          subject,
-          transport.SendHardNavigate(path: path),
-        )
+        process.send(subject, transport.SendHardNavigate(path: path))
       option.None -> {
         log.debug(
           "beacon",
@@ -596,6 +729,14 @@ pub fn on_notify(
   handler: fn(String) -> msg,
 ) -> AppBuilder(model, msg) {
   AppBuilder(..builder, on_notify: Some(handler))
+}
+
+/// Set the handler for typed notifications on dynamically subscribed topics.
+pub fn on_notification(
+  builder: AppBuilder(model, msg),
+  handler: fn(Notification) -> msg,
+) -> AppBuilder(model, msg) {
+  AppBuilder(..builder, on_notification: Some(handler))
 }
 
 /// Register a server-side effect handler.
@@ -651,10 +792,7 @@ pub fn with_middleware(
   builder: AppBuilder(model, msg),
   mw: middleware.Middleware,
 ) -> AppBuilder(model, msg) {
-  AppBuilder(
-    ..builder,
-    middlewares: list_append(builder.middlewares, [mw]),
-  )
+  AppBuilder(..builder, middlewares: list_append(builder.middlewares, [mw]))
 }
 
 /// Enable static file serving from a directory.
@@ -664,7 +802,6 @@ pub fn static_dir(
 ) -> AppBuilder(model, msg) {
   AppBuilder(..builder, static_dir: Some(dir))
 }
-
 
 /// Enable state recovery on WebSocket reconnect.
 pub fn with_state_recovery(
@@ -692,17 +829,22 @@ pub fn start(
     None ->
       case builder.init_simple {
         Some(init_fn) -> Ok(fn() { #(init_fn(), effect.none()) })
-        None -> Error(error.ConfigError(reason: "No init function provided — use beacon.app() or beacon.app_with_effects()"))
+        None ->
+          Error(error.ConfigError(
+            reason: "No init function provided — use beacon.app() or beacon.app_with_effects()",
+          ))
       }
   }
   let base_update = case builder.update_effect {
     Some(update_fn) -> Ok(update_fn)
     None ->
       case builder.update_simple {
-        Some(update_fn) -> Ok(fn(model, msg) {
-          #(update_fn(model, msg), effect.none())
-        })
-        None -> Error(error.ConfigError(reason: "No update function provided — use beacon.app() or beacon.app_with_effects()"))
+        Some(update_fn) ->
+          Ok(fn(model, msg) { #(update_fn(model, msg), effect.none()) })
+        None ->
+          Error(error.ConfigError(
+            reason: "No update function provided — use beacon.app() or beacon.app_with_effects()",
+          ))
       }
   }
   // Return early if validation failed
@@ -715,7 +857,8 @@ pub fn start(
       log.error("beacon", "Configuration error: " <> error.to_string(err))
       Error(err)
     }
-    Ok(init_fn), Ok(update_fn) -> start_validated(builder, port, init_fn, update_fn)
+    Ok(init_fn), Ok(update_fn) ->
+      start_validated(builder, port, init_fn, update_fn)
   }
 }
 
@@ -726,301 +869,60 @@ fn start_validated(
   wrapped_init: fn() -> #(model, effect.Effect(msg)),
   base_update: fn(model, msg) -> #(model, effect.Effect(msg)),
 ) -> Result(Nil, error.BeaconError) {
-  // Auto-build client JS if not already built
-  auto_build_client_js()
-  // If on_update_effect is set, chain it after the base update
-  let wrapped_update = case builder.on_update_effect {
-    None -> base_update
-    Some(on_update_fn) -> fn(model, msg) {
-      let #(new_model, base_effect) = base_update(model, msg)
-      let extra_effect = on_update_fn(new_model, msg)
-      #(new_model, effect.batch([base_effect, extra_effect]))
-    }
-  }
-  let config =
-    application.AppConfig(
-      port: port,
-      init: wrapped_init,
-      update: wrapped_update,
-      view: builder.view,
-      decode_event: None,
-      secret_key: builder.secret_key,
-      title: builder.title,
-      serialize_model: builder.serialize_model,
-      deserialize_model: builder.deserialize_model,
-      middlewares: builder.middlewares,
-      static_dir: builder.static_dir,
-      route_patterns: builder.route_patterns,
-      on_route_change: builder.on_route_change,
-      dynamic_subscriptions: builder.dynamic_subscriptions,
-      on_notify: builder.on_notify,
-      security_limits: builder.security_limits,
-      head_html: builder.head_html,
-      api_handler: builder.api_handler,
-      ws_auth: builder.ws_auth,
-      init_from_request: case builder.ws_init {
-        Some(ws_init_fn) ->
-          Some(fn(req) { #(ws_init_fn(req), effect.none()) })
-        None -> None
-      },
-    )
-  case application.start(config) {
-    Ok(_app) -> {
-      log.info("beacon", "Running at http://localhost:" <> int.to_string(port))
-      application.wait_forever()
-      Ok(Nil)
-    }
+  // Auto-build client JS if not already built.
+  case auto_build_client_js() {
     Error(err) -> Error(err)
-  }
-}
-
-// ===== Router Builder (File-Based Routing) =====
-
-/// A router being configured. Use `router()` to create, then pipe through
-/// configuration functions, then call `start_router()`.
-///
-/// Unlike AppBuilder, there is no init/update/view — those come from route files.
-/// ```gleam
-/// beacon.router()
-/// |> beacon.router_title("My App")
-/// |> beacon.start_router(8080)
-/// ```
-pub opaque type RouterBuilder {
-  RouterBuilder(
-    title: String,
-    secret_key: String,
-    middlewares: List(middleware.Middleware),
-    static_dir: Option(String),
-    routes_dir: String,
-    security_limits: transport.SecurityLimits,
-  )
-}
-
-/// Create a new router builder for file-based routing.
-/// Route files are loaded from `src/routes/` by default.
-pub fn router() -> RouterBuilder {
-  RouterBuilder(
-    title: "Beacon",
-    secret_key: generate_secret(),
-    middlewares: [middleware.secure_headers()],
-    static_dir: None,
-    routes_dir: "src/routes",
-    security_limits: transport.default_security_limits(),
-  )
-}
-
-/// Set the page title for the router.
-pub fn router_title(
-  builder: RouterBuilder,
-  t: String,
-) -> RouterBuilder {
-  RouterBuilder(..builder, title: t)
-}
-
-/// Set the secret key for the router.
-pub fn router_secret_key(
-  builder: RouterBuilder,
-  key: String,
-) -> RouterBuilder {
-  RouterBuilder(..builder, secret_key: key)
-}
-
-/// Add a middleware to the router pipeline.
-pub fn router_middleware(
-  builder: RouterBuilder,
-  mw: middleware.Middleware,
-) -> RouterBuilder {
-  RouterBuilder(
-    ..builder,
-    middlewares: list_append(builder.middlewares, [mw]),
-  )
-}
-
-/// Enable static file serving for the router.
-pub fn router_static_dir(
-  builder: RouterBuilder,
-  dir: String,
-) -> RouterBuilder {
-  RouterBuilder(..builder, static_dir: Some(dir))
-}
-
-/// Set the routes directory (defaults to "src/routes").
-pub fn router_routes_dir(
-  builder: RouterBuilder,
-  dir: String,
-) -> RouterBuilder {
-  RouterBuilder(..builder, routes_dir: dir)
-}
-
-/// Override security limits for the router.
-/// Use `transport.default_security_limits()` as a starting point and modify fields.
-pub fn router_security_limits(
-  builder: RouterBuilder,
-  limits: transport.SecurityLimits,
-) -> RouterBuilder {
-  RouterBuilder(..builder, security_limits: limits)
-}
-
-/// Start the file-based router on the given port. Blocks forever.
-///
-/// This:
-/// 1. Auto-runs route scanner + codegen (generates dispatcher)
-/// 2. Loads the generated route_dispatcher module
-/// 3. Creates a transport with a route manager per connection
-/// 4. Starts the server
-pub fn start_router(
-  builder: RouterBuilder,
-  port: Int,
-) -> Result(Nil, error.BeaconError) {
-  log.configure()
-  log.info("beacon", "Starting file-based router on port " <> int.to_string(port))
-
-  // Step 1: Auto-run route scanner + codegen
-  auto_generate_routes(builder.routes_dir)
-
-  // Step 2: Purge any stale beacon_codec module.
-  // Routed apps have different Model/Msg per route — a global codec would be wrong.
-  // The runtime will use mount (HTML) instead of model_sync (JSON).
-  purge_stale_codec()
-
-  // Step 3: Build base client JS if not already built.
-  // For routed apps, we build ONLY the base runtime (WS, morphing, event delegation)
-  // WITHOUT app-specific codecs, since each route has different Model/Msg types.
-  auto_build_base_client_js()
-
-  // Step 3: Start PubSub
-  pubsub.start()
-
-  // Step 4: Create the dispatcher function via Erlang FFI
-  let dispatcher = fn(
-    conn_id: transport.ConnectionId,
-    transport_subject: process.Subject(transport.InternalMessage),
-    path: String,
-  ) {
-    call_start_for_route(conn_id, transport_subject, path)
-  }
-
-  // Step 5: Create SSR factory
-  let ssr_factory = fn(_req: request.Request(Connection), path: String) -> String {
-    case call_ssr_for_route(path, builder.title, builder.secret_key) {
-      Ok(page) -> page.html
-      Error(err) -> {
-        log.error(
-          "beacon",
-          "SSR render failed for path " <> path <> ": " <> error.to_string(err),
+    Ok(Nil) -> {
+      // If on_update_effect is set, chain it after the base update
+      let wrapped_update = case builder.on_update_effect {
+        None -> base_update
+        Some(on_update_fn) -> fn(model, msg) {
+          let #(new_model, base_effect) = base_update(model, msg)
+          let extra_effect = on_update_fn(new_model, msg)
+          #(new_model, effect.batch([base_effect, extra_effect]))
+        }
+      }
+      let config =
+        application.AppConfig(
+          port: port,
+          init: wrapped_init,
+          update: wrapped_update,
+          view: builder.view,
+          decode_event: None,
+          secret_key: builder.secret_key,
+          title: builder.title,
+          serialize_model: builder.serialize_model,
+          deserialize_model: builder.deserialize_model,
+          middlewares: builder.middlewares,
+          static_dir: builder.static_dir,
+          route_patterns: builder.route_patterns,
+          on_route_change: builder.on_route_change,
+          on_route_leave: builder.on_route_leave,
+          dynamic_subscriptions: builder.dynamic_subscriptions,
+          on_notify: builder.on_notify,
+          on_notification: builder.on_notification,
+          security_limits: builder.security_limits,
+          head_html: builder.head_html,
+          api_handler: builder.api_handler,
+          ws_auth: builder.ws_auth,
+          init_from_request: case builder.ws_init {
+            Some(ws_init_fn) ->
+              Some(fn(req) { #(ws_init_fn(req), effect.none()) })
+            None -> None
+          },
+          dev_mode: False,
         )
-        "<!DOCTYPE html><html><body><h1>500 Internal Server Error</h1><p>SSR render failed: "
-          <> error.to_string(err)
-          <> "</p></body></html>"
-      }
-    }
-  }
-
-  // Step 6: Create transport config with route manager factory
-  let static_cfg = case builder.static_dir {
-    Some(dir) ->
-      Some(static.StaticConfig(
-        directory: dir,
-        prefix: "/static",
-        max_age: 3600,
-      ))
-    None -> None
-  }
-
-  let transport_config =
-    transport.TransportConfig(
-      port: port,
-      page_html: None,
-      middlewares: builder.middlewares,
-      static_config: static_cfg,
-      runtime_factory: Some(fn(
-        conn_id: transport.ConnectionId,
-        transport_subject: process.Subject(transport.InternalMessage),
-        _req: request.Request(Connection),
-      ) {
-        route_manager.start(conn_id, transport_subject, dispatcher)
-      }),
-      on_connect: fn(_, _) { Nil },
-      on_event: fn(_, _) { Nil },
-      on_disconnect: fn(_) { Nil },
-      ws_auth: None,
-      ssr_factory: Some(ssr_factory),
-      security_limits: builder.security_limits,
-      api_handler: None,
-    )
-
-  case transport.start(transport_config) {
-    Ok(_pid) -> {
-      log.info(
-        "beacon",
-        "Router running at http://localhost:" <> int.to_string(port),
-      )
-      application.wait_forever()
-      Ok(Nil)
-    }
-    Error(err) -> Error(err)
-  }
-}
-
-/// Auto-generate routes from src/routes/ directory.
-fn auto_generate_routes(routes_dir: String) -> Nil {
-  log.info("beacon", "Auto-generating routes from " <> routes_dir)
-  case simplifile.is_directory(routes_dir) {
-    Ok(True) -> {
-      case simplifile.create_directory_all("src/generated") {
-        Ok(Nil) -> Nil
-        Error(err) -> {
-          log.error(
+      case application.start(config) {
+        Ok(_app) -> {
+          log.info(
             "beacon",
-            "Failed to create src/generated: " <> string.inspect(err),
+            "Running at http://localhost:" <> int.to_string(port),
           )
-          Nil
+          application.wait_forever()
+          Ok(Nil)
         }
+        Error(err) -> Error(err)
       }
-      case router_scanner.scan_routes(routes_dir) {
-        Ok(routes) -> {
-          case router_codegen.generate(routes, "src/generated/routes.gleam") {
-            Ok(Nil) -> Nil
-            Error(err) -> {
-              log.error(
-                "beacon",
-                "Routes generation failed: " <> error.to_string(err),
-              )
-              Nil
-            }
-          }
-          case router_codegen.generate_dispatcher(routes, "src/generated/route_dispatcher.gleam") {
-            Ok(Nil) -> {
-              // Compile the generated files
-              let _ = build.run_gleam_build()
-              hot_reload_dispatcher()
-              log.info("beacon", "Route dispatcher generated and loaded")
-              Nil
-            }
-            Error(err) -> {
-              log.error(
-                "beacon",
-                "Dispatcher generation failed: " <> error.to_string(err),
-              )
-              Nil
-            }
-          }
-        }
-        Error(err) -> {
-          log.error(
-            "beacon",
-            "Route scanning failed: " <> error.to_string(err),
-          )
-          Nil
-        }
-      }
-    }
-    _ -> {
-      log.warning(
-        "beacon",
-        "No routes directory found at " <> routes_dir
-          <> " — no routes to generate",
-      )
     }
   }
 }
@@ -1054,31 +956,32 @@ fn hot_reload_codec() -> Nil
 ///
 /// Two modes based on app structure:
 /// 1. Apps with Model/Msg/update/view in one file → builds codec + enhanced bundle (local events work)
-/// 2. Apps with split files or app_with_server → builds codec + runtime-only bundle (server-rendered)
+/// 2. Unsupported shapes fail before startup with a structured error.
 ///
 /// Both modes generate a codec (beacon_codec.gleam) for server-side model encoding.
-/// Both modes produce the same runtime (WS, morphing, events, navigation).
-/// The difference is whether the enhanced bundle (view compiled to JS) is available.
-fn auto_build_client_js() -> Nil {
+/// A client-state bundle is required for normal Beacon apps.
+fn auto_build_client_js() -> Result(Nil, error.BeaconError) {
   case client_js_is_fresh() {
-    True -> Nil
+    True -> Ok(Nil)
     False -> {
       log.info("beacon", "Building client JS...")
+      let _ = simplifile.delete("priv/static/beacon_client.manifest")
       // Analyze once, generate codec + try enhanced bundle separately
       build.auto_build()
-      // If enhanced bundle succeeded (manifest exists), we're done.
-      // Otherwise build base client JS (runtime-only: WS, morphing, events).
-      case simplifile.is_file("priv/static/beacon_client.manifest") {
-        Ok(True) -> Nil
-        _ -> {
-          log.info("beacon", "Building runtime-only client JS")
-          build.build_base_client()
-        }
-      }
       // Compile codec (if generated) + hot-reload
       let _ = build.run_gleam_build()
       hot_reload_codec()
-      Nil
+      case simplifile.is_file("priv/static/beacon_client.manifest") {
+        Ok(True) -> Ok(Nil)
+        Ok(False) | Error(_) -> {
+          let err =
+            error.ConfigError(
+              reason: "Client-state bundle was not generated. Beacon requires SSR first render plus a generated client renderer/model codec after mount. Move Model, Msg, update, and view into a supported client-visible shape or fix the build/codegen error above.",
+            )
+          log.error("beacon", error.to_string(err))
+          Error(err)
+        }
+      }
     }
   }
 }
@@ -1087,11 +990,13 @@ fn auto_build_client_js() -> Nil {
 fn client_js_is_fresh() -> Bool {
   case simplifile.is_file("priv/static/beacon_client.manifest") {
     Ok(True) -> {
-      // Manifest exists — check if beacon source has been updated since last build.
-      // Compare manifest mtime against beacon_client_ffi.mjs mtime.
-      case is_source_newer_than_manifest() {
+      // Manifest exists — check app source and Beacon client runtime source.
+      case build.is_any_source_newer_than_manifest(["src", "gleam.toml"]) {
         True -> {
-          log.info("beacon", "Client JS source changed — rebuilding")
+          log.info(
+            "beacon",
+            "Client JS source or app source changed — rebuilding",
+          )
           False
         }
         False -> True
@@ -1100,57 +1005,3 @@ fn client_js_is_fresh() -> Bool {
     _ -> False
   }
 }
-
-/// Check if the beacon client FFI source is newer than the manifest.
-/// Uses Erlang file:read_file_info to compare modification times.
-@external(erlang, "beacon_build_ffi", "is_source_newer_than_manifest")
-fn is_source_newer_than_manifest() -> Bool
-
-/// Build the base client JS for routed apps.
-/// Unlike auto_build_client_js, this builds ONLY the base runtime
-/// (WebSocket, morphing, event delegation) WITHOUT app-specific codecs.
-/// Each route has different Model/Msg types, so a global codec would be wrong.
-fn auto_build_base_client_js() -> Nil {
-  case client_js_is_fresh() {
-    True -> {
-      log.info("beacon", "Client JS already built")
-      Nil
-    }
-    False -> {
-      log.info("beacon", "Building base client JS for router...")
-      build.build_base_client()
-      Nil
-    }
-  }
-}
-
-/// Dynamically call the generated route dispatcher's start_for_route.
-@external(erlang, "beacon_router_ffi", "call_start_for_route")
-fn call_start_for_route(
-  conn_id: transport.ConnectionId,
-  transport_subject: process.Subject(transport.InternalMessage),
-  path: String,
-) -> Result(
-  #(
-    fn(transport.ConnectionId, transport.ClientMessage) -> Nil,
-    fn() -> Nil,
-  ),
-  error.BeaconError,
-)
-
-/// Dynamically call the generated route dispatcher's ssr_for_route.
-@external(erlang, "beacon_router_ffi", "call_ssr_for_route")
-fn call_ssr_for_route(
-  path: String,
-  title: String,
-  secret_key: String,
-) -> Result(ssr.RenderedPage, error.BeaconError)
-
-/// Hot-reload the generated route dispatcher module.
-@external(erlang, "beacon_router_ffi", "hot_reload_dispatcher")
-fn hot_reload_dispatcher() -> Nil
-
-/// Purge any stale beacon_codec module from the BEAM.
-/// For routed apps, a global codec is wrong (each route has different types).
-@external(erlang, "beacon_router_ffi", "purge_stale_codec")
-fn purge_stale_codec() -> Nil

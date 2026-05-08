@@ -2,7 +2,6 @@
 /// Tracks request counts per key (typically IP address) within a time window.
 ///
 /// Reference: Phoenix rate limiting, OWASP rate limiting guidelines.
-
 import beacon/log
 import gleam/int
 
@@ -57,10 +56,7 @@ pub fn check(limiter: RateLimiter, key: String) -> RateLimitResult {
   let count = ets_increment(limiter.table, window_key)
   case count > limiter.config.max_requests {
     True -> {
-      log.warning(
-        "beacon.rate_limit",
-        "Rate limited: " <> key,
-      )
+      log.warning("beacon.rate_limit", "Rate limited: " <> key)
       RateLimited
     }
     False -> Allowed(remaining: limiter.config.max_requests - count)

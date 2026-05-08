@@ -5,7 +5,6 @@
 ///
 /// Reference: Reflex.dev dirty-var tracking, computed var caching,
 /// Architecture doc section 3.
-
 import gleam/dict.{type Dict}
 import gleam/list
 

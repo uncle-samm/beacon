@@ -1,6 +1,5 @@
 /// Test application configurations for simulation testing.
 /// Each function starts a real Beacon app on a given port.
-
 import beacon/application
 import beacon/effect
 import beacon/element
@@ -49,13 +48,16 @@ pub fn start_counter_app(
       static_dir: option.None,
       route_patterns: [],
       on_route_change: option.None,
+      on_route_leave: option.None,
       dynamic_subscriptions: option.None,
       on_notify: option.None,
+      on_notification: option.None,
       security_limits: transport.default_security_limits(),
       head_html: option.None,
       api_handler: option.None,
       ws_auth: option.None,
       init_from_request: option.None,
+      dev_mode: False,
     )
   application.start(config)
 }
@@ -101,13 +103,16 @@ pub fn start_ticker_app(
       static_dir: option.None,
       route_patterns: [],
       on_route_change: option.None,
+      on_route_leave: option.None,
       dynamic_subscriptions: option.None,
       on_notify: option.None,
+      on_notification: option.None,
       security_limits: transport.default_security_limits(),
       head_html: option.None,
       api_handler: option.None,
       ws_auth: option.None,
       init_from_request: option.None,
+      dev_mode: False,
     )
   application.start(config)
 }

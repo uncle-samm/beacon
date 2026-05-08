@@ -45,7 +45,7 @@ MVU loop as OTP actor. One per user session.
 - `CachedModelState`: either `FullModelCache` or `SubstateCache` (per-field JSON caching)
 - PubSub listener subject and current subscriptions
 
-State recovery uses HMAC-SHA256 signed session tokens embedded in SSR HTML.
+State recovery uses HMAC-SHA256 signed session tokens stored in an HttpOnly SSR cookie.
 On WebSocket reconnect, the token restores model state without re-running init.
 
 ### 3. View Layer
@@ -90,25 +90,33 @@ Three diffing layers, each operating at a different granularity:
 - Only changed substates trigger re-serialization and diffing
 - Falls back to `FullModelCache` for models without substates
 
-### 5. Routing (`src/beacon/router/`)
+### 5. Routing (`src/beacon/route.gleam`)
 
-File-based routing with build-time code generation (Squirrel pattern).
-
-**`scanner.gleam`:** Scans `src/routes/` for `.gleam` files, parses with Glance,
-extracts `RouteDefinition` (path segments, module name, exported functions:
-`has_loader`, `has_action`, `has_view`, `has_init`, `has_update`).
-Dynamic params via `[slug].gleam` -> `:slug`.
-
-**`codegen.gleam`:** Generates `src/generated/routes.gleam` (Route type + `match_route` + `to_path`)
-and `src/generated/route_dispatcher.gleam` (`start_for_route`, `ssr_for_route`).
-
-**`manager.gleam`:** Per-connection OTP actor sitting between transport and route runtime.
-On navigate: kills old route runtime, spawns new one. `RouteDispatcher` function type
-takes conn_id + transport subject + path, returns event/close handler closures.
+Routing is explicit and uses the same app/runtime path as every other Beacon app.
+There is no filesystem route discovery, generated route dispatcher, or separate
+router startup mode.
 
 **`route.gleam`:** `Route` type with path, segments, params dict, query dict.
-`RoutePattern` for registered patterns. `match_route` does segment-by-segment matching
-with `:param` extraction.
+`RoutePattern` for registered patterns. `match_path` does segment-by-segment
+matching with `:param` extraction.
+
+**App integration:** `beacon.route_pages([...])` registers explicit `route.page`
+manifest entries. Each page entry contains a pattern, the message to send on
+initial SSR or client-side navigation, and a typed render function used by
+`route.dispatch_view`. Route-aware SSR runs the same update path before rendering
+first paint, so hydrated state matches the HTML. The lower-level
+`beacon.routes([...])` + `beacon.on_route_change(...)` pair remains available for
+custom routing.
+
+**Route mini-apps:** `route.page_model` lets a page module own a child `Model`,
+`Msg`, `update`, and `view` while the root app embeds that child state and wraps
+child messages. `route.update_model` handles the select-update-replace loop.
+`route.update_server_model` does the same for `app_with_server`, updating the
+embedded child `Model` and private child `Server` together. Client bundle
+generation sanitizes imported route modules before copying them into the JS
+project, so route-local `Server`, `init_server`, `update_server`, and `server_`
+constants do not ship. This keeps route-local state explicit in Gleam types
+without creating a second router runtime or filesystem discovery step.
 
 ### 6. SSR (`src/beacon/ssr.gleam`)
 
@@ -118,11 +126,12 @@ LiveView's two-phase mount: dead render (HTTP) then live mount (WebSocket).
 1. Run `init()` to get initial model
 2. Call `view(model)` to get Node tree
 3. Render Node tree to HTML string via `element.to_string`
-4. Sign a session token (HMAC-SHA256) containing model identity
+4. Sign a session token (HMAC-SHA256) containing model identity/state
 5. Wrap in full HTML document with client JS bundle injected
 
-**Live mount:** On WebSocket connect, client sends `ClientJoin(token, path)`.
-Runtime deserializes model from token (or re-runs init), sends `ServerModelSync`.
+**Live mount:** On WebSocket connect, the browser sends `ClientJoin("", path)`.
+Runtime reads the HttpOnly join cookie from the upgrade request, deserializes
+model state when available (or re-runs init), and sends `ServerModelSync`.
 
 **Route-aware SSR:** `ssr_factory` in `TransportConfig` maps URL paths to different
 HTML, enabling per-route dead renders.
@@ -154,17 +163,42 @@ Stack-based for nested component renders.
 
 ### 9. Client Runtime (`beacon_client/`)
 
-The browser-side JavaScript. Two execution modes:
+The browser-side JavaScript follows one rendering model:
 
-**Server-only mode:** Client JS handles WebSocket, event delegation, and DOM morphing.
-Server sends full HTML via `ServerMount`, client morphs the DOM. All logic server-side.
+**SSR first render:** HTTP requests receive fully rendered HTML for first paint,
+SEO, and accessibility. On WebSocket join, the server may send the initial
+`ServerMount` payload and the authoritative `ServerModelSync`.
 
-**Local execution mode (BeaconApp):** When user code compiles to JS:
+**Client-state live rendering:** After mount, normal model updates are
+`ServerPatch` or `ServerModelSync`; the server does not use repeated HTML mount
+messages for ordinary live updates. The client decodes model JSON, runs the
+generated `view`, and updates the DOM locally.
+
+**Local-only state:** When user code has a `Local` state and
+`msg_affects_model(msg)` returns `False`, the client runs `update` and renders
+immediately without WebSocket traffic. This covers UI-only state such as
+dropdowns, focused editor state, and input drafts.
+
+The build analyzer reports one state shape for every app: `Model`,
+`Model + Local`, `Model + Server`, or `Model + Local + Server`. It also
+classifies messages as `LOCAL`, `MODEL`, or `MODEL+LOCAL`. `LOCAL` messages are
+purely client-side. `MODEL` messages and `MODEL+LOCAL` messages still go through
+the server-authoritative update path; the local part can update the browser
+immediately, but the model part is confirmed by server patch/sync.
+
+When a message affects `Model`, the client can optimistically render its local
+result, but the server remains authoritative. Client-sent patch ops are hints
+only; server state comes from the server-side `update`.
+
+Generated client code is required for normal apps:
 - `initClient()` waits for `ServerModelSync` to get authoritative model
 - On event: runs `update` locally for instant DOM update
 - If model changed: sends event to server, awaits `ServerModelSync`/`ServerPatch`
 - If only local state changed: no server traffic (zero latency)
 - RAF-throttled rendering — multiple events batch into one DOM update per frame
+
+If Beacon cannot generate the client renderer/model codec for an app shape, app
+startup fails with a structured error instead of serving a degraded runtime.
 
 **Client-side protections:**
 - Rate limiting: 30 events/sec
@@ -182,7 +216,7 @@ Files: `beacon_client.gleam` (Gleam types), `beacon_client_ffi.mjs` (JS runtime)
 - **`state_manager.gleam`** — ETS-backed state storage for cross-process access.
 
 ### Application Layer
-- **`beacon.gleam`** — Top-level API. `AppBuilder` with builder pattern: `app(init, update, view)`, `app_with_effects(...)`, `app_with_local(...)`. Event helpers: `on_click`, `on_input`, `on_submit`, `on_change`, `on_mousedown`, `on_mouseup`, `on_mousemove`, `on_keydown`, `on_dragstart`, `on_dragover`, `on_drop`. Configuration: `title`, `secret_key`, `static_dir`, `watch`, `routes`, `security_limits`. Starts with `beacon.start(port)`.
+- **`beacon.gleam`** — Top-level API. `AppBuilder` with builder pattern: `app(init, update, view)`, `app_with_effects(...)`, `app_with_local(...)`, and `app_with_server(...)`. These are type-specific entrypoints into one state model (`Model`, optional `Local`, optional `Server`), not separate runtimes. Event helpers: `on_click`, `on_input`, `on_submit`, `on_change`, `on_mousedown`, `on_mouseup`, `on_mousemove`, `on_keydown`, `on_dragstart`, `on_dragover`, `on_drop`. Configuration: `title`, `secret_key`, `static_dir`, `route_pages`, `security_limits`. Starts with `beacon.start(port)`.
 - **`application.gleam`** — OTP application with supervision tree. `AppConfig` wraps all config. Supervisor manages transport, state manager, per-connection runtimes.
 - **`component.gleam`** — Composable MVU units: `Component(init, update, view, to_parent)` with message mapping.
 - **`config.gleam`** — Environment-based configuration: `get_env`, `get_env_or`, `get_env_int`, `port()`.
@@ -198,8 +232,8 @@ Files: `beacon_client.gleam` (Gleam types), `beacon_client_ffi.mjs` (JS runtime)
 - **`cookie.gleam`** — Cookie parsing and setting utilities (parse, get, set, delete with secure defaults).
 
 ### Build Tooling
-- **`build.gleam`** — Client JS codegen: `gleam run -m beacon/build`. Codec generation and JS bundling are independent concerns. Three public functions: `generate_codec()` (always runs when Model type is found), `try_enhanced_bundle()` (only succeeds for single-file apps), `analyze_app()` (Glance-based analysis). Two-pass `find_app_module` search: first looks for full app (Model + Msg + update + view in one file), then falls back to Model-only for multi-file/app_with_server apps.
-- **`build/analyzer.gleam`** — Glance-based source analysis for codegen. Extracts message types, model fields, event handlers from user source.
+- **`build.gleam`** — Client JS codegen: `gleam run -m beacon/build`. Codec generation and JS bundling are independent concerns. Three public functions: `generate_codec()` (always runs when Model type is found), `try_enhanced_bundle()` (requires client-visible Model + Msg + view, and update unless it is an `app_with_server` shape), `analyze_app()` (Glance-based analysis). Two-pass `find_app_module` search handles full, multi-file, route-aware, and server-state app shapes.
+- **`build/analyzer.gleam`** — Glance-based source analysis for codegen. Extracts `Model`, optional `Local`, optional `Server`, message impacts (`LOCAL`, `MODEL`, `MODEL+LOCAL`), model fields, and event handlers from user source.
 - **`lint.gleam`** — Custom Glance-based linter enforcing engineering principles: no `todo`/`panic`, no silent catch-alls, logging requirements.
 
 ### Error Handling and Logging
@@ -221,16 +255,16 @@ Files: `beacon_client.gleam` (Gleam types), `beacon_client_ffi.mjs` (JS runtime)
 ### Client -> Server
 | Message | Fields | Purpose |
 |---------|--------|---------|
-| `ClientEvent` | name, handler_id, data, target_path, clock, ops | DOM event with optional client patch ops |
+| `ClientEvent` | name, handler_id, data, target_path, clock, ops | DOM event; ops are untrusted client hints |
 | `ClientHeartbeat` | — | Keep-alive |
-| `ClientJoin` | token, path | Initial mount request with session token |
+| `ClientJoin` | token, path | Initial mount request; browser recovery token is read from HttpOnly cookie |
 | `ClientNavigate` | path | SPA navigation |
 | `ClientEventBatch` | events: List(ClientMessage) | LOCAL events replayed before MODEL event |
 
 ### Server -> Client
 | Message | Fields | Purpose |
 |---------|--------|---------|
-| `ServerMount` | payload (HTML) | Initial SSR HTML |
+| `ServerMount` | payload (HTML) | Initial live mount HTML only |
 | `ServerHeartbeatAck` | — | Heartbeat response |
 | `ServerError` | reason | Error notification |
 | `ServerModelSync` | model_json, version, ack_clock | Full authoritative model state |
@@ -282,10 +316,6 @@ src/
     handler.gleam               # Auto event decoding registry
     component.gleam             # Composable MVU units
     route.gleam                 # Route/RoutePattern types
-    router/
-      scanner.gleam             # Glance-based route file scanner
-      codegen.gleam             # Route code generator
-      manager.gleam             # Per-connection route lifecycle actor
     template/
       rendered.gleam            # Rendered struct (statics/dynamics/fingerprint)
       analyzer.gleam            # Glance AST static/dynamic classifier
@@ -337,7 +367,7 @@ test/                           # Tests mirroring src structure
 | Dirty-var tracking | Reflex.dev | `state.gleam`, `CachedModelState` |
 | Substates as actors | Reflex.dev | `substate.gleam` |
 | Computed var caching | Reflex.dev | `state.gleam` |
-| Build-time codegen | Squirrel | `router/scanner.gleam`, `router/codegen.gleam`, `build.gleam` |
+| Build-time codegen | Squirrel | `build.gleam`, `build/analyzer.gleam` |
 | Handler registry | Beacon original | `handler.gleam` (auto-decode from view) |
 | Client-side local execution | Beacon original | `beacon_client_ffi.mjs`, Model/Local split |
 | JSON Patch state sync | RFC 6902 | `patch.gleam`, `ServerPatch` |

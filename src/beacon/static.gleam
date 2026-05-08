@@ -2,14 +2,13 @@
 /// cache headers, and directory traversal prevention.
 ///
 /// Reference: Phoenix static serving, Mist file responses.
-
 import beacon/log
+import beacon/transport/server.{type ResponseBody, Bytes}
 import gleam/bytes_tree
 import gleam/http/response.{type Response}
 import gleam/int
 import gleam/list
 import gleam/string
-import beacon/transport/server.{type ResponseBody, Bytes}
 import simplifile
 
 /// Configuration for static file serving.
@@ -26,11 +25,7 @@ pub type StaticConfig {
 
 /// Default static config.
 pub fn default_config() -> StaticConfig {
-  StaticConfig(
-    directory: "priv/static",
-    prefix: "/static",
-    max_age: 3600,
-  )
+  StaticConfig(directory: "priv/static", prefix: "/static", max_age: 3600)
 }
 
 /// Try to serve a static file for the given path.
@@ -65,9 +60,7 @@ pub fn serve_with_etag_check(
           )
           Ok(
             response.new(403)
-            |> response.set_body(
-              Bytes(bytes_tree.from_string("Forbidden")),
-            ),
+            |> response.set_body(Bytes(bytes_tree.from_string("Forbidden"))),
           )
         }
         False -> {
@@ -107,18 +100,13 @@ fn serve_file(
           )
         }
         False -> {
-          log.debug(
-            "beacon.static",
-            "Serving: " <> path <> " (" <> mime <> ")",
-          )
+          log.debug("beacon.static", "Serving: " <> path <> " (" <> mime <> ")")
           Ok(
             response.new(200)
             |> response.set_header("content-type", mime)
             |> response.set_header("cache-control", cache_control)
             |> response.set_header("etag", etag)
-            |> response.set_body(
-              Bytes(bytes_tree.from_bit_array(contents)),
-            ),
+            |> response.set_body(Bytes(bytes_tree.from_bit_array(contents))),
           )
         }
       }

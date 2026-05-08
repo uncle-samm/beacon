@@ -1,7 +1,6 @@
 /// Simulation metrics — ETS-backed atomic counters for cross-process
 /// metric accumulation. Any spawned test process can increment counters
 /// without locking. Latency samples are stored in an ETS bag table.
-
 import gleam/float
 import gleam/int
 import gleam/list
@@ -66,10 +65,19 @@ pub fn snapshot_processes() -> Int {
 /// Collect all metrics from the tables.
 pub fn collect(table: MetricsTable) -> SimMetrics {
   let #(
-    sent, acked, failed, opened, closed, conn_failed, latencies,
-    bytes_s, bytes_r, patches, syncs, mounts,
-  ) =
-    collect_ffi(table)
+    sent,
+    acked,
+    failed,
+    opened,
+    closed,
+    conn_failed,
+    latencies,
+    bytes_s,
+    bytes_r,
+    patches,
+    syncs,
+    mounts,
+  ) = collect_ffi(table)
   SimMetrics(
     events_sent: sent,
     events_acked: acked,

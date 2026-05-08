@@ -29,11 +29,97 @@ pub fn view(model: Model, local: Local) { model }
   let assert True = analysis.has_local
   let assert 4 = list.length(analysis.msg_variants)
   // Increment and Decrement modify model
-  let assert True = find_variant(analysis.msg_variants, "Increment").affects_model
-  let assert True = find_variant(analysis.msg_variants, "Decrement").affects_model
+  let assert True =
+    find_variant(analysis.msg_variants, "Increment").affects_model
+  let assert True =
+    find_variant(analysis.msg_variants, "Decrement").affects_model
   // SetInput and ToggleMenu only modify local
-  let assert False = find_variant(analysis.msg_variants, "SetInput").affects_model
-  let assert False = find_variant(analysis.msg_variants, "ToggleMenu").affects_model
+  let assert False =
+    find_variant(analysis.msg_variants, "SetInput").affects_model
+  let assert False =
+    find_variant(analysis.msg_variants, "ToggleMenu").affects_model
+  let assert True =
+    find_variant(analysis.msg_variants, "SetInput").affects_local
+  let assert True =
+    find_variant(analysis.msg_variants, "ToggleMenu").affects_local
+  let assert analyzer.LocalOnly =
+    analyzer.msg_impact(find_variant(analysis.msg_variants, "SetInput"))
+}
+
+pub fn classifies_local_model_and_mixed_messages_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Local { Local(input: String, saving: Bool) }
+pub type Msg {
+  SetInput(String)
+  Save
+  Reset
+}
+
+pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
+  case msg {
+    SetInput(text) -> #(model, Local(..local, input: text))
+    Save -> #(Model(count: model.count + 1), Local(..local, saving: True))
+    Reset -> #(Model(count: 0), local)
+  }
+}
+
+pub fn view(model: Model, local: Local) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+
+  let set_input = find_variant(analysis.msg_variants, "SetInput")
+  let save = find_variant(analysis.msg_variants, "Save")
+  let reset = find_variant(analysis.msg_variants, "Reset")
+
+  let assert False = set_input.affects_model
+  let assert True = set_input.affects_local
+  let assert analyzer.LocalOnly = analyzer.msg_impact(set_input)
+
+  let assert True = save.affects_model
+  let assert True = save.affects_local
+  let assert analyzer.ModelAndLocal = analyzer.msg_impact(save)
+
+  let assert True = reset.affects_model
+  let assert False = reset.affects_local
+  let assert analyzer.ModelOnly = analyzer.msg_impact(reset)
+}
+
+pub fn state_diagnostics_describe_model_local_server_shape_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Local { Local(input: String, saving: Bool) }
+pub type Server { Server(secret: String) }
+pub type Msg {
+  SetInput(String)
+  Save
+  Reset
+}
+
+pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
+  case msg {
+    SetInput(text) -> #(model, Local(..local, input: text))
+    Save -> #(Model(count: model.count + 1), Local(..local, saving: True))
+    Reset -> #(Model(count: 0), local)
+  }
+}
+
+pub fn view(model: Model, local: Local) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let diagnostics = analyzer.state_diagnostics(analysis)
+  let joined = string.join(diagnostics, "\n")
+
+  let assert True =
+    string.contains(joined, "Beacon app state shape: Model + Local + Server")
+  let assert True =
+    string.contains(joined, "Local inferred from pub type Local (2 fields)")
+  let assert True =
+    string.contains(joined, "Server inferred from pub type Server (1 fields)")
+  let assert True =
+    string.contains(joined, "Message impacts: LOCAL=1, MODEL=1, MODEL+LOCAL=1")
 }
 
 pub fn analyzes_simple_counter_test() {
@@ -57,8 +143,10 @@ pub fn view(model: Model) { model }
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert False = analysis.has_local
   // Both modify model
-  let assert True = find_variant(analysis.msg_variants, "Increment").affects_model
-  let assert True = find_variant(analysis.msg_variants, "Decrement").affects_model
+  let assert True =
+    find_variant(analysis.msg_variants, "Increment").affects_model
+  let assert True =
+    find_variant(analysis.msg_variants, "Decrement").affects_model
 }
 
 pub fn extracts_model_fields_test() {
@@ -119,7 +207,8 @@ pub fn view(model: Model, local: Local) { model }
 pub fn no_msg_type_succeeds_with_empty_variants_test() {
   // When Msg type is missing (multi-file app), analysis succeeds with empty variants.
   // The codec only needs Model fields — Msg is not required.
-  let source = "pub fn update(m, msg) { m }\npub fn view(m) { m }\npub type Model { M }\n"
+  let source =
+    "pub fn update(m, msg) { m }\npub fn view(m) { m }\npub type Model { M }\n"
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert True = analysis.msg_variants == []
 }
@@ -128,8 +217,7 @@ fn find_variant(
   variants: List(analyzer.MsgVariant),
   name: String,
 ) -> analyzer.MsgVariant {
-  let assert Ok(v) =
-    list.find(variants, fn(v) { v.name == name })
+  let assert Ok(v) = list.find(variants, fn(v) { v.name == name })
   v
 }
 
@@ -373,6 +461,81 @@ pub fn view(model: Model) { model }
   // Should NOT contain server-only imports
   let assert False = string.contains(extracted, "import beacon/store")
   let assert False = string.contains(extracted, "import beacon/effect")
+}
+
+pub fn strips_route_local_server_from_extracted_client_source_test() {
+  let source =
+    "import beacon
+import beacon/html
+import beacon/route
+import gleam/int
+
+const server_secret = \"route_secret_must_not_ship\"
+
+pub type Model {
+  Model(count: Int, server_updates: Int)
+}
+
+pub type Server {
+  Server(secret: String, writes: Int)
+}
+
+pub type Msg {
+  Increment
+}
+
+pub fn init() -> Model {
+  Model(count: 0, server_updates: 0)
+}
+
+pub fn init_server() -> Server {
+  Server(secret: server_secret, writes: 0)
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    Increment -> Model(..model, count: model.count + 1)
+  }
+}
+
+pub fn update_server(model: Model, server: Server, msg: Msg) -> #(Model, Server) {
+  let updated = update(model, msg)
+  case msg {
+    Increment -> #(
+      Model(..updated, server_updates: updated.server_updates + 1),
+      Server(..server, writes: server.writes + 1),
+    )
+  }
+}
+
+pub fn page(
+  on_enter: fn(route.Route) -> msg,
+  select: fn(model) -> Model,
+  wrap: fn(Msg) -> msg,
+) -> route.Page(model, msg) {
+  route.page_model(\"/\", on_enter, select, fn(model, _route) {
+    view(model, wrap)
+  })
+}
+
+pub fn view(model: Model, wrap: fn(Msg) -> msg) -> beacon.Node(msg) {
+  html.button([beacon.on_click(wrap(Increment))], [
+    html.text(int.to_string(model.count)),
+  ])
+}
+"
+  let assert True = analyzer.has_server_boundary(source)
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert True = string.contains(extracted, "pub type Model")
+  let assert True = string.contains(extracted, "pub type Msg")
+  let assert True = string.contains(extracted, "pub fn update(")
+  let assert True = string.contains(extracted, "pub fn page(")
+  let assert True = string.contains(extracted, "pub fn view(")
+  let assert False = string.contains(extracted, "pub type Server")
+  let assert False = string.contains(extracted, "pub fn init_server")
+  let assert False = string.contains(extracted, "pub fn update_server")
+  let assert False = string.contains(extracted, "server_secret")
+  let assert False = string.contains(extracted, "route_secret_must_not_ship")
 }
 
 pub fn skips_external_erlang_functions_test() {

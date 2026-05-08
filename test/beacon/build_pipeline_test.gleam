@@ -3,6 +3,7 @@
 import beacon/build
 import beacon/build/analyzer
 import gleam/list
+import gleam/string
 import simplifile
 
 // === Example App Analysis Tests ===
@@ -34,12 +35,182 @@ pub fn privacy_demo_analyzes_correctly_test() {
   let assert True = list.length(analysis.computed_fields) >= 1
 }
 
+pub fn private_session_example_supports_app_with_server_bundle_test() {
+  let assert Ok(source) =
+    simplifile.read("examples/private_session/src/private_session.gleam")
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = analysis.has_server
+  let assert False = analysis.has_local
+  let assert True =
+    list.any(analysis.server_fields, fn(f) { f.name == "signing_key" })
+  let assert True = build.can_build_enhanced_bundle(source, analysis)
+}
+
+pub fn auth_workspace_example_supports_app_with_server_bundle_test() {
+  let assert Ok(source) =
+    simplifile.read("examples/auth_workspace/src/auth_workspace/app.gleam")
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = analysis.has_server
+  let assert False = analysis.has_local
+  let assert True =
+    list.any(analysis.server_fields, fn(f) { f.name == "private_audit_key" })
+  let assert False =
+    list.any(analysis.model_fields, fn(f) { f.name == "private_audit_key" })
+  let assert True = build.can_build_enhanced_bundle(source, analysis)
+}
+
 pub fn counter_local_analyzes_correctly_test() {
   let assert Ok(source) =
     simplifile.read("examples/counter_local/src/counter_local.gleam")
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert True = analysis.has_local
   let assert False = analysis.has_server
+}
+
+pub fn local_first_form_analyzes_as_local_model_split_test() {
+  let assert Ok(source) =
+    simplifile.read("examples/local_first_form/src/local_first_form.gleam")
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = analysis.has_local
+  let assert False = analysis.has_server
+  let assert True =
+    list.any(analysis.msg_variants, fn(v) {
+      v.name == "UpdateDraft" && !v.affects_model
+    })
+  let assert True =
+    list.any(analysis.msg_variants, fn(v) {
+      v.name == "SubmitSearch" && v.affects_model
+    })
+  let assert True = build.can_build_enhanced_bundle(source, analysis)
+}
+
+pub fn routed_workspace_app_supports_client_state_bundle_test() {
+  let assert Ok(source) =
+    simplifile.read("examples/routed_workspace/src/main.gleam")
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert True = analysis.has_local
+  let assert False = analysis.has_server
+  let assert True =
+    list.any(analysis.msg_variants, fn(v) { v.name == "RouteChanged" })
+  let assert True = build.can_build_enhanced_bundle(source, analysis)
+}
+
+pub fn routed_example_supports_imported_page_modules_test() {
+  let assert Ok(source) = simplifile.read("examples/routed/src/main.gleam")
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert False = analysis.has_local
+  let assert True = analysis.has_server
+  let assert True = list.any(analysis.model_fields, fn(f) { f.name == "path" })
+  let assert True =
+    list.any(analysis.server_fields, fn(f) {
+      f.name == "home" && f.module == "home" && f.type_name == "Server"
+    })
+  let assert True =
+    list.any(analysis.model_fields, fn(f) {
+      f.name == "home" && f.module == "home" && f.type_name == "Model"
+    })
+  let assert True =
+    list.any(analysis.msg_variants, fn(v) { v.name == "RouteChanged" })
+  let assert True = build.can_build_enhanced_bundle(source, analysis)
+}
+
+pub fn routed_example_route_local_home_model_analyzes_test() {
+  let assert Ok(source) = simplifile.read("examples/routed/src/main.gleam")
+  let assert Ok(home_source) =
+    simplifile.read("examples/routed/src/routed/pages/home.gleam")
+  let assert Ok(analysis) =
+    analyzer.analyze_multi(source, [
+      #("home", "routed/pages/home", home_source),
+    ])
+  let assert True =
+    list.any(analysis.model_fields, fn(f) {
+      f.name == "home" && f.module == "home" && f.type_name == "Model"
+    })
+  let assert True =
+    list.any(analysis.custom_types, fn(ct) {
+      ct.module == "home" && ct.name == "Model"
+    })
+  let assert False =
+    list.any(analysis.custom_types, fn(ct) {
+      ct.module == "home" && ct.name == "Server"
+    })
+  let assert False =
+    list.any(analysis.enum_types, fn(et) {
+      et.module == "home" && et.name == "Msg"
+    })
+  let assert True =
+    list.any(analysis.server_fields, fn(f) {
+      f.name == "home" && f.module == "home" && f.type_name == "Server"
+    })
+  let assert True = list.any(analysis.msg_variants, fn(v) { v.name == "Home" })
+}
+
+pub fn route_server_workspace_route_servers_are_private_test() {
+  let assert Ok(source) =
+    simplifile.read("examples/route_server_workspace/src/main.gleam")
+  let assert Ok(accounts_source) =
+    simplifile.read(
+      "examples/route_server_workspace/src/route_server_workspace/pages/accounts.gleam",
+    )
+  let assert Ok(settings_source) =
+    simplifile.read(
+      "examples/route_server_workspace/src/route_server_workspace/pages/settings.gleam",
+    )
+  let assert Ok(analysis) =
+    analyzer.analyze_multi(source, [
+      #("accounts", "route_server_workspace/pages/accounts", accounts_source),
+      #("settings", "route_server_workspace/pages/settings", settings_source),
+    ])
+
+  let assert True = analysis.has_server
+  let assert True =
+    list.any(analysis.model_fields, fn(f) {
+      f.name == "accounts" && f.module == "accounts" && f.type_name == "Model"
+    })
+  let assert True =
+    list.any(analysis.server_fields, fn(f) {
+      f.name == "accounts" && f.module == "accounts" && f.type_name == "Server"
+    })
+  let assert False =
+    list.any(analysis.custom_types, fn(ct) {
+      ct.module == "accounts" && ct.name == "Server"
+    })
+  let assert False =
+    list.any(analysis.custom_types, fn(ct) {
+      ct.module == "settings" && ct.name == "Server"
+    })
+  let assert True = build.can_build_enhanced_bundle(source, analysis)
+}
+
+pub fn routed_example_uses_explicit_imported_page_modules_test() {
+  let assert Ok(source) = simplifile.read("examples/routed/src/main.gleam")
+  let assert True = string.contains(source, "import routed/pages/home")
+  let assert True = string.contains(source, "import routed/pages/about")
+  let assert True = string.contains(source, "import routed/pages/settings")
+  let assert True = string.contains(source, "import routed/pages/stats")
+  let assert True = string.contains(source, "beacon.route_pages")
+  let assert True = string.contains(source, "home.page(")
+  let assert False = string.contains(source, "beacon.router")
+  let assert False = string.contains(source, "start_router")
+}
+
+pub fn auth_workspace_uses_route_pages_not_low_level_routes_test() {
+  let assert Ok(source) =
+    simplifile.read("examples/auth_workspace/src/auth_workspace.gleam")
+  let assert True = string.contains(source, "beacon.route_pages")
+  let assert True = string.contains(source, "auth_pages()")
+  let assert False = string.contains(source, "beacon.routes(")
+  let assert False = string.contains(source, "beacon.on_route_change")
+}
+
+pub fn routed_workspace_uses_explicit_route_pages_test() {
+  let assert Ok(source) =
+    simplifile.read("examples/routed_workspace/src/main.gleam")
+  let assert True = string.contains(source, "beacon.route_pages")
+  let assert True = string.contains(source, "beacon.route_pages(pages())")
+  let assert True = string.contains(source, "route.dispatch_view")
+  let assert True = string.contains(source, "\"/pipeline\"")
+  let assert True = string.contains(source, "\"/settings\"")
 }
 
 pub fn domains_multi_file_analyzes_correctly_test() {
@@ -59,6 +230,20 @@ pub fn domains_multi_file_analyzes_correctly_test() {
   let assert Ok(analysis) = analyzer.analyze_multi(app_source, externals)
   let assert True = list.length(analysis.custom_types) >= 1
   let assert True = list.length(analysis.model_fields) >= 1
+}
+
+pub fn domains_multi_file_supports_enhanced_bundle_test() {
+  let assert Ok(app_source) = simplifile.read("examples/domains/src/app.gleam")
+  let assert Ok(auth_src) =
+    simplifile.read("examples/domains/src/domains/auth.gleam")
+  let assert Ok(items_src) =
+    simplifile.read("examples/domains/src/domains/items.gleam")
+  let assert Ok(analysis) =
+    analyzer.analyze_multi(app_source, [
+      #("auth", "domains/auth", auth_src),
+      #("items", "domains/items", items_src),
+    ])
+  let assert True = build.can_build_enhanced_bundle(app_source, analysis)
 }
 
 // === Idempotency Tests ===
@@ -189,17 +374,19 @@ pub fn view(model: Model) { model }
   let assert True = build.can_build_enhanced_bundle(source, analysis)
 }
 
-pub fn enhanced_bundle_skipped_for_app_with_server_test() {
+pub fn enhanced_bundle_supported_for_app_with_server_view_test() {
   let source =
     "
 pub type Model { Model(count: Int) }
 pub type Server { Server(secret: String) }
 pub type Msg { Inc }
-pub fn update(model: Model, msg: Msg) -> Model { model }
+pub fn update(model: Model, server: Server, msg: Msg) -> #(Model, Server) {
+  #(model, server)
+}
 pub fn view(model: Model) { model }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
-  let assert False = build.can_build_enhanced_bundle(source, analysis)
+  let assert True = build.can_build_enhanced_bundle(source, analysis)
 }
 
 pub fn enhanced_bundle_skipped_for_model_only_multi_file_test() {

@@ -2,6 +2,7 @@
 /// Tests the build pipeline through the analyzer + codec generation.
 import beacon/build
 import beacon/build/analyzer
+import gleam/erlang/process
 import gleam/list
 import gleam/string
 import simplifile
@@ -39,6 +40,55 @@ pub fn source_root_resolves_nested_app_modules_test() {
   let assert "examples/domains/src" =
     build.source_root("examples/domains/src/app.gleam")
   let assert "src" = build.source_root("src/app.gleam")
+}
+
+pub fn source_freshness_detects_newer_nested_app_source_test() {
+  let temp_root = "build/beacon_test_manifest_freshness"
+  let src_root = temp_root <> "/src"
+  let page_path = src_root <> "/pages/home.gleam"
+  let manifest_path = temp_root <> "/priv/static/beacon_client.manifest"
+
+  case simplifile.delete(temp_root) {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+  }
+  let assert Ok(Nil) = simplifile.create_directory_all(src_root <> "/pages")
+  let assert Ok(Nil) =
+    simplifile.create_directory_all(temp_root <> "/priv/static")
+  let assert Ok(Nil) =
+    simplifile.write(page_path, "pub fn title() { \"Home\" }")
+  process.sleep(1200)
+  let assert Ok(Nil) = simplifile.write(manifest_path, "beacon_client_old.js")
+  let assert False = build.is_any_source_newer_than(manifest_path, [src_root])
+
+  process.sleep(1200)
+  let assert Ok(Nil) =
+    simplifile.write(page_path, "pub fn title() { \"Home updated\" }")
+  let assert True = build.is_any_source_newer_than(manifest_path, [src_root])
+
+  case simplifile.delete(temp_root) {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+  }
+}
+
+pub fn source_freshness_treats_missing_manifest_as_stale_test() {
+  let temp_root = "build/beacon_test_missing_manifest_freshness"
+  let src_root = temp_root <> "/src"
+  let manifest_path = temp_root <> "/priv/static/beacon_client.manifest"
+
+  case simplifile.delete(temp_root) {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+  }
+  let assert Ok(Nil) = simplifile.create_directory_all(src_root)
+  let assert Ok(Nil) = simplifile.write(src_root <> "/main.gleam", "")
+  let assert True = build.is_any_source_newer_than(manifest_path, [src_root])
+
+  case simplifile.delete(temp_root) {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+  }
 }
 
 pub fn resolve_transitive_external_sources_recurses_through_user_modules_test() {

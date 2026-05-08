@@ -73,8 +73,7 @@ pub fn void_element_test() {
 }
 
 pub fn void_element_with_attrs_test() {
-  let node =
-    element.el("input", [element.attr("type", "text")], [])
+  let node = element.el("input", [element.attr("type", "text")], [])
   let r = view.render(node)
   let assert ["<input type=\"", "\">"] = r.statics
   let assert ["text"] = r.dynamics
@@ -95,16 +94,8 @@ pub fn rendered_to_html_matches_element_to_string_test() {
     element.el("div", [element.attr("class", "counter")], [
       element.el("h1", [], [element.text("Beacon Counter")]),
       element.el("p", [], [element.text("Count: 0")]),
-      element.el(
-        "button",
-        [element.on("click", "dec")],
-        [element.text("-")],
-      ),
-      element.el(
-        "button",
-        [element.on("click", "inc")],
-        [element.text("+")],
-      ),
+      element.el("button", [element.on("click", "dec")], [element.text("-")]),
+      element.el("button", [element.on("click", "inc")], [element.text("+")]),
     ])
   let r = view.render(node)
   let html_from_rendered = rendered.to_html(r)
@@ -115,10 +106,8 @@ pub fn rendered_to_html_matches_element_to_string_test() {
 // --- Fingerprint stability test ---
 
 pub fn same_structure_same_fingerprint_test() {
-  let node1 =
-    element.el("div", [], [element.text("A")])
-  let node2 =
-    element.el("div", [], [element.text("B")])
+  let node1 = element.el("div", [], [element.text("A")])
+  let node2 = element.el("div", [], [element.text("B")])
   let r1 = view.render(node1)
   let r2 = view.render(node2)
   // Same template structure → same fingerprint

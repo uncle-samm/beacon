@@ -9,7 +9,6 @@
 ///
 /// The process dictionary is used because the view function runs synchronously
 /// in a single BEAM process (the runtime actor). No cross-process leaking.
-
 import beacon/error
 import beacon/log
 import gleam/dict.{type Dict}
@@ -106,9 +105,7 @@ pub fn resolve(
           Ok(callback(value))
         }
         Error(Nil) ->
-          Error(error.RuntimeError(
-            reason: "Unknown handler: " <> handler_id,
-          ))
+          Error(error.RuntimeError(reason: "Unknown handler: " <> handler_id))
       }
     }
   }
@@ -122,13 +119,19 @@ fn extract_value(data: String) -> String {
       case string.split(rest, "\"") {
         [value, ..] -> value
         _ -> {
-          log.warning("beacon.handler", "Failed to extract value from inner split: " <> data)
+          log.warning(
+            "beacon.handler",
+            "Failed to extract value from inner split: " <> data,
+          )
           ""
         }
       }
     }
     _ -> {
-      log.warning("beacon.handler", "Failed to extract value from event data: " <> data)
+      log.warning(
+        "beacon.handler",
+        "Failed to extract value from event data: " <> data,
+      )
       ""
     }
   }

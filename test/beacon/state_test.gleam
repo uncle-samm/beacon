@@ -99,8 +99,7 @@ pub fn update_cache_recomputes_dirty_test() {
       "Hello, " <> m.name
     })
   let cache = dict.new()
-  let new_cache =
-    state.update_computed_cache(cache, model, [cv], ["name"])
+  let new_cache = state.update_computed_cache(cache, model, [cv], ["name"])
   let assert Ok("Hello, Alice") = dict.get(new_cache, "greeting")
 }
 
@@ -111,8 +110,7 @@ pub fn update_cache_skips_clean_test() {
       "Hello, " <> m.name
     })
   let cache = dict.from_list([#("greeting", "Hello, OLD")])
-  let new_cache =
-    state.update_computed_cache(cache, model, [cv], ["count"])
+  let new_cache = state.update_computed_cache(cache, model, [cv], ["count"])
   // "name" not dirty, so cache should keep old value
   let assert Ok("Hello, OLD") = dict.get(new_cache, "greeting")
 }

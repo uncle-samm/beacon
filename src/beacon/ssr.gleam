@@ -1,12 +1,14 @@
 /// Beacon's Server-Side Rendering module.
 /// Implements LiveView's "dead render" pattern: on HTTP GET, render the full
 /// HTML page with the initial view, inject the client JS, and embed a signed
-/// session token for state recovery on WebSocket connect.
+/// HttpOnly session cookie for state recovery on WebSocket connect.
 ///
 /// Reference: LiveView two-phase mount (dead render → live mount),
 /// Leptos SSR modes.
+import beacon/cookie
 import beacon/effect.{type Effect}
 import beacon/element.{type Node}
+import beacon/error_page
 import beacon/handler
 import beacon/log
 import beacon/route
@@ -35,16 +37,25 @@ pub type SsrConfig(model, msg) {
     /// Rendered raw — caller is responsible for valid HTML.
     /// Example: `"<link rel=\"stylesheet\" href=\"/static/styles.css\">"`.
     head_html: Option(String),
+    /// Enable framework-owned client tracing.
+    dev_mode: Bool,
+    /// Optional model serializer for state recovery cookies.
+    serialize_model: Option(fn(model) -> String),
   )
 }
+
+/// Cookie that carries the signed join/state recovery token.
+pub const session_cookie_name = "beacon_join_token"
 
 /// A rendered page ready to be sent as an HTTP response.
 pub type RenderedPage {
   RenderedPage(
     /// The full HTML string including doctype, head, body, scripts.
     html: String,
-    /// The signed session token embedded in the page.
+    /// The signed session token sent in an HttpOnly cookie.
     session_token: String,
+    /// Whether the session cookie should include the Secure attribute.
+    cookie_secure: Bool,
   )
 }
 
@@ -76,14 +87,29 @@ pub fn render_page(config: SsrConfig(model, msg)) -> RenderedPage {
   let view_html = element.to_string(view_tree)
 
   // Step 3: Create session token
-  let token = create_session_token(config.secret_key)
+  let token =
+    create_session_token_for_model(
+      model,
+      config.serialize_model,
+      config.secret_key,
+    )
 
   // Step 4: Build full HTML document
   let html =
-    build_html_document(config.title, view_html, token, config.head_html)
+    build_html_document(
+      config.title,
+      view_html,
+      config.head_html,
+      config.dev_mode,
+      True,
+    )
 
   log.debug("beacon.ssr", "Dead render complete")
-  RenderedPage(html: html, session_token: token)
+  RenderedPage(
+    html: html,
+    session_token: token,
+    cookie_secure: !config.dev_mode,
+  )
 }
 
 /// Render a page for a specific URL path (route-aware SSR).
@@ -102,43 +128,98 @@ pub fn render_page_for_path(
   let #(model, _effects) = config.init()
 
   // Step 2: Apply route change if configured
-  let model = case on_route_change {
-    Some(make_msg) -> {
-      let matched_route = case route.match_path(route_patterns, path) {
-        Some(r) -> r
-        None -> route.from_path(path)
+  case on_route_change {
+    Some(make_msg) ->
+      case route.match_path(route_patterns, path) {
+        Some(matched_route) -> {
+          let msg = make_msg(matched_route)
+          let #(model, _effects) = update(model, msg)
+          render_page_for_model(config, path, model)
+        }
+        None -> render_unmatched_route(config, path)
       }
-      let msg = make_msg(matched_route)
-      let #(new_model, _effects) = update(model, msg)
-      new_model
-    }
-    None -> model
+    None -> render_page_for_model(config, path, model)
   }
+}
 
-  // Step 3: Render view with route-specific model
-  // Reset handler counter so IDs always start at h0 (prevents accumulation
-  // across keep-alive requests on the same HTTP process)
+fn render_unmatched_route(config: SsrConfig(model, msg), path: String) {
+  log.warning("beacon.ssr", "No route matched during SSR for path: " <> path)
+  render_not_found_page(config)
+}
+
+fn render_page_for_model(
+  config: SsrConfig(model, msg),
+  path: String,
+  model: model,
+) -> RenderedPage {
   handler.start_render()
   let view_tree = config.view(model)
   let _view_registry = handler.finish_render()
   let view_html = element.to_string(view_tree)
 
-  // Step 4: Create session token
-  let token = create_session_token(config.secret_key)
+  let token =
+    create_session_token_for_model(
+      model,
+      config.serialize_model,
+      config.secret_key,
+    )
 
   // Step 5: Build HTML
   let html =
-    build_html_document(config.title, view_html, token, config.head_html)
+    build_html_document(
+      config.title,
+      view_html,
+      config.head_html,
+      config.dev_mode,
+      True,
+    )
 
-  log.debug("beacon.ssr", "Route-aware render complete for: " <> path)
-  RenderedPage(html: html, session_token: token)
+  log.debug("beacon.ssr", "Render complete for: " <> path)
+  RenderedPage(
+    html: html,
+    session_token: token,
+    cookie_secure: !config.dev_mode,
+  )
+}
+
+fn render_not_found_page(config: SsrConfig(model, msg)) -> RenderedPage {
+  let view_html = error_page.not_found() |> element.to_string
+  let html =
+    build_html_document(
+      config.title,
+      view_html,
+      config.head_html,
+      config.dev_mode,
+      False,
+    )
+
+  RenderedPage(
+    html: html,
+    session_token: create_session_token(config.secret_key),
+    cookie_secure: !config.dev_mode,
+  )
 }
 
 /// Convert a RenderedPage to an HTTP response.
 pub fn to_response(page: RenderedPage) -> Response(ResponseBody) {
   response.new(200)
   |> response.set_header("content-type", "text/html; charset=utf-8")
+  |> cookie.set(
+    session_cookie_name,
+    page.session_token,
+    session_cookie_options(page.cookie_secure),
+  )
   |> response.set_body(Bytes(bytes_tree.from_string(page.html)))
+}
+
+fn session_cookie_options(secure: Bool) -> cookie.CookieOptions {
+  cookie.CookieOptions(
+    max_age: Some(max_token_lifetime_seconds),
+    path: "/",
+    http_only: True,
+    secure: secure,
+    same_site: "Lax",
+  )
 }
 
 /// Create a signed session token.
@@ -155,6 +236,28 @@ pub fn create_session_token(secret_key: String) -> String {
   let secret = bit_array.from_string(secret_key)
   let message = bit_array.from_string(payload)
   crypto.sign_message(message, secret, crypto.Sha256)
+}
+
+fn create_session_token_for_model(
+  model: model,
+  serialize_model: Option(fn(model) -> String),
+  secret_key: String,
+) -> String {
+  case serialize_model {
+    Some(serialize) -> {
+      let payload =
+        json.object([
+          #("ts", json.int(erlang_system_time_seconds())),
+          #("v", json.int(1)),
+          #("model", json.string(serialize(model))),
+        ])
+        |> json.to_string
+      let secret = bit_array.from_string(secret_key)
+      let message = bit_array.from_string(payload)
+      crypto.sign_message(message, secret, crypto.Sha256)
+    }
+    None -> create_session_token(secret_key)
+  }
 }
 
 /// Maximum token lifetime: 24 hours. Any max_age_seconds above this is capped.
@@ -210,16 +313,26 @@ fn parse_token_payload(payload_str: String) -> Result(Int, String) {
   }
 }
 
-/// Build a full HTML document with the view, JS client, and session token.
+/// Build a full HTML document with the view and JS client.
 fn build_html_document(
   title: String,
   view_html: String,
-  session_token: String,
   head_html: Option(String),
+  dev_mode: Bool,
+  include_client: Bool,
 ) -> String {
   let extra_head = case head_html {
     Some(html) -> html
     None -> ""
+  }
+  let client_script = case include_client {
+    True ->
+      string.concat([
+        "<script src=\"/",
+        client_js_filename(),
+        "\" data-beacon-auto></script>",
+      ])
+    False -> ""
   }
   string.concat([
     "<!DOCTYPE html>",
@@ -231,34 +344,30 @@ fn build_html_document(
     "</title>",
     extra_head,
     "</head><body>",
-    // TODO: The session token is embedded in a data attribute, which is readable
-    // by any JS on the page (XSS risk). The proper fix is to use an HTTP-only cookie
-    // for the session token, which requires refactoring the WebSocket join flow.
-    // Mitigations: token has a short max_age (capped at 24h), is cryptographically
-    // signed, and CSP restricts script sources to 'self'.
-    "<div id=\"beacon-app\" data-beacon-token=\"",
-    session_token,
+    "<div id=\"beacon-app\" data-beacon-dev=\"",
+    case dev_mode {
+      True -> "true"
+      False -> "false"
+    },
     "\">",
     view_html,
     "</div>",
-    "<script src=\"/",
-    client_js_filename(),
-    "\" data-beacon-auto></script>",
+    client_script,
     "</body></html>",
   ])
 }
 
 /// Choose the directory that contains Beacon client assets.
-/// Prefer the consuming app's `priv/static` when it has a manifest, then fall
-/// back to Beacon's own priv dir for repo/dependency installs.
+/// Prefer the consuming app's `priv/static` when it has a manifest, otherwise
+/// use Beacon's own priv dir for repo/dependency installs.
 pub fn choose_client_assets_dir(
   has_local_manifest: Bool,
   local_dir: String,
-  fallback_dir: String,
+  beacon_dir: String,
 ) -> String {
   case has_local_manifest {
     True -> local_dir
-    False -> fallback_dir
+    False -> beacon_dir
   }
 }
 

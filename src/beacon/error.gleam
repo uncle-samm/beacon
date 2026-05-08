@@ -1,7 +1,6 @@
 /// Beacon's error types module.
 /// All errors carry enough context to diagnose failures without a debugger.
 /// Per TigerBeetle approach: crash early with clear messages, never swallow errors.
-
 /// Top-level error type for the Beacon framework.
 /// Each variant carries contextual information about what went wrong and where.
 pub type BeaconError {

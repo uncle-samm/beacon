@@ -1,9 +1,9 @@
 import beacon/middleware
+import beacon/transport/server.{type Connection, Bytes}
 import gleam/bytes_tree
 import gleam/http/request
 import gleam/http/response
 import gleam/string
-import beacon/transport/server.{type Connection, Bytes}
 
 // --- Pipeline tests ---
 
@@ -81,18 +81,15 @@ pub fn secure_headers_sets_x_content_type_test() {
   let req = make_request("GET", "/")
   let resp = piped(req)
   // Verify ALL headers set by secure_headers()
-  let assert Ok("nosniff") =
-    response.get_header(resp, "x-content-type-options")
-  let assert Ok("SAMEORIGIN") =
-    response.get_header(resp, "x-frame-options")
-  let assert Ok("1; mode=block") =
-    response.get_header(resp, "x-xss-protection")
+  let assert Ok("nosniff") = response.get_header(resp, "x-content-type-options")
+  let assert Ok("SAMEORIGIN") = response.get_header(resp, "x-frame-options")
+  let assert Ok("1; mode=block") = response.get_header(resp, "x-xss-protection")
   let assert Ok("strict-origin-when-cross-origin") =
     response.get_header(resp, "referrer-policy")
   let assert Ok("camera=(), microphone=(), geolocation=()") =
     response.get_header(resp, "permissions-policy")
   let assert Ok(
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:",
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://avatars.githubusercontent.com; connect-src 'self' ws: wss:",
   ) = response.get_header(resp, "content-security-policy")
 }
 
@@ -101,8 +98,13 @@ pub fn secure_headers_with_custom_csp_test() {
     response.new(200)
     |> response.set_body(Bytes(bytes_tree.from_string("ok")))
   }
-  let custom_csp = "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' ws: wss:"
-  let piped = middleware.pipeline([middleware.secure_headers_with_csp(custom_csp)], handler)
+  let custom_csp =
+    "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' ws: wss:"
+  let piped =
+    middleware.pipeline(
+      [middleware.secure_headers_with_csp(custom_csp)],
+      handler,
+    )
   let req = make_request("GET", "/")
   let resp = piped(req)
   // Custom CSP is used
@@ -190,7 +192,8 @@ pub fn compress_adds_gzip_header_test() {
     )
   }
   let piped = middleware.pipeline([middleware.compress()], handler)
-  let req = make_request_with_header("GET", "/", "accept-encoding", "gzip, deflate")
+  let req =
+    make_request_with_header("GET", "/", "accept-encoding", "gzip, deflate")
   let resp = piped(req)
   let assert Ok("gzip") = response.get_header(resp, "content-encoding")
   let assert Ok("Accept-Encoding") = response.get_header(resp, "vary")
@@ -200,9 +203,7 @@ pub fn compress_skips_without_accept_encoding_test() {
   let handler = fn(_req) {
     response.new(200)
     |> response.set_header("content-type", "text/html")
-    |> response.set_body(
-      Bytes(bytes_tree.from_string("<html>Hello</html>")),
-    )
+    |> response.set_body(Bytes(bytes_tree.from_string("<html>Hello</html>")))
   }
   let piped = middleware.pipeline([middleware.compress()], handler)
   let req = make_request("GET", "/")
@@ -214,9 +215,7 @@ pub fn compress_skips_binary_content_test() {
   let handler = fn(_req) {
     response.new(200)
     |> response.set_header("content-type", "image/png")
-    |> response.set_body(
-      Bytes(bytes_tree.from_string("binary data")),
-    )
+    |> response.set_body(Bytes(bytes_tree.from_string("binary data")))
   }
   let piped = middleware.pipeline([middleware.compress()], handler)
   let req = make_request_with_header("GET", "/img", "accept-encoding", "gzip")
@@ -366,7 +365,8 @@ pub fn except_skips_matching_prefix_test() {
     response.new(401)
     |> response.set_body(Bytes(bytes_tree.from_string("unauthorized")))
   }
-  let piped = middleware.pipeline([middleware.except("/public", auth_mw)], handler)
+  let piped =
+    middleware.pipeline([middleware.except("/public", auth_mw)], handler)
 
   // /public/page → auth skipped, passes through
   let assert 200 = { piped(make_request("GET", "/public/page")) }.status
@@ -464,20 +464,14 @@ pub fn composing_only_and_except_test() {
 
 // --- Helpers ---
 
-fn make_request(
-  method: String,
-  path: String,
-) -> request.Request(Connection) {
+fn make_request(method: String, path: String) -> request.Request(Connection) {
   // Create a minimal request for testing
   // We can't create a real Connection, so we use FFI
   do_make_request(method, path)
 }
 
 @external(erlang, "beacon_middleware_test_ffi", "make_request")
-fn do_make_request(
-  method: String,
-  path: String,
-) -> request.Request(Connection)
+fn do_make_request(method: String, path: String) -> request.Request(Connection)
 
 fn make_request_with_header(
   method: String,

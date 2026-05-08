@@ -1,6 +1,5 @@
 /// Real integration tests — starts a server and makes actual HTTP/WebSocket requests.
 /// No mocks. Real network calls.
-
 import beacon/application
 import beacon/effect
 import beacon/element
@@ -54,12 +53,16 @@ fn test_app_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     static_dir: option.None,
     route_patterns: [],
     on_route_change: option.None,
-    dynamic_subscriptions: option.None, on_notify: option.None,
+    on_route_leave: option.None,
+    dynamic_subscriptions: option.None,
+    on_notify: option.None,
+    on_notification: option.None,
     security_limits: transport.default_security_limits(),
     head_html: option.None,
     api_handler: option.None,
     ws_auth: option.None,
     init_from_request: option.None,
+    dev_mode: False,
   )
 }
 
@@ -190,14 +193,9 @@ pub fn auth_middleware_blocks_ws_upgrade_test() {
   start_httpc()
   let port = 16_000 + unique_port_offset()
   // Create an app with an auth middleware that always rejects
-  let auth_mw = fn(_req, _next) {
-    gleam_http_response_new(401)
-  }
+  let auth_mw = fn(_req, _next) { gleam_http_response_new(401) }
   let config =
-    application.AppConfig(
-      ..test_app_config(port),
-      middlewares: [auth_mw],
-    )
+    application.AppConfig(..test_app_config(port), middlewares: [auth_mw])
   let assert Ok(_app) = application.start(config)
   process.sleep(100)
 
@@ -223,9 +221,7 @@ pub fn api_handler_serves_json_test() {
         option.Some(
           response.new(200)
           |> response.set_header("content-type", "application/json")
-          |> response.set_body(
-            Bytes(bytes_tree.from_string("{\"ok\":true}")),
-          ),
+          |> response.set_body(Bytes(bytes_tree.from_string("{\"ok\":true}"))),
         )
       _ -> option.None
     }
@@ -254,9 +250,7 @@ pub fn api_handler_fallthrough_to_ssr_test() {
         option.Some(
           response.new(200)
           |> response.set_header("content-type", "application/json")
-          |> response.set_body(
-            Bytes(bytes_tree.from_string("{\"api\":true}")),
-          ),
+          |> response.set_body(Bytes(bytes_tree.from_string("{\"api\":true}"))),
         )
       _ -> option.None
     }
@@ -284,9 +278,7 @@ pub fn ws_auth_rejects_unauthorized_test() {
   start_httpc()
   let port = 20_000 + unique_port_offset()
   // ws_auth that always rejects
-  let ws_auth = fn(_req: request.Request(Connection)) {
-    Error("not allowed")
-  }
+  let ws_auth = fn(_req: request.Request(Connection)) { Error("not allowed") }
   let config =
     application.AppConfig(
       ..test_app_config(port),
@@ -375,7 +367,8 @@ fn has_header(
     [] -> False
     [#(k, v), ..rest] -> {
       case string.lowercase(k) == string.lowercase(name) {
-        True -> string.contains(string.lowercase(v), string.lowercase(expected_value))
+        True ->
+          string.contains(string.lowercase(v), string.lowercase(expected_value))
         False -> has_header(rest, name, expected_value)
       }
     }
@@ -396,7 +389,9 @@ fn erlang_unique_pos() -> Int
 fn start_httpc() -> Nil
 
 @external(erlang, "beacon_http_client_ffi", "http_get")
-fn http_get(url: String) -> Result(#(Int, List(#(String, String)), String), String)
+fn http_get(
+  url: String,
+) -> Result(#(Int, List(#(String, String)), String), String)
 
 pub type TcpSocket
 

@@ -1,6 +1,5 @@
 /// Fault injection — disrupts active connections during simulation runs.
 /// Runs as a separate process that periodically applies faults.
-
 import beacon/log
 import beacon/sim/pool.{type WsSocket}
 import gleam/erlang/process
@@ -23,9 +22,7 @@ pub fn start(
   sockets: List(WsSocket),
 ) -> process.Subject(Nil) {
   let stop_subject = process.new_subject()
-  process.spawn(fn() {
-    inject_loop(config, sockets, stop_subject, 0)
-  })
+  process.spawn(fn() { inject_loop(config, sockets, stop_subject, 0) })
   stop_subject
 }
 

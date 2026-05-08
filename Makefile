@@ -1,10 +1,19 @@
-.PHONY: build test push tag publish release
+.PHONY: build test browser-canonical browser-canonical-desktop browser-canonical-mobile push tag publish release
 
 build:
 	gleam build
 
 test:
 	gleam test
+
+browser-canonical:
+	sh scripts/run_canonical_cdp.sh
+
+browser-canonical-desktop:
+	BEACON_CDP_VIEWPORTS=desktop sh scripts/run_canonical_cdp.sh
+
+browser-canonical-mobile:
+	BEACON_CDP_VIEWPORTS=mobile sh scripts/run_canonical_cdp.sh
 
 push:
 	sh scripts/push.sh

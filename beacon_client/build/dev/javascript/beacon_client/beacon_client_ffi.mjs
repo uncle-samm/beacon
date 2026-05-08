@@ -2,9 +2,12 @@
 // Event delegation, WebSocket, DOM morphing, Rendered format — all here.
 // When BeaconApp is available (compiled user code), runs updates LOCALLY.
 // Local-only events produce ZERO WebSocket traffic.
+// Keydown is forwarded for non-text targets, and text inputs/textareas only
+// forward Enter without Shift when not composing, so chat composers do not
+// flood the server while still supporting submit-by-enter.
 
 import { Ok, Error as GleamError } from "./gleam.mjs";
-import { diffModels, applyOps } from "./beacon_client/patch.mjs";
+import { applyOps } from "./beacon_client/patch.mjs";
 
 // === State ===
 const _pd = {};
@@ -14,11 +17,44 @@ let reconnectAttempts = 0;
 let appRoot = null;
 let hydrated = false;
 let eventClock = 0;
+let currentModelVersion = 0;
+let latestAckClock = 0;
+const TRACE_LIMIT = 400;
+const traceBuffer = [];
+const hookRegistry = new Map();
+const mountedHooks = new WeakMap();
 
 // === Client-Side Event Rate Limiting ===
 let eventSendCount = 0;
 let eventSendWindowStart = 0;
 const MAX_EVENTS_PER_SECOND = 30;
+const INPUT_DEBOUNCE_MS = 80;
+const pendingInputEvents = new Map();
+
+function isDevMode() {
+  return !!appRoot && appRoot.getAttribute("data-beacon-dev") === "true";
+}
+
+function trace(kind, detail = {}) {
+  if (!isDevMode()) return;
+  traceBuffer.push({ ts: Date.now(), kind, ...detail });
+  if (traceBuffer.length > TRACE_LIMIT) traceBuffer.shift();
+}
+
+function ensureBeaconDebug() {
+  if (typeof window === "undefined") return;
+  window.__beacon = window.__beacon || {};
+  window.__beacon.trace = () => traceBuffer.slice();
+}
+
+function ensureHookRegistry() {
+  if (typeof window === "undefined") return;
+  window.beaconClient = window.beaconClient || {};
+  window.beaconClient.registerHook = (name, hook) => {
+    hookRegistry.set(name, hook);
+    trace("hook.register", { name });
+  };
+}
 
 function isEventRateLimited() {
   const now = Date.now();
@@ -37,6 +73,9 @@ let clientRegistry = null;
 let clientInitialized = false;
 let renderPending = false;  // RAF throttle: true when a render is scheduled
 let clientModelJson = null;  // Cached JSON representation for patch diffing
+let pendingSendQueue = [];
+let readyForServerEvents = false;
+let pendingLocalEvents = [];
 
 // === Process Dictionary (handler registry storage) ===
 export function pd_set(key, value) { _pd[key] = value; return undefined; }
@@ -94,7 +133,7 @@ function clientRenderFlush() {
 // Handles an event locally. Returns:
 // {action: "local"} — LOCAL event, handled client-only, don't send to server
 // {action: "send", ops: ""} — MODEL event, send to server with no ops (no encoder)
-// {action: "send", ops: "..."} — MODEL event, send ops (JSON-encoded patch array)
+// {action: "send", ops: ""} — MODEL event, server recomputes authoritative state
 function handleEventLocally(handlerId, eventData, eventName, targetPath, clock) {
   if (!clientInitialized) return { action: "send", ops: "" };
   const App = window.BeaconApp;
@@ -107,34 +146,22 @@ function handleEventLocally(handlerId, eventData, eventName, targetPath, clock) 
 
   try {
     const msg = result[0];
-    // Snapshot model JSON before update (for diffing)
-    const oldModelJson = clientModelJson;
 
     const updateResult = App.update(clientModel, clientLocal, msg);
     clientModel = updateResult[0];
     clientLocal = updateResult[1];
     clientRender();
 
-    if (App.msg_affects_model(msg)) {
-      // MODEL event — applied optimistically, now diff and send ops
-      let ops = "";
-      if (oldModelJson && App.encode_model) {
-        try {
-          // encode_model takes (model, local) to match server's model_sync format
-          const newModelJsonStr = App.encode_model(clientModel, clientLocal);
-          const newModelJson = JSON.parse(newModelJsonStr);
-          const patchOps = diffModels(oldModelJson, newModelJson);
-          if (patchOps.length > 0) {
-            ops = JSON.stringify(patchOps);
-          }
-          // Update cached JSON for future diffs
-          clientModelJson = newModelJson;
-        } catch (e) {
-          console.warn("[beacon] Model diff failed, sending without ops:", e.message);
-          ops = "";
-        }
-      }
-      return { action: "send", ops };
+    const affectsModel = App.msg_affects_model(msg);
+    if (affectsModel) {
+      // MODEL event — rendered optimistically on the client, then sent as an
+      // event. The server recomputes the authoritative model and returns sync/patch.
+      return { action: "send", ops: "" };
+    } else if (eventName === "keydown") {
+      // Keydown events must still reach the server so server-side apps can
+      // respond to Enter / navigation keys even when the local update is
+      // model-neutral.
+      return { action: "send", ops: "" };
     } else {
       // LOCAL event — client-only, zero server traffic
       return { action: "local" };
@@ -148,8 +175,11 @@ function handleEventLocally(handlerId, eventData, eventName, targetPath, clock) 
 
 // === Initialization ===
 export function boot(rootSelector) {
-  appRoot = document.querySelector(rootSelector || "#beacon-app");
-  if (!appRoot) { console.error("[beacon] Root not found:", rootSelector); return undefined; }
+  const root = document.querySelector(rootSelector || "#beacon-app");
+  if (!root) { console.error("[beacon] Root not found:", rootSelector); return undefined; }
+  ensureBeaconDebug();
+  ensureHookRegistry();
+  setAppRoot(root);
   hydrated = appRoot.childNodes.length > 0;
   if (hydrated) attachEvents();
   const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
@@ -157,23 +187,82 @@ export function boot(rootSelector) {
   return undefined;
 }
 
+function setAppRoot(root) {
+  const previousRoot = appRoot;
+  appRoot = root;
+  if (!previousRoot) {
+    trace("root.init", { root: describeNode(root) });
+    return;
+  }
+  if (previousRoot === root) return;
+  trace("root.replace", {
+    from: describeNode(previousRoot),
+    to: describeNode(root),
+  });
+  unmountSubtree(previousRoot);
+}
+
 // === WebSocket ===
 function connect(wsUrl) {
+  readyForServerEvents = false;
   ws = new WebSocket(wsUrl);
   ws.onopen = () => {
     reconnectAttempts = 0;
     startHeartbeat();
-    const token = appRoot ? appRoot.getAttribute("data-beacon-token") || "" : "";
-    send({ type: "join", token, path: location.pathname + location.search });
+    sendNow({ type: "join", token: "", path: location.pathname + location.search });
   };
   ws.onmessage = (e) => handleMessage(e.data);
   ws.onclose = () => { stopHeartbeat(); scheduleReconnect(wsUrl); };
   ws.onerror = (e) => console.error("[beacon] WS error:", e);
 }
 
-function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
-// Debug: expose WS state for testing
-window.__beaconWsState = () => ws ? ws.readyState : -1;
+function send(msg) {
+  const encoded = JSON.stringify(msg);
+  if (readyForServerEvents && ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(encoded);
+      return;
+    } catch (e) {
+      console.error("[beacon] WS send failed, queueing message:", e);
+    }
+  }
+  pendingSendQueue.push(encoded);
+}
+
+function sendNow(msg) {
+  const encoded = JSON.stringify(msg);
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    pendingSendQueue.push(encoded);
+    return;
+  }
+  try {
+    ws.send(encoded);
+  } catch (e) {
+    console.error("[beacon] WS send failed, queueing message:", e);
+    pendingSendQueue.push(encoded);
+  }
+}
+
+function flushPendingSendQueue() {
+  if (!readyForServerEvents || !ws || ws.readyState !== WebSocket.OPEN || pendingSendQueue.length === 0) return;
+
+  while (pendingSendQueue.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
+    const encoded = pendingSendQueue.shift();
+    if (encoded === undefined) break;
+    try {
+      ws.send(encoded);
+    } catch (e) {
+      console.error("[beacon] WS flush failed, preserving pending queue:", e);
+      pendingSendQueue.unshift(encoded);
+      return;
+    }
+  }
+}
+// Debug: expose WS state for testing when running in a browser.
+if (typeof window !== "undefined") {
+  window.__beaconWsState = () => ws ? ws.readyState : -1;
+  window.__beaconConnectionReady = () => readyForServerEvents;
+}
 function startHeartbeat() { stopHeartbeat(); heartbeatTimer = setInterval(() => send({ type: "heartbeat" }), 30000); }
 function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } }
 function scheduleReconnect(wsUrl) {
@@ -194,11 +283,10 @@ function handleMessage(raw) {
   // crashing the entire client runtime. This is acceptable because a single
   // corrupt frame should not take down the WS connection.
   try { msg = JSON.parse(raw); } catch (e) { console.error("[beacon] Failed to parse server message:", e.message, raw.substring(0, 100)); return; }
-  if (msg.type === "mount") console.log("[beacon] Mount received, appRoot:", !!appRoot, "payload length:", msg.payload?.length);
   switch (msg.type) {
     case "mount": handleMount(msg.payload); break;
-    case "model_sync": handleModelSync(msg.model, msg.version); break;
-    case "patch": handlePatch(msg.ops, msg.version); break;
+    case "model_sync": handleModelSync(msg.model, msg.version, msg.ack_clock || 0); break;
+    case "patch": handlePatch(msg.ops, msg.version, msg.ack_clock || 0); break;
     case "navigate": handleServerNavigate(msg.path); break;
     case "hard_navigate": handleServerHardNavigate(msg.path); break;
     case "reload": console.log("[beacon] Hot reload — refreshing..."); location.reload(); break;
@@ -215,12 +303,20 @@ function handleMount(payload) {
   hydrated = false;
   morphInnerHTML(appRoot, payload);
   attachEvents();
+  syncHooks(appRoot);
+  trace("mount", { length: payload.length });
+  readyForServerEvents = true;
+  flushPendingSendQueue();
 }
 
-function handleModelSync(modelJson, version) {
+function handleModelSync(modelJson, version, ackClock) {
   if (!window.BeaconApp) return;
   const App = window.BeaconApp;
   if (!App.decode_model) return;
+  if (version < currentModelVersion) {
+    trace("model_sync.stale", { version, currentModelVersion });
+    return;
+  }
 
   try {
     const result = App.decode_model(modelJson);
@@ -251,16 +347,25 @@ function handleModelSync(modelJson, version) {
       // Use synchronous render to ensure DOM updates immediately
       // (requestAnimationFrame may not fire in background tabs)
       clientRenderNow();
+      currentModelVersion = version;
+      latestAckClock = Math.max(latestAckClock, ackClock);
       console.log("[beacon] Model synced v" + version);
+      trace("model_sync", { version, ackClock });
+      readyForServerEvents = true;
+      flushPendingSendQueue();
     }
   } catch (e) {
     console.error("[beacon] Model sync decode failed:", e);
   }
 }
 
-function handlePatch(opsJson, version) {
+function handlePatch(opsJson, version, ackClock) {
   if (!window.BeaconApp) return;
   const App = window.BeaconApp;
+  if (version < currentModelVersion) {
+    trace("patch.stale", { version, currentModelVersion });
+    return;
+  }
   if (!App.decode_model || !clientModelJson) {
     // No cached model to patch — request full sync
     console.warn("[beacon] Patch received but no cached model, ignoring");
@@ -291,7 +396,10 @@ function handlePatch(opsJson, version) {
       }
 
       clientRenderNow();
+      currentModelVersion = version;
+      latestAckClock = Math.max(latestAckClock, ackClock);
       console.log("[beacon] Patch applied v" + version + " (" + ops.length + " ops)");
+      trace("patch", { version, ackClock, ops: ops.length });
     } else {
       console.error("[beacon] Patch decode failed, requesting full sync");
       console.warn("[beacon] Client-server desync detected: patch decode failed, disabling client patching until next model_sync");
@@ -307,9 +415,20 @@ function handlePatch(opsJson, version) {
 function handleServerNavigate(path) {
   if (path && path !== location.pathname + location.search) {
     history.pushState(null, "", path);
+    resetClientRouteTransientState(path);
     // Trigger navigate to server for route-change processing
     send({ type: "navigate", path: path });
   }
+}
+
+function resetClientRouteTransientState(path) {
+  for (const item of pendingInputEvents.values()) {
+    clearTimeout(item.timer);
+  }
+  pendingInputEvents.clear();
+  pendingLocalEvents = [];
+  renderPending = false;
+  trace("route.transient_reset", { path });
 }
 
 // Hard navigation — full page reload via window.location.href.
@@ -319,9 +438,9 @@ function handleServerHardNavigate(path) {
     console.warn("[beacon] Hard navigate: received empty path from server");
     return;
   }
-  // SECURITY: Only allow relative paths to prevent open redirect attacks.
-  // Absolute URLs (https://evil.com), javascript: and data: protocols are rejected.
-  if (path.startsWith("/")) {
+  // SECURITY: Only allow same-origin relative paths to prevent open redirect attacks.
+  // Protocol-relative URLs (//evil.com), absolute URLs, javascript: and data: are rejected.
+  if (path.startsWith("/") && !path.startsWith("//")) {
     window.location.href = path;
   } else {
     console.error("[beacon] Hard navigate rejected: path must start with / (got:", path, ")");
@@ -342,7 +461,8 @@ function morphInnerHTML(container, html) {
   const selEnd = focused?.selectionEnd;
   const focusedValue = focused?.value;
 
-  const t = document.createElement("template"); t.innerHTML = html; morphChildren(container, t.content);
+  const t = document.createElement("template"); t.innerHTML = html; morphChildren(container, t.content); syncHooks(container);
+  trace("morph", { childCount: container.childNodes.length });
 
   // Restore focus after morph — find the same element by name/handler
   if (focusedTag === "INPUT" || focusedTag === "TEXTAREA" || focusedTag === "SELECT") {
@@ -360,15 +480,19 @@ function morphInnerHTML(container, html) {
         restored = container.querySelector(`${focusedTag}[placeholder="${CSS.escape(placeholder)}"]`);
       }
     }
-    if (restored && restored !== document.activeElement) {
-      restored.focus();
+    if (restored) {
+      if (restored !== document.activeElement) {
+        restored.focus();
+      }
+      // Preserve active typing only while an input event is still debounced.
+      // Once submit/Enter has flushed input, the server-rendered value is
+      // authoritative so cleared composers do not snap back to stale text.
+      if (hasPendingUnackedInput() && focusedValue !== undefined && restored.value !== focusedValue) {
+        restored.value = focusedValue;
+      }
       // Restore cursor position
       if (typeof selStart === "number" && restored.setSelectionRange) {
         try { restored.setSelectionRange(selStart, selEnd); } catch(e) { console.warn("[beacon] setSelectionRange failed:", e.message); }
-      }
-      // Restore value if morph overwrote it (server might be behind client)
-      if (focusedValue !== undefined && restored.value !== focusedValue) {
-        restored.value = focusedValue;
       }
     }
   }
@@ -377,21 +501,82 @@ function morphInnerHTML(container, html) {
 function morphChildren(op, np) {
   let oc = op.firstChild, nc = np.firstChild;
   while (nc) {
-    if (!oc) { op.appendChild(nc.cloneNode(true)); nc = nc.nextSibling; continue; }
+    if (!oc) { op.appendChild(nc.cloneNode(true)); trace("morph.append", { key: nodeKey(nc) }); nc = nc.nextSibling; continue; }
     if (sameNode(oc, nc)) { morphNode(oc, nc); oc = oc.nextSibling; nc = nc.nextSibling; continue; }
     const m = findMatch(oc.nextSibling, nc);
-    if (m) { while (oc && oc !== m) { const nx = oc.nextSibling; op.removeChild(oc); oc = nx; } if (oc) { morphNode(oc, nc); oc = oc.nextSibling; } nc = nc.nextSibling; continue; }
-    op.insertBefore(nc.cloneNode(true), oc); nc = nc.nextSibling;
+    if (m) {
+      const targetKey = nodeKey(nc);
+      if (targetKey) {
+        op.insertBefore(m, oc);
+        trace("morph.move", { key: targetKey });
+        morphNode(m, nc);
+        nc = nc.nextSibling;
+        continue;
+      }
+      while (oc && oc !== m) { const nx = oc.nextSibling; unmountSubtree(oc); op.removeChild(oc); trace("morph.remove", { key: nodeKey(oc) }); oc = nx; }
+      if (oc) { morphNode(oc, nc); oc = oc.nextSibling; }
+      nc = nc.nextSibling;
+      continue;
+    }
+    op.insertBefore(nc.cloneNode(true), oc); trace("morph.insert", { key: nodeKey(nc) }); nc = nc.nextSibling;
   }
-  while (oc) { const nx = oc.nextSibling; op.removeChild(oc); oc = nx; }
+  while (oc) { const nx = oc.nextSibling; unmountSubtree(oc); op.removeChild(oc); trace("morph.remove", { key: nodeKey(oc) }); oc = nx; }
 }
 
 function morphNode(o, n) {
   if (o.nodeType === 3) { if (o.textContent !== n.textContent) o.textContent = n.textContent; return; }
   if (o.nodeType !== 1) return;
   morphAttributes(o, n);
-  if ((o.tagName === "INPUT" || o.tagName === "TEXTAREA" || o.tagName === "SELECT") && o === document.activeElement) return;
+  if (preservesChildren(o)) return;
+  const isFormControl = o.tagName === "INPUT" || o.tagName === "TEXTAREA" || o.tagName === "SELECT";
+  if (isFormControl && o === document.activeElement) {
+    if (formControlValuesDiffer(o, n)) syncFormControlState(o, n);
+    return;
+  }
   morphChildren(o, n);
+  if (isFormControl) syncFormControlState(o, n);
+}
+
+function preservesChildren(node) {
+  if (!node || !node.hasAttribute) return false;
+  if (node.hasAttribute("data-beacon-preserve-children")) return true;
+  const ignore = node.getAttribute("data-beacon-ignore");
+  return ignore === "children" || ignore === "true";
+}
+
+function nodeKey(node) {
+  if (!node || node.nodeType !== 1) return null;
+  return node.getAttribute("data-beacon-key") || node.id || null;
+}
+
+function describeNode(node) {
+  if (!node || node.nodeType !== 1) return "";
+  const id = node.id ? "#" + node.id : "";
+  const key = node.getAttribute("data-beacon-key");
+  const keyed = key ? `[data-beacon-key="${key}"]` : "";
+  return node.tagName.toLowerCase() + id + keyed;
+}
+
+function formControlValuesDiffer(o, n) {
+  if (o.tagName === "INPUT") {
+    const type = (o.getAttribute("type") || "").toLowerCase();
+    if (type === "checkbox" || type === "radio") return o.checked !== n.hasAttribute("checked");
+    if (type === "file") return false;
+    const nextValue = n.hasAttribute("value") ? n.getAttribute("value") : "";
+    return o.value !== nextValue;
+  }
+
+  if (o.tagName === "TEXTAREA") {
+    const nextValue = n.hasAttribute("value") ? n.getAttribute("value") : n.textContent;
+    return o.value !== nextValue;
+  }
+
+  if (o.tagName === "SELECT") {
+    if (o.value !== n.value) return true;
+    return Array.from(o.options).some((oOption, i) => n.options[i] && oOption.selected !== n.options[i].selected);
+  }
+
+  return false;
 }
 
 function morphAttributes(o, n) {
@@ -399,33 +584,190 @@ function morphAttributes(o, n) {
   for (let i = 0; i < n.attributes.length; i++) { const nm = n.attributes[i].name, v = n.attributes[i].value; if (o.getAttribute(nm) !== v) o.setAttribute(nm, v); }
 }
 
-function sameNode(a, b) { if (a.nodeType !== b.nodeType) return false; if (a.nodeType === 3) return true; if (a.nodeType !== 1) return false; if (a.tagName !== b.tagName) return false; if (a.id && b.id) return a.id === b.id; return true; }
-function findMatch(s, t) { let c = s, k = 5; while (c && k > 0) { if (sameNode(c, t)) return c; c = c.nextSibling; k--; } return null; }
+function syncFormControlState(o, n) {
+  if (o.tagName === "TEXTAREA") {
+    const nextValue = n.hasAttribute("value") ? n.getAttribute("value") : n.textContent;
+    if (o.value !== nextValue) o.value = nextValue;
+    return;
+  }
+
+  if (o.tagName === "INPUT") {
+    const type = (o.getAttribute("type") || "").toLowerCase();
+    if (type === "checkbox" || type === "radio") {
+      o.checked = n.hasAttribute("checked");
+      return;
+    }
+    if (type !== "file") {
+      const nextValue = n.hasAttribute("value") ? n.getAttribute("value") : "";
+      if (o.value !== nextValue) o.value = nextValue;
+    }
+    return;
+  }
+
+  if (o.tagName === "SELECT") {
+    for (let i = 0; i < o.options.length && i < n.options.length; i++) {
+      o.options[i].selected = n.options[i].selected;
+    }
+    if (o.value !== n.value) o.value = n.value;
+  }
+}
+
+function sameNode(a, b) {
+  if (a.nodeType !== b.nodeType) return false;
+  if (a.nodeType === 3) return true;
+  if (a.nodeType !== 1) return false;
+  if (a.tagName !== b.tagName) return false;
+  const aKey = nodeKey(a);
+  const bKey = nodeKey(b);
+  if (aKey || bKey) return aKey === bKey;
+  if (a.id && b.id) return a.id === b.id;
+  return true;
+}
+function findMatch(s, t) {
+  const targetKey = nodeKey(t);
+  let c = s, k = 8;
+  while (c && k > 0) {
+    if (targetKey ? nodeKey(c) === targetKey : sameNode(c, t)) return c;
+    c = c.nextSibling;
+    k--;
+  }
+  return null;
+}
+
+function syncHooks(root) {
+  if (!root || !root.querySelectorAll) return;
+  root.querySelectorAll("[data-beacon-hook]").forEach((node) => {
+    const hookName = node.getAttribute("data-beacon-hook");
+    const hook = hookRegistry.get(hookName);
+    if (!hook) return;
+    const attrs = serializeHookAttrs(node);
+    const existing = mountedHooks.get(node);
+    if (!existing) {
+      const state = hook.mount ? hook.mount(node) : undefined;
+      mountedHooks.set(node, { hookName, hook, attrs, state });
+      trace("hook.mount", { hook: hookName, island: node.getAttribute("data-beacon-island") || "" });
+      return;
+    }
+    if (existing.attrs !== attrs && existing.hook.update) {
+      existing.hook.update(node, existing.state);
+      mountedHooks.set(node, { ...existing, attrs });
+      trace("hook.update", { hook: hookName, island: node.getAttribute("data-beacon-island") || "" });
+    }
+  });
+}
+
+function unmountSubtree(node) {
+  if (!node) return;
+  if (node.querySelectorAll) node.querySelectorAll("[data-beacon-hook]").forEach(unmountHookNode);
+  unmountHookNode(node);
+}
+
+function unmountHookNode(node) {
+  const existing = mountedHooks.get(node);
+  if (!existing) return;
+  if (existing.hook.unmount) existing.hook.unmount(node, existing.state);
+  mountedHooks.delete(node);
+  trace("hook.unmount", { hook: existing.hookName });
+}
+
+function serializeHookAttrs(node) {
+  const watchedAttrs = hookWatchSet(node);
+  return Array.from(node.attributes)
+    .filter((attr) => shouldIncludeHookAttr(attr.name, watchedAttrs))
+    .map((attr) => attr.name + "=" + attr.value)
+    .sort()
+    .join("|");
+}
+
+function hookWatchSet(node) {
+  const raw = node.getAttribute("data-beacon-hook-watch");
+  if (!raw) return null;
+  const names = raw.split(",").map((name) => name.trim()).filter(Boolean);
+  return names.length > 0 ? new Set(names) : null;
+}
+
+function shouldIncludeHookAttr(name, watchedAttrs) {
+  if (name === "data-beacon-preserve-children") return false;
+  if (!watchedAttrs) return true;
+  return name === "data-beacon-hook"
+    || name === "data-beacon-hook-watch"
+    || name === "data-beacon-island"
+    || watchedAttrs.has(name);
+}
 
 // === Event Delegation ===
 
 // Helper: dispatch an event through local handling and/or server.
 // Builds the wire message with optional ops for patch-based sync.
-function dispatchEvent(eventName, hid, data, tp) {
-  eventClock++;
+function dispatchEvent(eventName, hid, data, tp, forcedClock) {
+  const clock = forcedClock ?? ++eventClock;
+  const eventPayload = { name: eventName, handler_id: hid, data, target_path: tp, clock };
   if (clientInitialized) {
-    const r = handleEventLocally(hid, data, eventName, tp, eventClock);
+    const r = handleEventLocally(hid, data, eventName, tp, clock);
     if (r.action === "send") {
       if (isEventRateLimited()) {
         console.warn("[beacon] Event rate limited (>" + MAX_EVENTS_PER_SECOND + "/s)");
         return;
       }
-      const msg = { type: "event", name: eventName, handler_id: hid, data, target_path: tp, clock: eventClock };
-      if (r.ops) msg.ops = r.ops;
-      send(msg);
+      if (r.ops) eventPayload.ops = r.ops;
+      caseSendEvent(eventPayload);
+    } else {
+      pendingLocalEvents.push(eventPayload);
     }
   } else {
     if (isEventRateLimited()) {
       console.warn("[beacon] Event rate limited (>" + MAX_EVENTS_PER_SECOND + "/s)");
       return;
     }
-    send({ type: "event", name: eventName, handler_id: hid, data, target_path: tp, clock: eventClock });
+    send({ type: "event", ...eventPayload });
   }
+}
+
+function caseSendEvent(eventPayload) {
+  if (pendingLocalEvents.length > 0) {
+    send({ type: "event_batch", events: [...pendingLocalEvents, eventPayload] });
+    pendingLocalEvents = [];
+  } else {
+    send({ type: "event", ...eventPayload });
+  }
+}
+
+function dispatchInputEvent(hid, data, tp, debounceMs) {
+  const key = hid + "\n" + tp;
+  const existing = pendingInputEvents.get(key);
+  if (existing) clearTimeout(existing.timer);
+  const clock = ++eventClock;
+  const pending = {
+    hid,
+    data,
+    tp,
+    clock,
+    timer: setTimeout(() => {
+      pendingInputEvents.delete(key);
+      dispatchEvent("input", hid, data, tp, clock);
+    }, debounceMs),
+  };
+  pendingInputEvents.set(key, pending);
+}
+
+function flushPendingInputEvents() {
+  if (pendingInputEvents.size === 0) return;
+  const pending = Array.from(pendingInputEvents.values()).sort((a, b) => a.clock - b.clock);
+  pendingInputEvents.clear();
+  for (const item of pending) {
+    clearTimeout(item.timer);
+    dispatchEvent("input", item.hid, item.data, item.tp, item.clock);
+  }
+}
+
+function hasPendingUnackedInput() {
+  return Array.from(pendingInputEvents.values()).some((item) => item.clock > latestAckClock);
+}
+
+function getInputDebounceMs(node) {
+  const raw = node.getAttribute("data-beacon-input-debounce");
+  const parsed = raw ? parseInt(raw, 10) : INPUT_DEBOUNCE_MS;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : INPUT_DEBOUNCE_MS;
 }
 
 function attachEvents() {
@@ -435,6 +777,7 @@ function attachEvents() {
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-click")) {
         e.preventDefault();
+        flushPendingInputEvents();
         dispatchEvent("click", t.getAttribute("data-beacon-event-click"), "{}", getPath(t));
         return;
       }
@@ -447,7 +790,40 @@ function attachEvents() {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-input")) {
         const hid = t.getAttribute("data-beacon-event-input");
         const data = JSON.stringify({ value: t.value || "" });
-        dispatchEvent("input", hid, data, getPath(t));
+        dispatchInputEvent(hid, data, getPath(t), getInputDebounceMs(t));
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.onchange = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-change")) {
+        const hid = t.getAttribute("data-beacon-event-change");
+        const data = JSON.stringify({ value: t.value || "" });
+        flushPendingInputEvents();
+        dispatchEvent("change", hid, data, getPath(t));
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.onfocusin = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-focus")) {
+        dispatchEvent("focus", t.getAttribute("data-beacon-event-focus"), "{}", getPath(t));
+        return;
+      }
+      t = t.parentNode;
+    }
+  };
+  appRoot.onfocusout = (e) => {
+    let t = e.target;
+    while (t && t !== appRoot) {
+      if (t.hasAttribute && t.hasAttribute("data-beacon-event-blur")) {
+        dispatchEvent("blur", t.getAttribute("data-beacon-event-blur"), "{}", getPath(t));
         return;
       }
       t = t.parentNode;
@@ -458,6 +834,7 @@ function attachEvents() {
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-submit")) {
         e.preventDefault();
+        flushPendingInputEvents();
         dispatchEvent("submit", t.getAttribute("data-beacon-event-submit"), "{}", getPath(t));
         return;
       }
@@ -565,6 +942,11 @@ function attachEvents() {
     let t = e.target;
     while (t && t !== appRoot) {
       if (t.hasAttribute && t.hasAttribute("data-beacon-event-keydown")) {
+        const isTextEntry = t.tagName === "INPUT" || t.tagName === "TEXTAREA";
+        const isEnterSubmit = e.key === "Enter" && !e.shiftKey && !e.isComposing;
+        if (isTextEntry && !isEnterSubmit) return;
+        if (isEnterSubmit) e.preventDefault();
+        flushPendingInputEvents();
         dispatchEvent("keydown", t.getAttribute("data-beacon-event-keydown"), JSON.stringify({ value: e.key }), getPath(t));
         return;
       }
@@ -594,13 +976,16 @@ function setupNavigation() {
     const path = a.pathname + a.search;
     if (path !== location.pathname + location.search) {
       history.pushState(null, "", path);
+      resetClientRouteTransientState(path);
       send({ type: "navigate", path: path });
     }
   });
 
   // Handle browser back/forward
   window.addEventListener("popstate", () => {
-    send({ type: "navigate", path: location.pathname + location.search });
+    const path = location.pathname + location.search;
+    resetClientRouteTransientState(path);
+    send({ type: "navigate", path });
   });
 }
 

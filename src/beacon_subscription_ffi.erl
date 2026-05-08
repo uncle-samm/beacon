@@ -5,19 +5,19 @@
 %%
 %% Subject is a Gleam record: {subject, Pid, Tag}
 %% Messages sent via process.send(subject, msg) arrive as {Tag, Msg}.
-%% PubSub broadcasts arrive as {beacon_pubsub, Topic, _Message}.
+%% PubSub broadcasts arrive as {beacon_pubsub, Topic, Message}.
 %%
 %% Returns Gleam-compatible tuples matching ListenerReceiveResult variants:
 %%   {command_received, Msg}       — CommandReceived
-%%   {notification_received, Topic} — NotificationReceived
+%%   {notification_received, Topic, Message} — NotificationReceived
 %%   receive_timeout                — ReceiveTimeout
 receive_with_commands(Subject, Timeout) ->
     {subject, _Pid, Tag} = Subject,
     receive
         {Tag, Msg} ->
             {command_received, Msg};
-        {beacon_pubsub, Topic, _Msg} ->
-            {notification_received, Topic};
+        {beacon_pubsub, Topic, Msg} ->
+            {notification_received, Topic, Msg};
         _Other ->
             logger:debug("[beacon.subscription] Discarding unexpected message: ~p", [_Other]),
             receive_with_commands(Subject, Timeout)

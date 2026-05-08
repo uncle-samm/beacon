@@ -32,7 +32,9 @@ let assert Ok(transport.SendMount(payload: _)) =
   process.selector_receive(selector, 500)
 ```
 
-Send events with `runtime.ClientEventReceived` and check for `SendModelSync` or `SendPatch`.
+Send events with `runtime.ClientEventReceived` and check for `SendModelSync` or `SendPatch`. Regression tests must also assert that normal post-mount updates do not send `SendMount`.
+
+Client-sent `ops` are untrusted. Runtime tests should send malicious ops and assert the server-computed update wins.
 
 ## Transport Tests
 
@@ -44,6 +46,8 @@ pub fn decode_heartbeat_test() {
     transport.decode_client_message("{\"type\":\"heartbeat\"}")
 }
 ```
+
+Security transport tests cover origin validation, rate limiting, WebSocket message/buffer caps, and HTTP pre-upgrade limits.
 
 ## Simulation Tests
 
@@ -62,6 +66,8 @@ report.assert_clean_passed(report.generate("test", result, ...))
 
 Scenarios: `counter(n)`, `connect_disconnect()`, `malformed()`, `flood(n)`, `draw(n)`, `reconnect(n)`, `patch_efficiency(n)`, `server_push(ms)`, `corrupt()`.
 
-## CDP Tests (Browser)
+## Example and CDP Tests (Browser)
 
 End-to-end tests via Chrome DevTools Protocol. Start the app, use a CDP client to open the page, click buttons, and assert DOM content. See `test_cdp.sh` and `test_cdp_counter.py`.
+
+Examples should double as integration coverage for counter, local-only state, server-state privacy, multi-file apps, routed apps, auth/API/cookie flow, and large model/patch behavior.

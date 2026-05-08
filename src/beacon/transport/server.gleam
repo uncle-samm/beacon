@@ -3,7 +3,6 @@
 /// listen, accept, HTTP/1.1 request parsing, WebSocket upgrade + frames.
 ///
 /// Reference: RFC 6455 (WebSocket), RFC 7230 (HTTP/1.1).
-
 import beacon/log
 import gleam/bytes_tree.{type BytesTree}
 import gleam/dynamic.{type Dynamic}

@@ -1,6 +1,5 @@
 /// Simulation scenarios — composable action scripts for simulated clients.
 /// Each scenario is a sequence of actions executed by a connection pool worker.
-
 import gleam/int
 import gleam/list
 
@@ -37,16 +36,27 @@ pub type Scenario {
 
 /// Counter scenario: connect, join, send N click events, disconnect.
 pub fn counter(n_events: Int) -> Scenario {
-  let events =
-    list.repeat(SendEvent("h0", "{}"), n_events)
+  let events = repeat_event_with_response(n_events, [])
   Scenario(
     name: "counter(" <> int.to_string(n_events) <> ")",
     actions: list.flatten([
       [Connect, Join, WaitForResponse(5000)],
       events,
-      [WaitForResponse(5000), Disconnect],
+      [Disconnect],
     ]),
   )
+}
+
+fn repeat_event_with_response(remaining: Int, acc: List(Action)) -> List(Action) {
+  case remaining {
+    0 -> list.reverse(acc)
+    _ ->
+      repeat_event_with_response(remaining - 1, [
+        WaitForResponse(5000),
+        SendEvent("h0", "{}"),
+        ..acc
+      ])
+  }
 }
 
 /// Draw scenario: connect, join, send N stroke events as rapid mousemoves, disconnect.
@@ -69,33 +79,32 @@ pub fn draw(n_strokes: Int) -> Scenario {
 
 /// Connect-disconnect scenario for leak testing.
 pub fn connect_disconnect() -> Scenario {
-  Scenario(
-    name: "connect_disconnect",
-    actions: [Connect, Join, WaitForResponse(5000), Sleep(100), Disconnect],
-  )
+  Scenario(name: "connect_disconnect", actions: [
+    Connect,
+    Join,
+    WaitForResponse(5000),
+    Sleep(100),
+    Disconnect,
+  ])
 }
 
 /// Malformed frame scenario for resilience testing.
 pub fn malformed() -> Scenario {
-  Scenario(
-    name: "malformed",
-    actions: [
-      Connect,
-      Join,
-      WaitForResponse(5000),
-      SendMalformed("not json at all!!!"),
-      SendMalformed("{\"type\":\"event\",\"name\":"),
-      SendMalformed(""),
-      Sleep(500),
-      Disconnect,
-    ],
-  )
+  Scenario(name: "malformed", actions: [
+    Connect,
+    Join,
+    WaitForResponse(5000),
+    SendMalformed("not json at all!!!"),
+    SendMalformed("{\"type\":\"event\",\"name\":"),
+    SendMalformed(""),
+    Sleep(500),
+    Disconnect,
+  ])
 }
 
 /// Flood scenario: send N events as fast as possible.
 pub fn flood(n_events: Int) -> Scenario {
-  let events =
-    list.repeat(SendEvent("h0", "{}"), n_events)
+  let events = list.repeat(SendEvent("h0", "{}"), n_events)
   Scenario(
     name: "flood(" <> int.to_string(n_events) <> ")",
     actions: list.flatten([
@@ -112,8 +121,7 @@ fn generate_strokes(total: Int, i: Int, acc: List(Action)) -> List(Action) {
     False -> {
       let x = int.to_string(100 + { i % 50 } * 12)
       let y = int.to_string(100 + { i / 50 } * 40)
-      let action =
-        SendEvent("h2", "{\"x\":" <> x <> ",\"y\":" <> y <> "}")
+      let action = SendEvent("h2", "{\"x\":" <> x <> ",\"y\":" <> y <> "}")
       generate_strokes(total, i + 1, [action, ..acc])
     }
   }
@@ -121,34 +129,37 @@ fn generate_strokes(total: Int, i: Int, acc: List(Action)) -> List(Action) {
 
 /// Corruption scenario — sends various types of bad data.
 pub fn corrupt() -> Scenario {
-  Scenario(
-    name: "corrupt",
-    actions: [
-      Connect,
-      Join,
-      WaitForResponse(5000),
-      // Valid JSON but wrong structure
-      SendMalformed("{\"type\":\"garbage\",\"foo\":123}"),
-      // Partial JSON
-      SendMalformed("{\"type\":\"event\",\"name\":"),
-      // Empty string
-      SendMalformed(""),
-      // Binary noise
-      SendMalformed("\u{00}\u{ff}\u{fe}\u{01}\u{80}"),
-      // Enormous payload (10KB of junk)
-      SendMalformed(repeat_string("AAAAAAAAAA", 1000)),
-      // Valid event but handler doesn't exist
-      SendMalformed("{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"does_not_exist_999\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":999999}"),
-      // Valid event with corrupt data field
-      SendMalformed("{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"h0\",\"data\":\"NOT_JSON\",\"target_path\":\"0\",\"clock\":1}"),
-      // Negative clock
-      SendMalformed("{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"h0\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":-1}"),
-      // Send a valid event to prove connection still works after all that
-      SendEvent("h0", "{}"),
-      WaitForResponse(5000),
-      Disconnect,
-    ],
-  )
+  Scenario(name: "corrupt", actions: [
+    Connect,
+    Join,
+    WaitForResponse(5000),
+    // Valid JSON but wrong structure
+    SendMalformed("{\"type\":\"garbage\",\"foo\":123}"),
+    // Partial JSON
+    SendMalformed("{\"type\":\"event\",\"name\":"),
+    // Empty string
+    SendMalformed(""),
+    // Binary noise
+    SendMalformed("\u{00}\u{ff}\u{fe}\u{01}\u{80}"),
+    // Enormous payload (10KB of junk)
+    SendMalformed(repeat_string("AAAAAAAAAA", 1000)),
+    // Valid event but handler doesn't exist
+    SendMalformed(
+      "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"does_not_exist_999\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":999999}",
+    ),
+    // Valid event with corrupt data field
+    SendMalformed(
+      "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"h0\",\"data\":\"NOT_JSON\",\"target_path\":\"0\",\"clock\":1}",
+    ),
+    // Negative clock
+    SendMalformed(
+      "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"h0\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":-1}",
+    ),
+    // Send a valid event to prove connection still works after all that
+    SendEvent("h0", "{}"),
+    WaitForResponse(5000),
+    Disconnect,
+  ])
 }
 
 fn repeat_string(s: String, n: Int) -> String {
@@ -161,9 +172,13 @@ fn repeat_string(s: String, n: Int) -> String {
 /// Connection churn DoS scenario — rapid open/close cycles to starve legitimate clients.
 /// Uses full WebSocket handshake + immediate disconnect.
 pub fn connection_churn(cycles: Int) -> Scenario {
-  let churn_actions = list.repeat([Connect, Sleep(50), Disconnect], cycles)
+  let churn_actions =
+    list.repeat([Connect, Sleep(50), Disconnect], cycles)
     |> list.flatten
-  Scenario(name: "churn(" <> int.to_string(cycles) <> ")", actions: churn_actions)
+  Scenario(
+    name: "churn(" <> int.to_string(cycles) <> ")",
+    actions: churn_actions,
+  )
 }
 
 /// Patch efficiency scenario: join (gets mount + model_sync), N increments each with response tracking.
@@ -223,22 +238,19 @@ pub fn reconnect(n_before: Int) -> Scenario {
 
 /// Server-push scenario: connect, join, sleep, check for multiple responses.
 pub fn server_push(wait_ms: Int) -> Scenario {
-  Scenario(
-    name: "server_push(" <> int.to_string(wait_ms) <> ")",
-    actions: [
-      Connect,
-      Join,
-      WaitForResponse(5000),
-      // Drain mount
-      WaitForResponse(2000),
-      Sleep(wait_ms),
-      // After sleeping, there should be patches from server ticks
-      WaitForResponse(3000),
-      WaitForResponse(3000),
-      WaitForResponse(3000),
-      Disconnect,
-    ],
-  )
+  Scenario(name: "server_push(" <> int.to_string(wait_ms) <> ")", actions: [
+    Connect,
+    Join,
+    WaitForResponse(5000),
+    // Drain mount
+    WaitForResponse(2000),
+    Sleep(wait_ms),
+    // After sleeping, there should be patches from server ticks
+    WaitForResponse(3000),
+    WaitForResponse(3000),
+    WaitForResponse(3000),
+    Disconnect,
+  ])
 }
 
 /// Combine two scenarios sequentially (for the second, skip Connect/Join).

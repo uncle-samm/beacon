@@ -4,7 +4,6 @@ import beacon/log
 /// We can't easily capture log output in tests, but we can verify
 /// that the functions don't panic — which confirms the logging
 /// package integration works.
-
 pub fn info_does_not_crash_test() {
   log.configure()
   log.info("log_test", "info message works")

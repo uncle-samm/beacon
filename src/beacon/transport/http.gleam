@@ -2,7 +2,7 @@
 /// Uses Erlang's inet:decode_packet(http_bin, ...) via FFI for efficient parsing.
 ///
 /// Reference: RFC 7230 (HTTP/1.1 Message Syntax and Routing).
-
+import beacon/log
 import beacon/transport/server
 import gleam/bit_array
 import gleam/bytes_tree
@@ -21,30 +21,51 @@ fn ffi_read_http_request(
   socket: server.Socket,
 ) -> Result(#(String, String, List(#(String, String))), String)
 
+@external(erlang, "beacon_transport_ffi", "read_http_request_with_limits")
+fn ffi_read_http_request_with_limits(
+  socket: server.Socket,
+  max_headers: Int,
+  max_header_bytes: Int,
+  timeout_ms: Int,
+) -> Result(#(String, String, List(#(String, String))), String)
+
 /// Read and parse an HTTP request from a socket into a gleam_http Request.
 /// The socket is embedded in the Connection body so handlers can read the
 /// request body via `server.read_body(req.body.socket, length)`.
 pub fn read_request(
   socket: server.Socket,
 ) -> Result(Request(server.Connection), String) {
+  log.debug("beacon.http", "Reading HTTP request")
   case ffi_read_http_request(socket) {
-    Ok(#(method_str, raw_path, headers)) -> {
-      let method = parse_method(method_str)
-      let #(path, query) = split_path_query(raw_path)
-      let host = find_header_value(headers, "host")
-      let #(host_name, port_opt) = parse_host(host)
-      Ok(request.Request(
-        method: method,
-        headers: headers,
-        body: server.Connection(socket: socket),
-        scheme: http.Http,
-        host: host_name,
-        port: port_opt,
-        path: path,
-        query: query,
-      ))
+    Ok(parts) -> Ok(build_request(socket, parts))
+    Error(reason) -> {
+      log.warning("beacon.http", "Failed to read HTTP request: " <> reason)
+      Error(reason)
     }
-    Error(reason) -> Error(reason)
+  }
+}
+
+/// Read and parse an HTTP request with explicit pre-upgrade resource limits.
+pub fn read_request_with_limits(
+  socket: server.Socket,
+  max_headers: Int,
+  max_header_bytes: Int,
+  timeout_ms: Int,
+) -> Result(Request(server.Connection), String) {
+  log.debug("beacon.http", "Reading HTTP request with configured limits")
+  case
+    ffi_read_http_request_with_limits(
+      socket,
+      max_headers,
+      max_header_bytes,
+      timeout_ms,
+    )
+  {
+    Ok(parts) -> Ok(build_request(socket, parts))
+    Error(reason) -> {
+      log.warning("beacon.http", "HTTP request rejected: " <> reason)
+      Error(reason)
+    }
   }
 }
 
@@ -54,6 +75,10 @@ pub fn write_response(
   socket: server.Socket,
   resp: Response(server.ResponseBody),
 ) -> Result(Nil, String) {
+  log.debug(
+    "beacon.http",
+    "Writing HTTP response status " <> int.to_string(resp.status),
+  )
   let body_bits = case resp.body {
     server.Bytes(tree) -> bytes_tree.to_bit_array(tree)
   }
@@ -105,6 +130,10 @@ pub fn read_body(
   req: Request(server.Connection),
   max_bytes: Int,
 ) -> Result(BitArray, String) {
+  log.debug(
+    "beacon.http",
+    "Reading HTTP body with max " <> int.to_string(max_bytes) <> " bytes",
+  )
   case request.get_header(req, "content-length") {
     Error(Nil) -> Error("Missing Content-Length header")
     Ok(length_str) -> {
@@ -136,11 +165,11 @@ pub fn read_body(
 }
 
 /// Write an error response and close the socket.
-pub fn write_error(
-  socket: server.Socket,
-  status: Int,
-  body: String,
-) -> Nil {
+pub fn write_error(socket: server.Socket, status: Int, body: String) -> Nil {
+  log.warning(
+    "beacon.http",
+    "Writing HTTP error response status " <> int.to_string(status),
+  )
   let resp =
     response.new(status)
     |> response.set_body(server.Bytes(bytes_tree.from_string(body)))
@@ -149,6 +178,27 @@ pub fn write_error(
 }
 
 // --- Internal helpers ---
+
+fn build_request(
+  socket: server.Socket,
+  parts: #(String, String, List(#(String, String))),
+) -> Request(server.Connection) {
+  let #(method_str, raw_path, headers) = parts
+  let method = parse_method(method_str)
+  let #(path, query) = split_path_query(raw_path)
+  let host = find_header_value(headers, "host")
+  let #(host_name, port_opt) = parse_host(host)
+  request.Request(
+    method: method,
+    headers: headers,
+    body: server.Connection(socket: socket),
+    scheme: http.Http,
+    host: host_name,
+    port: port_opt,
+    path: path,
+    query: query,
+  )
+}
 
 fn parse_method(method_str: String) -> http.Method {
   case method_str {
@@ -171,10 +221,7 @@ fn split_path_query(raw_path: String) -> #(String, Option(String)) {
   }
 }
 
-fn find_header_value(
-  headers: List(#(String, String)),
-  name: String,
-) -> String {
+fn find_header_value(headers: List(#(String, String)), name: String) -> String {
   case headers {
     [] -> ""
     [#(key, value), ..rest] ->

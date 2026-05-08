@@ -1,6 +1,5 @@
 /// Development tools — file watching, hot reload, auto-recompile.
 /// Run with: `gleam run -m beacon/dev`
-
 import beacon/log
 
 /// Start the dev server with file watching and hot reload.
@@ -28,7 +27,10 @@ pub fn main() {
       native_watch_loop(watch_dirs)
     }
     False -> {
-      log.info("beacon.dev", "Native watcher not available, using 500ms polling")
+      log.info(
+        "beacon.dev",
+        "Native watcher not available, using 500ms polling",
+      )
       let _ = get_file_timestamps(watch_dirs)
       poll_watch_loop(watch_dirs)
     }
@@ -51,7 +53,7 @@ fn native_watch_loop(dirs: List(String)) -> Nil {
   native_watch_loop(dirs)
 }
 
-/// Polling watch loop — fallback when native watcher unavailable.
+/// Polling watch loop used when native watcher is unavailable.
 fn poll_watch_loop(dirs: List(String)) -> Nil {
   sleep(500)
   case check_for_changes(dirs) {
@@ -80,23 +82,30 @@ fn handle_recompile() -> Nil {
       }
       case run_client_build() {
         Ok(Nil) -> log.info("beacon.dev", "Client JS rebuilt")
-        Error(reason) -> log.warning("beacon.dev", "Client JS rebuild failed: " <> reason)
+        Error(reason) ->
+          log.warning("beacon.dev", "Client JS rebuild failed: " <> reason)
       }
       // Notify browsers to reload
       case notify_browser_reload() {
         Ok(Nil) -> Nil
-        Error(reason) -> log.warning("beacon.dev", "Browser reload notification failed: " <> reason)
+        Error(reason) ->
+          log.warning(
+            "beacon.dev",
+            "Browser reload notification failed: " <> reason,
+          )
       }
     }
-    Error(reason) ->
-      log.error("beacon.dev", "Recompile failed: " <> reason)
+    Error(reason) -> log.error("beacon.dev", "Recompile failed: " <> reason)
   }
 }
 
 /// Run `gleam build` and return success/failure.
 fn run_build() -> Result(Nil, String) {
   let result = run_command("gleam build 2>&1")
-  case string_contains(result, "Compiled in") || string_contains(result, "compiled") {
+  case
+    string_contains(result, "Compiled in")
+    || string_contains(result, "compiled")
+  {
     True -> Ok(Nil)
     False -> Error(result)
   }

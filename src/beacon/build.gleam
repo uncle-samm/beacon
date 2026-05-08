@@ -4,7 +4,7 @@
 ///
 /// The client JS is the framework runtime (WS, event delegation, morphing).
 /// User code runs ONLY on the server. This is the LiveView model.
-/// No fallbacks — the build succeeds or fails loudly.
+/// No degraded build path — the build succeeds or fails loudly.
 import beacon/build/analyzer
 import beacon/log
 import glance
@@ -309,9 +309,8 @@ fn source_root_parts(parts: List(String), acc: List(String)) -> String {
 }
 
 /// Compile a specific module — analyze, generate codec, build client JS.
-/// Only single-file apps (Model + Msg + update + view in one file) get an enhanced
-/// bundle with view compiled to JS. Multi-file and app_with_server apps get codec
-/// generation only; the client uses runtime-only JS (server-rendered).
+/// Apps must produce a generated client-state bundle with view compiled to JS.
+/// Unsupported app shapes log a structured error and startup aborts.
 fn compile_module(path: String, source: String) -> Nil {
   // Resolve external module sources: imports + sibling files in same directory
   let base_dir = source_root(path)
@@ -323,11 +322,11 @@ fn compile_module(path: String, source: String) -> Nil {
   let external_sources = list.append(import_sources, extra_siblings)
   case analyzer.analyze_multi(source, external_sources) {
     Ok(analysis) -> {
+      list.each(analyzer.state_diagnostics(analysis), fn(line) {
+        log.info("beacon.build", line)
+      })
       list.each(analysis.msg_variants, fn(v) {
-        let label = case v.affects_model {
-          True -> "MODEL"
-          False -> "LOCAL"
-        }
+        let label = analyzer.msg_impact_label(analyzer.msg_impact(v))
         log.info("beacon.build", "  " <> v.name <> " → " <> label)
       })
 
@@ -343,8 +342,6 @@ fn compile_module(path: String, source: String) -> Nil {
           case build_enhanced_bundle(path, source, analysis) {
             Ok(Nil) -> log.info("beacon.build", "Enhanced bundle ready")
             Error(reason) -> {
-              // Enhanced build failed — do NOT fall back to runtime-only bundle.
-              // SSR HTML still works; user just won't have interactivity until they fix the build error above.
               log.error(
                 "beacon.build",
                 "Enhanced build FAILED: "
@@ -355,10 +352,7 @@ fn compile_module(path: String, source: String) -> Nil {
           }
         }
         False -> {
-          log.info(
-            "beacon.build",
-            "Skipping enhanced bundle for app_with_server or multi-file app; runtime client will use SSR morphing only.",
-          )
+          log.error("beacon.build", unsupported_client_bundle_shape_message())
         }
       }
     }
@@ -413,7 +407,11 @@ fn resolve_sibling_sources(
   case simplifile.read_directory(dir) {
     Ok(entries) ->
       list.filter_map(entries, fn(entry) {
-        case string.ends_with(entry, ".gleam") && entry != primary_filename {
+        case
+          string.ends_with(entry, ".gleam")
+          && entry != primary_filename
+          && entry != "beacon_codec.gleam"
+        {
           True -> {
             let file_path = dir <> "/" <> entry
             case simplifile.read(file_path) {
@@ -450,20 +448,14 @@ pub fn generate_codec() -> Result(Nil, String) {
   }
 }
 
-/// Try to build the enhanced client JS bundle (view + update compiled to JS).
-/// Skips and returns Ok(Nil) for app shapes that are intentionally server-rendered.
+/// Try to build the required client JS bundle (view + update compiled to JS).
+/// Unsupported app shapes return Error so callers can abort startup.
 pub fn try_enhanced_bundle() -> Result(Nil, String) {
   case analyze_app("src") {
     Ok(#(path, source, analysis)) -> {
       case can_build_enhanced_bundle(source, analysis) {
         True -> build_enhanced_bundle(path, source, analysis)
-        False -> {
-          log.info(
-            "beacon.build",
-            "Skipping enhanced bundle for app_with_server or multi-file app; runtime client will use SSR morphing only.",
-          )
-          Ok(Nil)
-        }
+        False -> Error(unsupported_client_bundle_shape_message())
       }
     }
     Error(reason) -> Error(reason)
@@ -471,20 +463,31 @@ pub fn try_enhanced_bundle() -> Result(Nil, String) {
 }
 
 /// Determine whether the app shape supports an enhanced client bundle.
-/// Enhanced bundles require a full single-file app surface, and are skipped
-/// for app_with_server / multi-file apps that intentionally stay server-rendered.
+/// Current codegen requires client-visible Model, Msg, and view. For
+/// app_with_server, update stays server-only and is intentionally omitted.
 pub fn can_build_enhanced_bundle(
   source: String,
   analysis: analyzer.Analysis,
 ) -> Bool {
-  !analysis.has_server
-  && string.contains(source, "pub type Model")
-  && string.contains(source, "pub type Msg")
-  && {
-    string.contains(source, "pub fn update")
-    || string.contains(source, "pub fn make_update")
+  case analyzer.extract_client_source(source) {
+    Ok(client_source) -> {
+      let has_model = string.contains(client_source, "pub type Model")
+      let has_msg = !list.is_empty(analysis.msg_variants)
+      let has_view = string.contains(client_source, "pub fn view")
+      let has_client_update =
+        string.contains(client_source, "pub fn update")
+        || string.contains(client_source, "pub fn make_update")
+      has_model
+      && has_msg
+      && has_view
+      && { analysis.has_server || has_client_update }
+    }
+    Error(_) -> False
   }
-  && string.contains(source, "pub fn view")
+}
+
+fn unsupported_client_bundle_shape_message() -> String {
+  "Unsupported app shape for client-state rendering. Beacon requires generated client-visible Model, Msg, update, and view code so SSR is only the first render and live updates are state sync/patch messages. Move those definitions into a supported client-visible module shape or extend the AST/codegen path before starting this app."
 }
 
 /// Create all required directories for the enhanced build.
@@ -583,167 +586,212 @@ fn build_enhanced_bundle(
                     dir <> "/src/beacon_client_ffi.mjs",
                   )
 
-                  // Step 5.5: Copy transitive external module files.
+                  // Step 5.5: Copy transitive external and sibling module files.
                   let app_base_dir = source_root(path)
-                  let external_sources =
+                  let import_sources =
                     resolve_transitive_external_sources(source, app_base_dir)
-                  list.each(external_sources, fn(ext) {
-                    let #(_alias, module_path, _source_text) = ext
-                    copy_module_source(
-                      app_base_dir <> "/" <> module_path <> ".gleam",
-                      dir <> "/src/" <> module_path <> ".gleam",
-                    )
-                  })
-
-                  // Copy Beacon framework modules referenced by copied user modules.
-                  let framework_sources =
-                    resolve_transitive_framework_sources(
-                      [
-                        client_source,
-                        ..list.map(external_sources, fn(ext) { ext.2 })
-                      ],
-                      beacon_root,
-                    )
-                  list.each(framework_sources, fn(ext) {
-                    let #(_alias, module_path, _source_text) = ext
-                    copy_module_source(
-                      beacon_root <> "/src/" <> module_path <> ".gleam",
-                      dir <> "/src/" <> module_path <> ".gleam",
-                    )
-                  })
-
-                  // Step 6: Generate JS beacon.gleam (event helpers using beacon_client/handler)
-                  case
-                    simplifile.write(
-                      dir <> "/src/beacon.gleam",
-                      generate_js_beacon(),
-                    )
-                  {
-                    Error(err) ->
-                      Error(
-                        "Failed to write beacon.gleam: " <> string.inspect(err),
-                      )
-                    Ok(Nil) -> {
-                      // Step 7: Generate beacon_app_entry.gleam
-                      // Check if update was extracted (pure update → LOCAL + optimistic)
-                      let has_client_update =
-                        string.contains(client_source, "pub fn update(")
-                      let entry =
-                        generate_entry_point(
-                          analysis,
-                          source,
-                          has_client_update,
-                        )
+                  let sibling_sources = resolve_sibling_sources(path)
+                  let import_paths = list.map(import_sources, fn(s) { s.1 })
+                  let extra_siblings =
+                    list.filter(sibling_sources, fn(s) {
+                      !list.contains(import_paths, s.1)
+                    })
+                  let external_sources =
+                    list.append(import_sources, extra_siblings)
+                  case client_external_sources(external_sources) {
+                    Error(reason) -> Error(reason)
+                    Ok(client_external_sources) -> {
                       case
-                        simplifile.write(
-                          dir <> "/src/beacon_app_entry.gleam",
-                          entry,
+                        write_client_external_sources(
+                          client_external_sources,
+                          dir,
                         )
                       {
-                        Error(err) ->
-                          Error(
-                            "Failed to write entry point: "
-                            <> string.inspect(err),
-                          )
+                        Error(reason) -> Error(reason)
                         Ok(Nil) -> {
-                          // Step 8: Compile JS project
-                          let compile_result =
-                            run_command(
-                              "cd '" <> dir <> "' && gleam build 2>&1",
+                          // Copy Beacon framework modules referenced by copied user modules.
+                          let framework_sources =
+                            resolve_transitive_framework_sources(
+                              [
+                                client_source,
+                                ..list.map(client_external_sources, fn(ext) {
+                                  ext.2
+                                })
+                              ],
+                              beacon_root,
                             )
-                          case string.contains(compile_result, "Compiled in") {
-                            False ->
+                          list.each(framework_sources, fn(ext) {
+                            let #(_alias, module_path, _source_text) = ext
+                            copy_module_source(
+                              beacon_root <> "/src/" <> module_path <> ".gleam",
+                              dir <> "/src/" <> module_path <> ".gleam",
+                            )
+                          })
+
+                          // Step 6: Generate JS beacon.gleam (event helpers using beacon_client/handler)
+                          case
+                            simplifile.write(
+                              dir <> "/src/beacon.gleam",
+                              generate_js_beacon(),
+                            )
+                          {
+                            Error(err) ->
                               Error(
-                                "JS compilation failed:\n" <> compile_result,
+                                "Failed to write beacon.gleam: "
+                                <> string.inspect(err),
                               )
-                            True -> {
-                              // Step 9: Bundle with esbuild
+                            Ok(Nil) -> {
+                              // Step 7: Generate beacon_app_entry.gleam
+                              // Check if update was extracted (pure update → LOCAL + optimistic)
+                              let has_client_update =
+                                string.contains(client_source, "pub fn update(")
+                              let entry =
+                                generate_entry_point(
+                                  analysis,
+                                  source,
+                                  has_client_update,
+                                )
                               case
-                                simplifile.create_directory_all("priv/static")
+                                simplifile.write(
+                                  dir <> "/src/beacon_app_entry.gleam",
+                                  entry,
+                                )
                               {
                                 Error(err) ->
                                   Error(
-                                    "Failed to create priv/static: "
+                                    "Failed to write entry point: "
                                     <> string.inspect(err),
                                   )
                                 Ok(Nil) -> {
-                                  // Entry point that sets window.BeaconApp
-                                  let entry_js =
-                                    "import { initClientAfterBoot } from './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\ninitClientAfterBoot();\n"
+                                  // Step 8: Compile JS project
+                                  let compile_result =
+                                    run_command(
+                                      "cd '" <> dir <> "' && gleam build 2>&1",
+                                    )
                                   case
-                                    simplifile.write(
-                                      dir <> "/bundle_entry.mjs",
-                                      entry_js,
+                                    string.contains(
+                                      compile_result,
+                                      "Compiled in",
                                     )
                                   {
-                                    Error(err) ->
+                                    False ->
                                       Error(
-                                        "Failed to write bundle entry: "
-                                        <> string.inspect(err),
+                                        "JS compilation failed:\n"
+                                        <> compile_result,
                                       )
-                                    Ok(Nil) -> {
-                                      let hash = generate_safe_hash()
-                                      let filename =
-                                        "beacon_client_" <> hash <> ".js"
-                                      // Clean old bundles before writing new one
-                                      case simplifile.get_files("priv/static") {
-                                        Ok(files) ->
-                                          list.each(files, fn(f) {
-                                            case
-                                              string.contains(
-                                                f,
-                                                "beacon_client_",
-                                              )
-                                              && string.ends_with(f, ".js")
-                                            {
-                                              True -> {
-                                                case simplifile.delete(f) {
-                                                  Ok(Nil) -> Nil
-                                                  Error(err) ->
-                                                    log.warning(
-                                                      "beacon.build",
-                                                      "Failed to delete old bundle "
-                                                        <> f
-                                                        <> ": "
-                                                        <> string.inspect(err),
-                                                    )
-                                                }
-                                              }
-                                              False -> Nil
-                                            }
-                                          })
-                                        Error(_) -> Nil
-                                      }
-
-                                      let result =
-                                        run_command(
-                                          "cd '"
-                                          <> dir
-                                          <> "' && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/"
-                                          <> filename
-                                          <> " --minify 2>&1",
-                                        )
+                                    True -> {
+                                      // Step 9: Bundle with esbuild
                                       case
-                                        string.contains(result, "Done")
-                                        || string.contains(result, ".js")
+                                        simplifile.create_directory_all(
+                                          "priv/static",
+                                        )
                                       {
-                                        True -> {
+                                        Error(err) ->
+                                          Error(
+                                            "Failed to create priv/static: "
+                                            <> string.inspect(err),
+                                          )
+                                        Ok(Nil) -> {
+                                          // Entry point that sets window.BeaconApp
+                                          let entry_js =
+                                            "import { initClientAfterBoot } from './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\ninitClientAfterBoot();\n"
                                           case
                                             simplifile.write(
-                                              "priv/static/beacon_client.manifest",
-                                              filename,
+                                              dir <> "/bundle_entry.mjs",
+                                              entry_js,
                                             )
                                           {
-                                            Ok(Nil) -> Ok(Nil)
                                             Error(err) ->
                                               Error(
-                                                "Failed to write manifest: "
+                                                "Failed to write bundle entry: "
                                                 <> string.inspect(err),
                                               )
+                                            Ok(Nil) -> {
+                                              let hash = generate_safe_hash()
+                                              let filename =
+                                                "beacon_client_"
+                                                <> hash
+                                                <> ".js"
+                                              // Clean old bundles before writing new one
+                                              case
+                                                simplifile.get_files(
+                                                  "priv/static",
+                                                )
+                                              {
+                                                Ok(files) ->
+                                                  list.each(files, fn(f) {
+                                                    case
+                                                      string.contains(
+                                                        f,
+                                                        "beacon_client_",
+                                                      )
+                                                      && string.ends_with(
+                                                        f,
+                                                        ".js",
+                                                      )
+                                                    {
+                                                      True -> {
+                                                        case
+                                                          simplifile.delete(f)
+                                                        {
+                                                          Ok(Nil) -> Nil
+                                                          Error(err) ->
+                                                            log.warning(
+                                                              "beacon.build",
+                                                              "Failed to delete old bundle "
+                                                                <> f
+                                                                <> ": "
+                                                                <> string.inspect(
+                                                                err,
+                                                              ),
+                                                            )
+                                                        }
+                                                      }
+                                                      False -> Nil
+                                                    }
+                                                  })
+                                                Error(_) -> Nil
+                                              }
+
+                                              let result =
+                                                run_command(
+                                                  "cd '"
+                                                  <> dir
+                                                  <> "' && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/"
+                                                  <> filename
+                                                  <> " --minify 2>&1",
+                                                )
+                                              case
+                                                string.contains(result, "Done")
+                                                || string.contains(
+                                                  result,
+                                                  ".js",
+                                                )
+                                              {
+                                                True -> {
+                                                  case
+                                                    simplifile.write(
+                                                      "priv/static/beacon_client.manifest",
+                                                      filename,
+                                                    )
+                                                  {
+                                                    Ok(Nil) -> Ok(Nil)
+                                                    Error(err) ->
+                                                      Error(
+                                                        "Failed to write manifest: "
+                                                        <> string.inspect(err),
+                                                      )
+                                                  }
+                                                }
+                                                False ->
+                                                  Error(
+                                                    "esbuild failed:\n"
+                                                    <> result,
+                                                  )
+                                              }
+                                            }
                                           }
                                         }
-                                        False ->
-                                          Error("esbuild failed:\n" <> result)
                                       }
                                     }
                                   }
@@ -760,6 +808,94 @@ fn build_enhanced_bundle(
             }
           }
         }
+      }
+    }
+  }
+}
+
+fn client_external_sources(
+  external_sources: List(#(String, String, String)),
+) -> Result(List(#(String, String, String)), String) {
+  case external_sources {
+    [] -> Ok([])
+    [source, ..rest] -> {
+      let #(alias, module_path, source_text) = source
+      let client_source = case analyzer.has_server_boundary(source_text) {
+        True -> {
+          case analyzer.extract_client_source(source_text) {
+            Ok(extracted) -> Ok(extracted)
+            Error(reason) ->
+              Error(
+                "Failed to extract client source for "
+                <> module_path
+                <> ": "
+                <> reason,
+              )
+          }
+        }
+        False -> Ok(source_text)
+      }
+
+      case client_source {
+        Error(reason) -> Error(reason)
+        Ok(text) -> {
+          case client_external_sources(rest) {
+            Error(reason) -> Error(reason)
+            Ok(rest_sources) ->
+              Ok([#(alias, module_path, text), ..rest_sources])
+          }
+        }
+      }
+    }
+  }
+}
+
+fn write_client_external_sources(
+  sources: List(#(String, String, String)),
+  dir: String,
+) -> Result(Nil, String) {
+  case sources {
+    [] -> Ok(Nil)
+    [source, ..rest] -> {
+      let #(_alias, module_path, source_text) = source
+      case
+        write_module_source_text(
+          dir <> "/src/" <> module_path <> ".gleam",
+          source_text,
+        )
+      {
+        Error(reason) -> Error(reason)
+        Ok(Nil) -> write_client_external_sources(rest, dir)
+      }
+    }
+  }
+}
+
+fn write_module_source_text(path: String, source: String) -> Result(Nil, String) {
+  let target_dir = case string.split(path, "/") |> list.reverse {
+    [_, ..rest] ->
+      case list.reverse(rest) {
+        [] -> ""
+        parts -> string.join(parts, "/")
+      }
+    _ -> ""
+  }
+
+  let make_dir = case target_dir {
+    "" -> Ok(Nil)
+    d -> simplifile.create_directory_all(d)
+  }
+
+  case make_dir {
+    Error(err) ->
+      Error(
+        "Failed to create directory for " <> path <> ": " <> string.inspect(err),
+      )
+    Ok(Nil) -> {
+      case simplifile.write(path, source) {
+        Ok(Nil) -> Ok(Nil)
+        Error(err) ->
+          Error("Failed to write " <> path <> ": " <> string.inspect(err))
       }
     }
   }
@@ -790,9 +926,7 @@ fn clean_codec_artifacts() -> Nil {
         }
       })
     Error(_) -> Nil
-    // Directory may not exist yet — that's fine
   }
-  // Also clean the beam file
   case simplifile.delete("build/dev/erlang/beacon/ebin/beacon_codec.beam") {
     Ok(Nil) -> Nil
     Error(_) -> Nil
@@ -846,68 +980,68 @@ fn copy_module_source(from: String, to: String) -> Nil {
 }
 
 /// Generate the JS-target beacon.gleam with event helpers using beacon_client/handler.
-/// This is a REAL implementation, not a stub — same API, JS-compatible handler.
 fn generate_js_beacon() -> String {
   "/// Client-side beacon module — event helpers for JS target.
 import beacon/element.{type Attr}
 import beacon_client/handler
+import gleam/option.{None}
 
 /// A node in the virtual DOM tree.
 pub type Node(msg) = element.Node(msg)
 
 pub fn on_click(msg: msg) -> Attr {
   let id = handler.register_simple(msg)
-  element.EventAttr(event_name: \"click\", handler_id: id)
+  element.EventAttr(event_name: \"click\", handler_id: id, debounce_ms: None)
 }
 
 pub fn on_input(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: \"input\", handler_id: id)
+  element.EventAttr(event_name: \"input\", handler_id: id, debounce_ms: None)
 }
 
 pub fn on_submit(msg: msg) -> Attr {
   let id = handler.register_simple(msg)
-  element.EventAttr(event_name: \"submit\", handler_id: id)
+  element.EventAttr(event_name: \"submit\", handler_id: id, debounce_ms: None)
 }
 
 pub fn on_change(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: \"change\", handler_id: id)
+  element.EventAttr(event_name: \"change\", handler_id: id, debounce_ms: None)
 }
 
 pub fn on_mousedown(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: \"mousedown\", handler_id: id)
+  element.EventAttr(event_name: \"mousedown\", handler_id: id, debounce_ms: None)
 }
 
 pub fn on_mouseup(msg: msg) -> Attr {
   let id = handler.register_simple(msg)
-  element.EventAttr(event_name: \"mouseup\", handler_id: id)
+  element.EventAttr(event_name: \"mouseup\", handler_id: id, debounce_ms: None)
 }
 
 pub fn on_mousemove(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: \"mousemove\", handler_id: id)
+  element.EventAttr(event_name: \"mousemove\", handler_id: id, debounce_ms: None)
 }
 
 pub fn on_keydown(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: \"keydown\", handler_id: id)
+  element.EventAttr(event_name: \"keydown\", handler_id: id, debounce_ms: None)
 }
 
 pub fn on_dragstart(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: \"dragstart\", handler_id: id)
+  element.EventAttr(event_name: \"dragstart\", handler_id: id, debounce_ms: None)
 }
 
 pub fn on_dragover(msg: msg) -> Attr {
   let id = handler.register_simple(msg)
-  element.EventAttr(event_name: \"dragover\", handler_id: id)
+  element.EventAttr(event_name: \"dragover\", handler_id: id, debounce_ms: None)
 }
 
 pub fn on_drop(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
-  element.EventAttr(event_name: \"drop\", handler_id: id)
+  element.EventAttr(event_name: \"drop\", handler_id: id, debounce_ms: None)
 }
 "
 }
@@ -1073,7 +1207,7 @@ fn generate_entry_point(
 
   // Generate enum decoders
   let enum_decoder_fns =
-    list.map(analysis.enum_types, fn(et) { generate_enum_decoder(et) })
+    list.map(used_enum_types(analysis), fn(et) { generate_enum_decoder(et) })
 
   let custom_decoders_code =
     string.join(list.append(custom_decoder_fns, enum_decoder_fns), "\n\n")
@@ -1126,37 +1260,7 @@ fn generate_entry_point(
   // Generate default model constructor with zero/empty values for init stub
   let default_model_args =
     list.map(analysis.model_fields, fn(f) {
-      let default_val = case f.type_name {
-        "Int" -> "0"
-        "Float" -> "0.0"
-        "Bool" -> "False"
-        "String" -> "\"\""
-        "List" -> "[]"
-        _ ->
-          case find_enum_type(analysis.enum_types, f.type_name, f.module) {
-            Ok(et) -> {
-              let prefix = case et.module {
-                "" -> "app"
-                mod -> mod
-              }
-              case et.variants {
-                [first, ..] -> prefix <> "." <> first
-                [] -> prefix <> ".Unknown"
-              }
-            }
-            Error(_) -> {
-              log.error(
-                "beacon.build",
-                "Unknown type '"
-                  <> f.type_name
-                  <> "' for field '"
-                  <> f.name
-                  <> "' — no enum found, defaulting to json.null in init stub",
-              )
-              "json.null"
-            }
-          }
-      }
+      let default_val = default_client_value_for_field(f, analysis)
       f.name <> ": " <> default_val
     })
   let default_model =
@@ -1216,6 +1320,68 @@ pub fn decode_model(json_str: String) -> Result(app.Model, String) {
 " <> generate_client_encode_model(analysis, source) <> "
 " <> generate_local_decoder(analysis, source) <> "
 "
+}
+
+fn default_client_value_for_field(
+  field: analyzer.TypeField,
+  analysis: analyzer.Analysis,
+) -> String {
+  case field.type_name {
+    "Int" -> "0"
+    "Float" -> "0.0"
+    "Bool" -> "False"
+    "String" -> "\"\""
+    "List" -> "[]"
+    _ ->
+      case find_enum_type(analysis.enum_types, field.type_name, field.module) {
+        Ok(enum_type) -> default_client_enum_value(enum_type)
+        Error(_) ->
+          case
+            find_custom_type(
+              analysis.custom_types,
+              field.type_name,
+              field.module,
+            )
+          {
+            Ok(custom_type) ->
+              default_client_custom_value(custom_type, analysis)
+            Error(_) -> {
+              log.warning(
+                "beacon.build",
+                "Unknown type '"
+                  <> field.type_name
+                  <> "' for field '"
+                  <> field.name
+                  <> "' — using string placeholder in init stub",
+              )
+              "\"\""
+            }
+          }
+      }
+  }
+}
+
+fn default_client_enum_value(enum_type: analyzer.EnumTypeInfo) -> String {
+  let prefix = case enum_type.module {
+    "" -> "app"
+    mod -> mod
+  }
+  case enum_type.variants {
+    [first, ..] -> prefix <> "." <> first
+    [] -> prefix <> ".Unknown"
+  }
+}
+
+fn default_client_custom_value(
+  custom_type: analyzer.CustomTypeInfo,
+  analysis: analyzer.Analysis,
+) -> String {
+  let qualified = qualify_type_client(custom_type.module, custom_type.name)
+  let args =
+    list.map(custom_type.fields, fn(field) {
+      field.name <> ": " <> default_client_value_for_field(field, analysis)
+    })
+  qualified <> "(" <> string.join(args, ", ") <> ")"
 }
 
 /// Generate the client-side encode_model function.
@@ -1395,7 +1561,7 @@ fn generate_client_custom_encoders(analysis: analyzer.Analysis) -> String {
       <> "\n  ])\n}"
     })
   let enum_encoders =
-    list.map(analysis.enum_types, fn(et) {
+    list.map(used_enum_types(analysis), fn(et) {
       let qualified = qualify_type_client(et.module, et.name)
       let variant_prefix = case et.module {
         "" -> "app"
@@ -1536,7 +1702,6 @@ pub fn decode_local(json_str: String) -> Result(app.Local, String) {
 /// Auto-build: find the app module in src/ and build enhanced bundle.
 /// Build the base client JS for routed apps (no app-specific codec/view).
 /// This bundles only the core runtime: WebSocket, morphing, event delegation.
-/// Each route will render server-side; the client does HTML morphing only.
 pub fn build_base_client() -> Nil {
   let beacon_root = find_beacon_root()
   let dir = "build/beacon_client_base"
@@ -1666,7 +1831,6 @@ pub fn auto_build() -> Nil {
       compile_module(path, source)
     }
     Error(reason) -> {
-      // No app module found — error loudly, do NOT fall back to runtime-only bundle
       log.error(
         "beacon.build",
         "No app module found in src/: "
@@ -1755,6 +1919,29 @@ fn find_enum_type(
         "" -> list.find(enum_types, fn(et) { et.name == name })
         _ -> Error(Nil)
       }
+  }
+}
+
+fn used_enum_types(analysis: analyzer.Analysis) -> List(analyzer.EnumTypeInfo) {
+  list.filter(analysis.enum_types, fn(enum_type) {
+    list.any(analysis.model_fields, fn(field) {
+      field_references_enum(field, enum_type)
+    })
+    || list.any(analysis.custom_types, fn(custom_type) {
+      list.any(custom_type.fields, fn(field) {
+        field_references_enum(field, enum_type)
+      })
+    })
+  })
+}
+
+fn field_references_enum(
+  field: analyzer.TypeField,
+  enum_type: analyzer.EnumTypeInfo,
+) -> Bool {
+  { field.type_name == enum_type.name && field.module == enum_type.module }
+  || {
+    field.inner_type == enum_type.name && field.inner_module == enum_type.module
   }
 }
 
@@ -2092,7 +2279,7 @@ fn generate_codec_module(
 
   // Generate encoders for enum types used in Model fields or custom type fields
   let enum_encoders =
-    list.map(analysis.enum_types, fn(et) {
+    list.map(used_enum_types(analysis), fn(et) {
       generate_enum_encoder(module_name, et)
     })
 
@@ -2165,44 +2352,52 @@ fn generate_codec_module(
     ])
 
   // Generate server-side custom type decoders (for decode_model)
-  let server_custom_decoders =
-    list.filter_map(analysis.model_fields, fn(f) {
-      case f.type_name {
-        "List" ->
-          case
-            find_custom_type(
-              analysis.custom_types,
-              f.inner_type,
-              f.inner_module,
-            )
-          {
-            Ok(ct) ->
-              Ok(generate_server_custom_decoder(
-                module_name,
-                ct,
-                analysis.enum_types,
-              ))
-            Error(_) -> Error(Nil)
-          }
-        _ ->
-          case find_custom_type(analysis.custom_types, f.type_name, f.module) {
-            Ok(ct) ->
-              Ok(generate_server_custom_decoder(
-                module_name,
-                ct,
-                analysis.enum_types,
-              ))
-            Error(_) -> Error(Nil)
-          }
-      }
-    })
-    |> list.unique
+  let server_custom_decoders = case analysis.has_server {
+    True -> []
+    False ->
+      list.filter_map(analysis.model_fields, fn(f) {
+        case f.type_name {
+          "List" ->
+            case
+              find_custom_type(
+                analysis.custom_types,
+                f.inner_type,
+                f.inner_module,
+              )
+            {
+              Ok(ct) ->
+                Ok(generate_server_custom_decoder(
+                  module_name,
+                  ct,
+                  analysis.enum_types,
+                ))
+              Error(_) -> Error(Nil)
+            }
+          _ ->
+            case
+              find_custom_type(analysis.custom_types, f.type_name, f.module)
+            {
+              Ok(ct) ->
+                Ok(generate_server_custom_decoder(
+                  module_name,
+                  ct,
+                  analysis.enum_types,
+                ))
+              Error(_) -> Error(Nil)
+            }
+        }
+      })
+      |> list.unique
+  }
 
   // Generate server-side enum decoders (for decode_model)
-  let server_enum_decoders =
-    list.map(analysis.enum_types, fn(et) {
-      generate_server_enum_decoder(module_name, et)
-    })
+  let server_enum_decoders = case analysis.has_server {
+    True -> []
+    False ->
+      list.map(used_enum_types(analysis), fn(et) {
+        generate_server_enum_decoder(module_name, et)
+      })
+  }
 
   // Generate import statements for external modules
   let ext_imports = generate_external_imports(analysis, source, True)
@@ -2211,31 +2406,60 @@ fn generate_codec_module(
     imports -> imports <> "\n"
   }
 
-  let source = "/// AUTO-GENERATED by beacon/build — do not edit manually.
+  let body =
+    string.join(custom_encoders, "\n\n")
+    <> "\n\n"
+    <> string.join(enum_encoders, "\n\n")
+    <> "\n\n"
+    <> string.join(server_custom_decoders, "\n\n")
+    <> "\n\n"
+    <> string.join(server_enum_decoders, "\n\n")
+    <> "\n\n/// Encode the Model to JSON for model_sync.
+pub fn encode_model(state: "
+    <> param_type
+    <> ") -> String {\n"
+    <> model_extract
+    <> "  json.object([\n"
+    <> string.join(all_field_encoders, ",\n")
+    <> ",\n  ])\n  |> json.to_string\n}\n"
+    <> generate_server_decode_model(module_name, analysis, source)
+    <> generate_substate_encoders(module_name, analysis)
+
+  let optional_imports =
+    [
+      #("decode.", "import gleam/dynamic/decode"),
+      #("option.", "import gleam/option"),
+      #("gleam_string.", "import gleam/string as gleam_string"),
+    ]
+    |> list.filter_map(fn(import_) {
+      let #(needle, import_line) = import_
+      case string.contains(body, needle) {
+        True -> Ok(import_line)
+        False -> Error(Nil)
+      }
+    })
+
+  let imports =
+    string.join(
+      list.append(
+        ["import " <> module_path],
+        list.append(
+          case ext_imports_section {
+            "" -> []
+            imports -> [string.trim(imports)]
+          },
+          ["import gleam/json", ..optional_imports],
+        ),
+      ),
+      "\n",
+    )
+
+  let source_text = "/// AUTO-GENERATED by beacon/build — do not edit manually.
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
-import " <> module_path <> "\n" <> ext_imports_section <> "import gleam/dynamic/decode
-import gleam/json
-import gleam/option
-import gleam/string as gleam_string
+" <> imports <> "\n\n" <> body
 
-" <> string.join(custom_encoders, "\n\n") <> "\n\n" <> string.join(
-      enum_encoders,
-      "\n\n",
-    ) <> "\n\n" <> string.join(server_custom_decoders, "\n\n") <> "\n\n" <> string.join(
-      server_enum_decoders,
-      "\n\n",
-    ) <> "\n\n/// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: " <> param_type <> ") -> String {\n" <> model_extract <> "  json.object([\n" <> string.join(
-      all_field_encoders,
-      ",\n",
-    ) <> ",\n  ])\n  |> json.to_string\n}\n" <> generate_server_decode_model(
-      module_name,
-      analysis,
-      source,
-    ) <> generate_substate_encoders(module_name, analysis)
-
-  case simplifile.write(codec_path, source) {
+  case simplifile.write(codec_path, source_text) {
     Ok(Nil) -> log.info("beacon.build", "Generated codec: " <> codec_path)
     Error(err) ->
       log.error(
@@ -2794,7 +3018,9 @@ fn collect_gleam_files(dir: String) -> List(#(String, String)) {
               _ -> collect_gleam_files(path)
             }
           _ ->
-            case string.ends_with(entry, ".gleam") {
+            case
+              string.ends_with(entry, ".gleam") && entry != "beacon_codec.gleam"
+            {
               True ->
                 case simplifile.read(path) {
                   Ok(source) -> [#(path, source)]
@@ -2931,21 +3157,12 @@ fn is_hex_string(s: String) -> Bool {
 }
 
 /// Generate a safe hash string for cache-busting filenames.
-/// Returns a validated hex string, or "00000000" if validation fails.
+/// Returns a validated hex string.
 fn generate_safe_hash() -> String {
   let raw = string.trim(run_command("date +%s | shasum | head -c 8"))
-  case is_hex_string(raw) && raw != "" {
-    True -> raw
-    False -> {
-      log.warning(
-        "beacon.build",
-        "Hash output contained non-hex characters: "
-          <> raw
-          <> ", using fallback",
-      )
-      "00000000"
-    }
-  }
+  // Supported build hosts produce a non-empty hexadecimal digest here.
+  let assert True = is_hex_string(raw) && raw != ""
+  raw
 }
 
 @external(erlang, "beacon_codegen_ffi", "get_args")
@@ -2953,3 +3170,20 @@ fn get_args() -> List(String)
 
 @external(erlang, "beacon_build_ffi", "run_command")
 fn run_command(cmd: String) -> String
+
+/// Return True when any provided source path is newer than the manifest.
+///
+/// Directories are checked recursively for source files. Missing manifests or
+/// unreadable source paths are stale, forcing the normal build path to run and
+/// report the real build error instead of serving an old bundle.
+@external(erlang, "beacon_build_ffi", "is_any_source_newer_than")
+pub fn is_any_source_newer_than(
+  manifest_path: String,
+  source_paths: List(String),
+) -> Bool
+
+/// Return True when the app's local client bundle manifest is missing or older
+/// than one of the provided source paths. The FFI also checks Beacon's client
+/// runtime source when it is available from the current checkout.
+@external(erlang, "beacon_build_ffi", "is_any_source_newer_than_manifest")
+pub fn is_any_source_newer_than_manifest(source_paths: List(String)) -> Bool

@@ -173,8 +173,7 @@ pub fn decode_update_input_test() {
 }
 
 pub fn decode_unknown_handler_test() {
-  let assert Error(_) =
-    todos.decode_event("click", "unknown", "{}", "0")
+  let assert Error(_) = todos.decode_event("click", "unknown", "{}", "0")
 }
 
 // --- Helpers ---

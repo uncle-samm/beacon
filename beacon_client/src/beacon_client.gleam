@@ -7,7 +7,6 @@
 /// 3. On event: run update locally → instant DOM update
 /// 4. If Model changed: send to server, await model_sync
 /// 5. If only Local changed: done, no server traffic
-
 import beacon_client/handler
 import gleam/int
 

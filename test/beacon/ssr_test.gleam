@@ -32,6 +32,8 @@ fn test_config() -> ssr.SsrConfig(TestModel, TestMsg) {
     secret_key: "test-secret-key-at-least-32-chars-long!!",
     title: "Test Page",
     head_html: option.None,
+    dev_mode: False,
+    serialize_model: option.None,
   )
 }
 
@@ -85,9 +87,9 @@ pub fn render_page_includes_beacon_app_root_test() {
   let assert True = str_contains(page.html, "id=\"beacon-app\"")
 }
 
-pub fn render_page_includes_session_token_test() {
+pub fn render_page_sets_session_token_without_dom_exposure_test() {
   let page = ssr.render_page(test_config())
-  let assert True = str_contains(page.html, "data-beacon-token=\"")
+  let assert False = str_contains(page.html, "data-beacon-token=\"")
   // Verify the token is actually valid by verifying it with the same secret
   let assert Ok(_ts) =
     ssr.verify_session_token(
@@ -154,6 +156,8 @@ pub fn render_page_for_path_renders_route_specific_html_test() {
       secret_key: "test-secret-key-at-least-32-chars-long!!",
       title: "Route Test",
       head_html: option.None,
+      dev_mode: False,
+      serialize_model: option.None,
     )
   let patterns = [route.pattern("/"), route.pattern("/about")]
   let on_route_change =
@@ -179,10 +183,67 @@ pub fn render_page_for_path_renders_route_specific_html_test() {
   let assert True = string_length(page.session_token) > 10
 }
 
+pub fn render_page_for_path_unmatched_route_renders_static_not_found_test() {
+  let config =
+    ssr.SsrConfig(
+      init: fn() { #(TestModel(name: "default"), effect.none()) },
+      view: test_view,
+      secret_key: "test-secret-key-at-least-32-chars-long!!",
+      title: "Route Test",
+      head_html: option.None,
+      dev_mode: False,
+      serialize_model: option.None,
+    )
+  let page =
+    ssr.render_page_for_path(
+      config,
+      "/missing",
+      [route.pattern("/")],
+      option.Some(fn(_r: route.Route) -> TestMsg { NoOp }),
+      fn(model: TestModel, _msg: TestMsg) { #(model, effect.none()) },
+    )
+
+  let assert True = str_contains(page.html, "Page Not Found")
+  let assert True = str_contains(page.html, "id=\"beacon-app\"")
+  let assert False = str_contains(page.html, "data-beacon-auto")
+  let assert False = str_contains(page.html, "Hello, default!")
+}
+
 pub fn to_response_returns_200_test() {
   let page = ssr.render_page(test_config())
   let resp = ssr.to_response(page)
   let assert 200 = resp.status
+}
+
+pub fn to_response_sets_httponly_session_cookie_test() {
+  let page = ssr.render_page(test_config())
+  let resp = ssr.to_response(page)
+  let assert Ok(cookie_header) = find_header(resp.headers, "set-cookie")
+  let assert True = str_contains(cookie_header, ssr.session_cookie_name <> "=")
+  let assert True = str_contains(cookie_header, "HttpOnly")
+  let assert True = str_contains(cookie_header, "SameSite=Lax")
+  let assert True = str_contains(cookie_header, "Max-Age=86400")
+}
+
+pub fn serialized_model_is_stored_in_signed_cookie_token_test() {
+  let config =
+    ssr.SsrConfig(
+      init: fn() { #(TestModel(name: "VisibleState"), effect.none()) },
+      view: test_view,
+      secret_key: "test-secret-key-at-least-32-chars-long!!",
+      title: "Cookie State Test",
+      head_html: option.None,
+      dev_mode: False,
+      serialize_model: option.Some(fn(_model: TestModel) { "SecretCookieState" }),
+    )
+  let page = ssr.render_page(config)
+  let assert Ok(_) =
+    ssr.verify_session_token(
+      page.session_token,
+      "test-secret-key-at-least-32-chars-long!!",
+      3600,
+    )
+  let assert False = str_contains(page.html, "SecretCookieState")
 }
 
 // --- head_html tests ---
@@ -205,6 +266,8 @@ pub fn head_html_injects_stylesheet_link_test() {
       head_html: option.Some(
         "<link rel=\"stylesheet\" href=\"/static/styles.css\">",
       ),
+      dev_mode: False,
+      serialize_model: option.None,
     )
   let page = ssr.render_page(config)
   let assert True =
@@ -231,6 +294,8 @@ pub fn head_html_multiple_tags_test() {
       head_html: option.Some(
         "<link rel=\"stylesheet\" href=\"/a.css\"><meta name=\"theme-color\" content=\"#000\">",
       ),
+      dev_mode: False,
+      serialize_model: option.None,
     )
   let page = ssr.render_page(config)
   let assert True = str_contains(page.html, "href=\"/a.css\"")
@@ -247,6 +312,20 @@ fn does_not_contain(haystack: String, needle: String) -> Bool {
   case do_str_contains(haystack, needle) {
     True -> False
     False -> True
+  }
+}
+
+fn find_header(
+  headers: List(#(String, String)),
+  name: String,
+) -> Result(String, Nil) {
+  case headers {
+    [] -> Error(Nil)
+    [#(key, value), ..rest] ->
+      case key == name {
+        True -> Ok(value)
+        False -> find_header(rest, name)
+      }
   }
 }
 

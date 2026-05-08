@@ -7,7 +7,6 @@
 ///   svg.path([svg.d("M8 0L16 16H0Z"), svg.fill("currentColor")]),
 /// ])
 /// ```
-
 import beacon/element.{type Attr, type Node}
 
 // === Container elements ===
@@ -146,10 +145,7 @@ pub fn animate_transform(attrs: List(Attr)) -> Node(msg) {
 // === Other elements ===
 
 /// A `<foreignObject>` element for embedding non-SVG content.
-pub fn foreign_object(
-  attrs: List(Attr),
-  children: List(Node(msg)),
-) -> Node(msg) {
+pub fn foreign_object(attrs: List(Attr), children: List(Node(msg))) -> Node(msg) {
   element.el("foreignObject", attrs, children)
 }
 

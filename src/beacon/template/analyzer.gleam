@@ -3,7 +3,6 @@
 ///
 /// Reference: LiveView HEEx compile-time template splitting,
 /// Architecture doc section 9 (Build-Time Template Analysis).
-
 import glance
 import gleam/list
 import gleam/option.{None, Some}
@@ -37,13 +36,10 @@ pub fn analyze_view_source(
 }
 
 /// Find the public `view` function in a module.
-fn find_view_function(
-  module: glance.Module,
-) -> Result(glance.Function, String) {
+fn find_view_function(module: glance.Module) -> Result(glance.Function, String) {
   let view_fns =
     list.filter(module.functions, fn(def) {
-      def.definition.publicity == glance.Public
-      && def.definition.name == "view"
+      def.definition.publicity == glance.Public && def.definition.name == "view"
     })
   case view_fns {
     [def, ..] -> Ok(def.definition)
@@ -180,9 +176,7 @@ fn extract_deps_from_expression(
 
     // Fn (anonymous function) — walk body
     glance.Fn(body: body, ..) ->
-      list.flat_map(body, fn(s) {
-        extract_deps_from_statement(s, model_param)
-      })
+      list.flat_map(body, fn(s) { extract_deps_from_statement(s, model_param) })
 
     // Anything else — conservatively return empty
     _ -> []

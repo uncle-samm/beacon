@@ -6,9 +6,9 @@
 /// auth library. You plug in whatever auth you want.
 ///
 /// Reference: Wisp middleware, Phoenix plugs, Express middleware.
-
 import beacon/log
 import beacon/rate_limit
+import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
 import gleam/bytes_tree
 import gleam/dict.{type Dict}
 import gleam/http
@@ -17,7 +17,6 @@ import gleam/http/response.{type Response}
 import gleam/int
 import gleam/list
 import gleam/string
-import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
 
 /// A middleware function.
 /// Takes a request and a `next` function, returns a response.
@@ -55,18 +54,11 @@ pub fn logger() -> Middleware {
   ) -> Response(ResponseBody) {
     let method = http.method_to_string(req.method)
     let path = req.path
-    log.info(
-      "beacon.middleware",
-      method <> " " <> path,
-    )
+    log.info("beacon.middleware", method <> " " <> path)
     let resp = next(req)
     log.info(
       "beacon.middleware",
-      method
-        <> " "
-        <> path
-        <> " → "
-        <> int.to_string(resp.status),
+      method <> " " <> path <> " → " <> int.to_string(resp.status),
     )
     resp
   }
@@ -136,7 +128,7 @@ pub fn secure_headers() -> Middleware {
 }
 
 /// Default Content-Security-Policy value.
-const default_csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:"
+const default_csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://avatars.githubusercontent.com; connect-src 'self' ws: wss:"
 
 /// Security headers middleware with a custom Content-Security-Policy.
 /// Use this when the default CSP is too strict (e.g., external stylesheets,
@@ -158,10 +150,7 @@ pub fn secure_headers_with_csp(csp: String) -> Middleware {
     |> response.set_header("x-content-type-options", "nosniff")
     |> response.set_header("x-frame-options", "SAMEORIGIN")
     |> response.set_header("x-xss-protection", "1; mode=block")
-    |> response.set_header(
-      "referrer-policy",
-      "strict-origin-when-cross-origin",
-    )
+    |> response.set_header("referrer-policy", "strict-origin-when-cross-origin")
     |> response.set_header(
       "permissions-policy",
       "camera=(), microphone=(), geolocation=()",
@@ -189,9 +178,7 @@ pub fn rate_limit(limiter: rate_limit.RateLimiter) -> Middleware {
         response.new(429)
         |> response.set_header("content-type", "text/plain")
         |> response.set_header("retry-after", "60")
-        |> response.set_body(
-          Bytes(bytes_tree.from_string("Too Many Requests")),
-        )
+        |> response.set_body(Bytes(bytes_tree.from_string("Too Many Requests")))
       }
     }
   }
@@ -287,9 +274,7 @@ fn is_compressible(content_type: String) -> Bool {
 }
 
 /// Compress a response body with gzip.
-fn compress_response(
-  resp: Response(ResponseBody),
-) -> Response(ResponseBody) {
+fn compress_response(resp: Response(ResponseBody)) -> Response(ResponseBody) {
   case resp.body {
     Bytes(body_tree) -> {
       let body_str = bytes_tree.to_bit_array(body_tree)
@@ -429,4 +414,3 @@ pub fn set_context(ctx: Context, key: String, value: String) -> Context {
 pub fn get_context(ctx: Context, key: String) -> Result(String, Nil) {
   dict.get(ctx, key)
 }
-

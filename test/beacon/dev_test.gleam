@@ -1,5 +1,4 @@
 /// Tests for the dev module's file watching and hot reload utilities.
-
 pub fn find_gleam_files_test() {
   // The src directory should contain .gleam files
   let files = find_gleam_files("src")

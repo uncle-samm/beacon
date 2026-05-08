@@ -1,5 +1,20 @@
 -module(beacon_api_test_ffi).
--export([http_get/2]).
+-export([free_port/0, http_get/2]).
+
+free_port() ->
+    case gen_tcp:listen(0, [binary, {active, false}, {packet, raw}, {reuseaddr, true}]) of
+        {ok, Socket} ->
+            case inet:port(Socket) of
+                {ok, Port} ->
+                    gen_tcp:close(Socket),
+                    {ok, Port};
+                {error, Reason} ->
+                    gen_tcp:close(Socket),
+                    {error, iolist_to_binary(io_lib:format("inet:port failed: ~p", [Reason]))}
+            end;
+        {error, Reason} ->
+            {error, iolist_to_binary(io_lib:format("listen failed: ~p", [Reason]))}
+    end.
 
 %% Simple HTTP GET client for testing API routes.
 %% Returns {ok, {simple_response, Status, Body}} or {error, Reason}.

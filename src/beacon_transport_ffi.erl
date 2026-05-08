@@ -2,7 +2,7 @@
 -export([
     listen/2, accept/1, tcp_send/2, close/1,
     controlling_process/2, set_active_once/1,
-    read_http_request/1, read_body/2,
+    read_http_request/1, read_http_request_with_limits/4, read_body/2,
     ws_accept_key/1,
     ws_encode_text_frame/1, ws_encode_close_frame/0,
     ws_decode_frame/1,
@@ -55,13 +55,16 @@ set_active_once(Socket) ->
 %% Returns: {ok, {MethodBin, PathBin, [{KeyBin, ValueBin}]}} | {error, Reason}
 
 read_http_request(Socket) ->
+    read_http_request_with_limits(Socket, 100, 65536, 5000).
+
+read_http_request_with_limits(Socket, MaxHeaders, MaxHeaderBytes, TimeoutMs) ->
     case inet:setopts(Socket, [{packet, http_bin}]) of
         {error, Reason} ->
             {error, format_reason(Reason)};
         ok ->
-            case gen_tcp:recv(Socket, 0, 30000) of
+            case gen_tcp:recv(Socket, 0, TimeoutMs) of
                 {ok, {http_request, Method, {abs_path, Path}, _Version}} ->
-                    case read_headers(Socket, []) of
+                    case read_headers(Socket, [], MaxHeaders, MaxHeaderBytes, 0, TimeoutMs) of
                         {ok, Headers} ->
                             inet:setopts(Socket, [{packet, raw}]),
                             {ok, {method_to_binary(Method), Path, Headers}};
@@ -80,11 +83,30 @@ read_http_request(Socket) ->
             end
     end.
 
-read_headers(Socket, Acc) ->
-    case gen_tcp:recv(Socket, 0, 30000) of
+read_headers(Socket, Acc, MaxHeaders, MaxHeaderBytes, BytesRead, TimeoutMs) ->
+    case gen_tcp:recv(Socket, 0, TimeoutMs) of
         {ok, {http_header, _, Name, _, Value}} ->
             Key = normalize_header_name(Name),
-            read_headers(Socket, [{Key, Value} | Acc]);
+            NewBytesRead = BytesRead + byte_size(Key) + byte_size(Value),
+            NewHeaderCount = length(Acc) + 1,
+            case NewHeaderCount > MaxHeaders of
+                true ->
+                    {error, <<"too_many_headers">>};
+                false ->
+                    case NewBytesRead > MaxHeaderBytes of
+                        true ->
+                            {error, <<"headers_too_large">>};
+                        false ->
+                            read_headers(
+                                Socket,
+                                [{Key, Value} | Acc],
+                                MaxHeaders,
+                                MaxHeaderBytes,
+                                NewBytesRead,
+                                TimeoutMs
+                            )
+                    end
+            end;
         {ok, http_eoh} ->
             {ok, lists:reverse(Acc)};
         {ok, {http_error, _}} ->

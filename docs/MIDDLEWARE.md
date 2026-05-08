@@ -38,7 +38,8 @@ middleware.methods([http.Post, http.Put], rate_limiter)  // Only specific HTTP m
 middleware.group([mw1, mw2, mw3])                // Combine multiple into one
 ```
 
-Add middleware to an app with `beacon.with_middleware(builder, mw)`. For routed apps, use `beacon.router_middleware(builder, mw)`.
+Add middleware to an app with `beacon.with_middleware(builder, mw)`. Route-aware
+apps use the same builder because there is only one app startup path.
 
 ## Writing Custom Middleware
 

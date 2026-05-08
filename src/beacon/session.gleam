@@ -1,6 +1,5 @@
 /// Cookie-based session management.
 /// Sessions are stored in ETS (server-side) with a session ID in a cookie.
-
 import beacon/log
 import gleam/dict.{type Dict}
 import gleam/option.{type Option, None, Some}
@@ -30,11 +29,18 @@ pub fn new_store(name: String) -> SessionStore {
 
 /// Create a new session with a generated ID.
 pub fn create(store: SessionStore) -> Session {
-  let id = generate_session_id()
+  let id = generate_id()
   let session = Session(id: id, data: dict.new())
   session_ets_put(store.table, id, session)
-  log.debug("beacon.session", "Created session: " <> id)
+  log.debug("beacon.session", "Created session")
   session
+}
+
+/// Generate a cryptographically random, URL-safe token.
+///
+/// Used for session IDs and session-bound CSRF tokens.
+pub fn generate_id() -> String {
+  generate_session_id()
 }
 
 /// Get a session by ID.
@@ -69,7 +75,7 @@ pub fn get_value(session: Session, key: String) -> Option(String) {
 /// Delete a session (logout).
 pub fn delete(store: SessionStore, id: String) -> Nil {
   session_ets_delete(store.table, id)
-  log.debug("beacon.session", "Deleted session: " <> id)
+  log.debug("beacon.session", "Deleted session")
 }
 
 // === FFI ===
@@ -81,10 +87,7 @@ fn session_ets_new(name: String) -> SessionTable
 fn session_ets_put(table: SessionTable, key: String, value: Session) -> Nil
 
 @external(erlang, "beacon_session_ffi", "session_ets_get")
-fn session_ets_get(
-  table: SessionTable,
-  key: String,
-) -> Result(Session, Nil)
+fn session_ets_get(table: SessionTable, key: String) -> Result(Session, Nil)
 
 @external(erlang, "beacon_session_ffi", "session_ets_delete")
 fn session_ets_delete(table: SessionTable, key: String) -> Nil

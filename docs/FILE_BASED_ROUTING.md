@@ -1,80 +1,194 @@
-# File-Based Routing
+# Explicit Routing
 
-Beacon supports file-based routing where each `.gleam` file in `src/routes/` becomes a URL route. The scanner parses files with Glance and the codegen generates type-safe route matching and dispatching.
+Beacon no longer supports filesystem route discovery. Route files are ordinary
+Gleam modules that you import yourself, and every app starts through the same
+`beacon.app(...) |> beacon.start(...)` path.
 
-## Directory Structure
+## Route-Aware Apps
 
-| File path | URL |
-|-----------|-----|
-| `src/routes/index.gleam` | `/` |
-| `src/routes/about.gleam` | `/about` |
-| `src/routes/blog/index.gleam` | `/blog` |
-| `src/routes/blog/[slug].gleam` | `/blog/:slug` |
-
-The `index.gleam` file maps to the root of its directory. Bracket-wrapped filenames like `[slug].gleam` become dynamic parameters.
-
-## Route File Requirements
-
-Every route file must export a public `view` function. The scanner also detects optional exports:
-
-- `Model` custom type -- the route's state
-- `Msg` custom type -- the route's messages
-- `init()` -- returns initial `Model` (may take a `Dict(String, String)` params argument for dynamic routes)
-- `update(model, msg)` -- returns updated `Model`
-- `view(model)` -- returns `Node(Msg)` (required)
-
-## Example Route File
+Use `beacon.route_pages` to declare accepted URL patterns, the message sent when
+each page is entered, and the typed page render function.
 
 ```gleam
 import beacon
 import beacon/html
-import gleam/int
+import beacon/route
 
-pub type Model { Model(count: Int) }
-pub type Msg { Increment  Decrement }
-pub fn init() -> Model { Model(count: 0) }
+pub type Model {
+  Model(path: String, project_id: String)
+}
+
+pub type Msg {
+  RouteChanged(route.Route)
+}
+
+pub fn init() -> Model {
+  Model(path: "/", project_id: "")
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    RouteChanged(r) -> {
+      let project_id = case route.param(r, "id") {
+        Ok(id) -> id
+        Error(Nil) -> ""
+      }
+      Model(..model, path: r.path, project_id: project_id)
+    }
+  }
+}
+
+pub fn view(model: Model) -> beacon.Node(Msg) {
+  let assert Ok(page) = route.dispatch_view(pages(), model, model.path)
+  page
+}
+
+fn pages() -> List(route.Page(Model, Msg)) {
+  [
+    route.page("/", RouteChanged, fn(_model, _route) { html.text("Home") }),
+    route.page("/settings", RouteChanged, fn(_model, _route) {
+      html.text("Settings")
+    }),
+    route.page("/projects/:id", RouteChanged, fn(model, _route) {
+      html.text("Project " <> model.project_id)
+    }),
+  ]
+}
+
+pub fn main() {
+  beacon.app(init, update, view)
+  |> beacon.route_pages(pages())
+  |> beacon.start(8080)
+}
+```
+
+The first request is still rendered on the server for SSR. After hydration,
+route changes and UI events use the same generated client renderer and
+server-authoritative state sync/patch protocol as every other Beacon app.
+
+## Organizing Route Code
+
+You can split pages into modules for clarity, but the imports are explicit.
+Each module can expose a `page` constructor and normal view helpers. Keep the
+root app's public `Model` and `Msg` in the app module. Beacon does not discover
+route files, generate a separate dispatcher module, or start a separate router
+runtime.
+
+```gleam
+import beacon/route
+import pages/dashboard
+import pages/settings
+
+pub fn view(model: Model) -> beacon.Node(Msg) {
+  let assert Ok(page) = route.dispatch_view(pages(), model, model.path)
+  page
+}
+
+fn pages() -> List(route.Page(Model, Msg)) {
+  [
+    dashboard.page(RouteChanged, fn(model, _route) {
+      dashboard.view(model.count, Decrement, Increment)
+    }),
+    settings.page(RouteChanged, fn(model, _route) {
+      settings.view(model.name, SetName)
+    }),
+  ]
+}
+
+beacon.app(init, update, view)
+|> beacon.route_pages(pages())
+|> beacon.start(8080)
+```
+
+## Route Mini-Apps
+
+For larger pages, put the page's own `Model`, `Msg`, `update`, and `view` in the
+route module. The root app embeds that model and wraps route messages into the
+root `Msg`; there is still one Beacon app and one rendering path.
+
+```gleam
+// pages/counter.gleam
+pub type Model {
+  Model(count: Int)
+}
+
+pub type Msg {
+  Increment
+}
+
+pub fn init() -> Model {
+  Model(count: 0)
+}
+
 pub fn update(model: Model, msg: Msg) -> Model {
   case msg {
     Increment -> Model(count: model.count + 1)
-    Decrement -> Model(count: model.count - 1)
   }
 }
-pub fn view(model: Model) -> beacon.Node(Msg) {
-  html.div([], [
-    html.button([beacon.on_click(Increment)], [html.text("+")]),
-    html.a([html.href("/about")], [html.text("About")]),
-  ])
+
+pub fn page(
+  on_enter: fn(route.Route) -> parent_msg,
+  select: fn(root_model) -> Model,
+  wrap: fn(Msg) -> parent_msg,
+) -> route.Page(root_model, parent_msg) {
+  route.page_model("/", on_enter, select, fn(model, _route) {
+    html.button([beacon.on_click(wrap(Increment))], [
+      html.text(int.to_string(model.count)),
+    ])
+  })
 }
 ```
-
-## Using the Router Builder
-
-In `main.gleam`, use `beacon.router()` instead of `beacon.app()`:
 
 ```gleam
-import beacon
+// main.gleam
+pub type Model {
+  Model(path: String, counter: counter.Model)
+}
 
-pub fn main() {
-  beacon.router()
-  |> beacon.router_title("My App")
-  |> beacon.router_static_dir("priv/static")
-  |> beacon.start_router(8080)
+pub type Msg {
+  RouteChanged(String)
+  Counter(counter.Msg)
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    RouteChanged(path) -> Model(..model, path: path)
+    Counter(child_msg) ->
+      route.update_model(
+        model,
+        child_msg,
+        fn(model) { model.counter },
+        fn(model, counter) { Model(..model, counter: counter) },
+        counter.update,
+      )
+  }
+}
+
+fn pages() -> List(route.Page(Model, Msg)) {
+  [
+    counter.page(
+      fn(r) { RouteChanged(r.path) },
+      fn(model) { model.counter },
+      Counter,
+    ),
+  ]
 }
 ```
 
-Configuration functions: `router_title`, `router_secret_key`, `router_middleware`, `router_static_dir`, `router_routes_dir` (defaults to `"src/routes"`), `router_security_limits`.
+For `app_with_local`, use the same pattern with `route.Page(#(Model, Local), Msg)`
+and select the route-local value from the tuple.
 
-## Code Generation
+For `app_with_server`, the root app embeds route server state in its own
+`Server` and uses `route.update_server_model` to update the child model and
+child server value together. The route module may define `pub type Server`,
+`init_server`, and `update_server`, but the generated client bundle strips those
+declarations and any `server_` constants before JS compilation. Route render
+functions receive only the model value that your app's `view` receives, so pages
+cannot accidentally render `Server`.
 
-On `start_router`, Beacon automatically:
+## Why
 
-1. Scans `src/routes/` for `.gleam` files
-2. Generates `src/generated/routes.gleam` (Route type, `match_route`, `to_path`)
-3. Generates `src/generated/route_dispatcher.gleam` (`start_for_route`, `ssr_for_route`)
-4. Compiles and hot-loads the dispatcher
-
-Run codegen manually with `gleam run -m beacon/router/codegen` or use `check` mode in CI.
-
-## Navigation
-
-Use standard `<a href="...">` links. The client JS intercepts same-origin navigation and the route manager swaps runtimes while preserving the WebSocket connection.
+Beacon has one rendering model: SSR for first paint, then client rendering from
+Beacon state. Removing filesystem route discovery keeps routing predictable,
+makes imports visible to Gleam and the build analyzer, and avoids a second app
+startup path with different behavior.

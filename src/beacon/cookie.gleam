@@ -2,7 +2,6 @@
 ///
 /// Parses the `Cookie` header from requests and sets `Set-Cookie` headers
 /// on responses. Follows RFC 6265 (HTTP State Management Mechanism).
-
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
 import gleam/int
@@ -95,13 +94,32 @@ pub fn set_default(
 
 /// Delete a cookie by setting it to empty with max-age=0.
 pub fn delete(resp: Response(body), name: String) -> Response(body) {
+  delete_with_options(
+    resp,
+    name,
+    CookieOptions(
+      max_age: None,
+      path: "/",
+      http_only: True,
+      secure: False,
+      same_site: "Lax",
+    ),
+  )
+}
+
+/// Delete a cookie using the same path/security attributes used to set it.
+pub fn delete_with_options(
+  resp: Response(body),
+  name: String,
+  opts: CookieOptions,
+) -> Response(body) {
   let opts =
     CookieOptions(
       max_age: Some(0),
-      path: "/",
-      http_only: True,
-      secure: True,
-      same_site: "Lax",
+      path: opts.path,
+      http_only: opts.http_only,
+      secure: opts.secure,
+      same_site: opts.same_site,
     )
   set(resp, name, "", opts)
 }
@@ -124,11 +142,7 @@ fn parse_cookie_header(header: String) -> List(#(String, String)) {
 
 /// Build a Set-Cookie header value.
 /// SECURITY: Strips \r and \n from name and value to prevent header injection.
-fn build_set_cookie(
-  name: String,
-  value: String,
-  opts: CookieOptions,
-) -> String {
+fn build_set_cookie(name: String, value: String, opts: CookieOptions) -> String {
   let safe_name = sanitize_cookie_value(name)
   let safe_value = sanitize_cookie_value(value)
   let base = safe_name <> "=" <> safe_value
@@ -146,7 +160,8 @@ fn build_set_cookie(
     True -> list.append(parts, ["Secure"])
     False -> parts
   }
-  let parts = list.append(parts, ["SameSite=" <> sanitize_cookie_value(opts.same_site)])
+  let parts =
+    list.append(parts, ["SameSite=" <> sanitize_cookie_value(opts.same_site)])
   string.join(parts, "; ")
 }
 

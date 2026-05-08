@@ -7,11 +7,227 @@
 
 ## Current Status
 
-**Active Milestone:** 88 — End-to-End Build & Security Tests
-**Last Completed:** 87 — Auto Model Encoder for `app_with_server`
+**Active Milestone:** 97 — Browser Matrix Expansion
+**Last Completed:** 94 — Permanent Browser Conformance Harness
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (689 tests passed, 0 failures)
+**Test Status:** GREEN (703 tests passed, 0 failures)
 **Linter:** PASSING (zero violations)
+
+### Milestone 97: Browser Matrix Expansion 🚧
+> Extend permanent browser coverage beyond the canonical desktop happy path.
+
+- [x] Add a mobile viewport canonical browser pass
+- [x] Add browser-level WebSocket reconnect/disconnect conformance
+- [x] Add back/forward history conformance for explicit route apps
+- [ ] Decide whether this repo should add a hosted CI workflow or keep the
+      browser harness as a documented CI entrypoint
+
+**Notes:**
+- Added `test_all_cdp.py --viewport desktop|mobile`. Desktop uses a 1280x900
+  viewport; mobile emulates a 390x844 iPhone-class viewport with touch enabled
+  and a mobile Safari user agent.
+- Mobile canonical checks reuse the same SSR, DOM mutation, layout-shift,
+  WebSocket frame, Local-only no-traffic, route, auth, and privacy assertions,
+  plus a mobile horizontal-overflow assertion on every canonical DOM stability
+  checkpoint.
+- `scripts/run_canonical_cdp.sh` now runs both `desktop` and `mobile` by
+  default. `make browser-canonical-desktop` and `make browser-canonical-mobile`
+  run one profile when a narrower loop is needed.
+- Verification: `make browser-canonical-desktop` — 188 passed, 0 failed, 15
+  skipped.
+- Verification: `make browser-canonical-mobile` — 196 passed, 0 failed, 15
+  skipped.
+- Added CDP route history helpers proving `popstate` sends `navigate` and the
+  server returns route state. Covered `examples/routed` with back/forward across
+  `/about`, `/settings`, and `/stats`, plus `examples/routed_workspace` between
+  `/pipeline` and `/settings`.
+- Added browser reconnect helpers backed by CDP `Network.webSocketClosed`
+  events. Covered a simple `counter` reconnect and an authenticated
+  `auth_workspace` reconnect that reuses the HttpOnly session cookie, keeps the
+  admin route authorized, remains interactive, and sends exactly one model event
+  after reconnect.
+- Added a test-gated `window.__beaconCloseSocketForTest` next to the existing
+  browser WebSocket state hooks so CDP can force a real client WebSocket close
+  without mocking transport behavior.
+- Verification: `make browser-canonical-desktop` — 227 passed, 0 failed, 15
+  skipped.
+- Verification: `make browser-canonical-mobile` — 235 passed, 0 failed, 15
+  skipped.
+- Verification: `gleam build`, `gleam test` (703 passed), and
+  `gleam run -m beacon/lint`.
+
+### Milestone 96: Higher-Level Auth And API ✅
+> Make auth and API routes feel like Beacon primitives while preserving custom
+> auth providers and raw transport escape hatches.
+
+- [x] Add typed API route helpers over `api_routes`
+- [x] Add high-level session auth helpers for login/logout/current user/protected routes
+- [x] Add CSRF and secure cookie defaults to the high-level auth path
+- [x] Keep raw `api_routes`, `ws_auth`, cookie, and session primitives available
+- [x] Add auth/API example coverage that uses the high-level API
+
+**Notes:**
+- Added `beacon/api.gleam` with ordered `get`/`post`/`put`/`patch`/`delete` route declarations plus JSON/text/empty response helpers. The helpers compile down to the existing `beacon.api_routes` handler shape and preserve raw request access inside each handler.
+- Updated `docs/GETTING_STARTED.md` and the `beacon.api_routes` public docs so `beacon/api.routes` is the recommended path and raw handlers remain the documented transport escape hatch.
+- Added behavioral tests for typed route matching, declaration-order precedence, method fallthrough to SSR, POST handling, and JSON content-type output.
+- Fixed flaky server-start tests by using OS-assigned ports where no HTTP client needs the port, and a test FFI free-port allocator for API tests that do need a known port.
+- Added `beacon/auth` session primitives: `SessionConfig`, `default_session_config`, explicit `dev_session_config`, `create_login`, `with_session_cookie`, `login_response`, `logout_response`, `session_from_request`, `current_user_from_request`, `validate_csrf`, `ws_session_auth`, `authenticated`, and `csrf_authenticated`.
+- High-level auth uses an HttpOnly opaque `beacon_session` cookie, cryptographically random session-bound CSRF tokens, and secure production cookie defaults. Existing raw `api_routes`, `ws_auth`, `beacon/cookie`, and `beacon/session` APIs remain available.
+- Removed credential-bearing session IDs and user IDs from auth/session logs.
+- Migrated `examples/auth_workspace` to `beacon/api` typed routes plus `beacon/auth` login/session/CSRF/WebSocket helpers.
+- Added behavioral auth tests for login cookie + CSRF issuance, configurable secure/dev defaults, request session recovery, missing/invalid session errors, CSRF acceptance/rejection, WebSocket auth, CSRF-protected API handlers, and cookie deletion with preserved security attributes.
+- Verification: `gleam build`, `gleam test` (701 passed), `gleam run -m beacon/lint`, `examples/auth_workspace` build/start enhanced bundle, `.venv/bin/python test_all_cdp.py auth_workspace -v` (11 passed, 0 failed, 20 skipped).
+
+### Milestone 95: One App Mental Model ✅
+> Teach `Model`, optional `Local`, and optional `Server` as one app shape.
+
+- [x] Improve build diagnostics around inferred `Local` and `Server`
+- [x] Update docs to stop presenting local/server builders as separate app modes
+- [x] Add tests that classify Local-only, Model-changing, and mixed messages
+- [x] Decide whether a generated entrypoint can replace explicit builder selection
+
+**Notes:**
+- Added analyzer-level `local_fields`, `MsgImpact`, `msg_impact`, `msg_impact_label`, and `state_diagnostics`. Build logs now report the inferred app state shape (`Model`, `Model + Local`, `Model + Server`, or `Model + Local + Server`), inferred `Local`/`Server` details, and message impact counts.
+- Message classification now distinguishes `LOCAL`, `MODEL`, and `MODEL+LOCAL`. Generated client behavior still uses the existing `affects_model` boolean for the transport decision: only pure `LOCAL` messages avoid WebSocket traffic.
+- Added analyzer tests for local-only, model-only, and mixed messages, plus diagnostics that prove inferred `Local` fields, `Server` fields, and message impact counts are surfaced.
+- Updated `docs/GETTING_STARTED.md`, `docs/ARCHITECTURE.md`, and public `beacon.gleam` doc comments to teach one app state shape first. `app`, `app_with_local`, and `app_with_server` are now documented as type-specific entrypoints into one runtime model, not separate app modes.
+- Generated entrypoint decision: do not add a generated replacement yet. Gleam has no overloads, and a generated app entrypoint would hide important startup configuration (`api_routes`, `ws_auth`, `ws_init`, `route_pages`, security limits) unless it grew into another builder. Keep explicit typed entrypoints for now, backed by analyzer diagnostics and docs; revisit only if a future generated wrapper can preserve configuration clarity and fail loudly.
+- Verification: `gleam build`, `gleam test` (703 passed), `gleam run -m beacon/lint`.
+
+### Milestone 94: Permanent Browser Conformance Harness ✅
+> Make browser-level conformance a repeatable CI asset instead of an ad hoc
+> manual/CDP probe.
+
+- [x] Added `auth_workspace` coverage to `test_all_cdp.py`
+- [x] Added `docs/CONFORMANCE.md` as the canonical example/test matrix
+- [x] Added `requirements-dev.txt` with `websocket-client` for the existing CDP harness and created a project-local `.venv`
+- [x] Ran `test_all_cdp.py auth_workspace` through `.venv/bin/python` against temporary headless Chrome: 11 passed, 0 failed, 18 skipped
+- [x] Add DOM mutation bucket thresholds, layout-shift checks, and WebSocket frame assertions to the permanent browser harness
+- [x] Add a repeatable CI entrypoint and run canonical browser coverage for `counter`, `counter_local`, `local_first_form`, `private_session`, `routed`, `routed_workspace`, `route_server_workspace`, and `auth_workspace`
+
+**Notes:**
+- Added `test_all_cdp.py --canonical`, `make browser-canonical`, and
+  `scripts/run_canonical_cdp.sh` so the browser harness starts a temporary
+  headless Chrome and runs through the project-local `.venv`.
+- Added reusable CDP assertions for parsed WebSocket frame types. Model events
+  must send `event`/`event_batch`, receive `patch`/`model_sync`, and receive no
+  post-update `mount`; Local-only interactions must send zero model events.
+- Extended the DOM monitor with resettable mutation buckets, empty-root samples,
+  and cumulative `layout-shift` summaries. Canonical slices now assert bounded
+  mutation bursts, zero empty-root-after-content samples, and layout stability.
+- Added permanent browser coverage for `examples/private_session` and
+  `examples/routed_workspace`. Strengthened `counter`, `counter_local`, and
+  `auth_workspace` with the shared WebSocket/DOM assertions.
+- Verification: `make browser-canonical` — 188 passed, 0 failed, 15 skipped.
+- Verification: `gleam build`, `gleam test` (703 passed), and
+  `gleam run -m beacon/lint`.
+
+### Milestone 93: Route Mini-App DX ✅
+> Design an explicit-import route mini-app API without filesystem discovery.
+
+- [x] Add route marker/manifest API for explicit imported route modules
+- [x] Add typed route manifest view dispatcher from explicit imports, not file scanning
+- [x] Support route-local `Model`, `Msg`, `Local`, and `Server`
+- [x] Keep explicit route apps on the same SSR-then-client-state rendering path
+- [x] Add manifest-level tests for pattern extraction, dispatch, and loud mismatch errors
+- [x] Add build-pipeline regression proving routed workspace uses `route_pages`
+- [x] Move routed examples from low-level `routes` + `on_route_change` to `route_pages`
+- [x] Split `examples/routed` into explicitly imported page modules while keeping root-owned `Model`/`Msg`
+- [x] Add build-pipeline regressions for imported route page modules and enhanced bundle support
+- [x] Verified `examples/routed` starts with `gleam run -m main` and updated its README run command
+- [x] Fixed client bundle freshness so app/source changes rebuild instead of serving stale manifests
+- [x] Fixed generated JS Beacon event helpers for `EventAttr(..., debounce_ms: None)`
+- [x] Added routed browser conformance for SSR, hydration, client navigation, model patch/sync, no post-update mount, DOM mutation buckets, and layout-shift checks
+- [x] Fixed SPA route navigation by preserving the client model cache across same-app route changes
+- [x] Fixed unmatched explicit routes so SSR returns a static Beacon not-found page instead of crashing route dispatch
+- [x] `route.page` now carries pattern, enter message, and typed render function; examples use `route.dispatch_view` instead of stringly root view switches
+- [x] Allowed `beacon/route` through client purity analysis so typed route dispatch compiles into generated JS bundles
+- [x] Added `route.page_model` and `route.update_model` for route-local `Model`/`Msg` modules embedded in the single root app
+- [x] Converted `examples/routed` home page to own `routed/pages/home.Model`, `Msg`, `init`, `update`, and `view`
+- [x] Added route-local state tests, including `#(Model, Local)` tuple selection for app_with_local page state
+- [x] Fixed client bundle default-model generation for imported route-local record fields and stopped generating unused enum codec helpers for imported page `Msg`
+- [x] Added `route.update_server_model` for route mini-apps that own private server state
+- [x] Converted `examples/routed` to `app_with_server` with route-local `home.Server`, `init_server`, and `update_server`
+- [x] Sanitized imported route modules before client bundle copy so route-local `Server`, `init_server`, `update_server`, and `server_` constants do not ship
+- [x] Add route mini-app privacy tests once route-local `Server` exists
+- [x] Re-ran routed browser/CDP conformance after route-local server support: 22 passed, 0 failed, 18 skipped
+- [x] Added `examples/route_server_workspace` as focused route-local `Server` conformance coverage
+- [x] Added `examples/local_first_form` as focused Local-vs-Model boundary coverage
+- [x] Converted `examples/auth_workspace` from low-level `routes`/`on_route_change` to explicit `route_pages`
+- [x] Removed stale per-example `.claude` task files and obsolete `examples/routed/build/beacon_client_router` output
+- [x] Added build-pipeline regressions for the new examples and auth route_pages migration
+- [x] Browser/CDP: `local_first_form` 10 passed, `route_server_workspace` 11 passed, `auth_workspace` 11 passed
+
+### Milestone 92: Remove File Routes ✅
+> Remove the second routing mode so all apps start through the same
+> SSR-then-client-state path.
+
+- [x] Removed public `RouterBuilder`, `beacon.router`, router config helpers, and `start_router`
+- [x] Deleted filesystem router scanner, codegen, manager, Erlang dispatcher FFI, and their tests
+- [x] Removed router-specific client bundle generation from `build.gleam`
+- [x] Rewrote `examples/routed` and `examples/routed_workspace` to use explicit `beacon.route_pages` manifests
+- [x] Deleted stale example `src/routes` and generated dispatcher modules
+- [x] Rewrote file-routing docs to describe explicit routing and no route discovery
+- [x] Updated architecture/security/middleware/conformance docs for the single app path
+- [x] Added a linter regression for removed router API phrases in shipped source
+- [x] `gleam build` — zero warnings
+- [x] `gleam test` — 667 passed, 0 failures
+- [x] `gleam run -m beacon/lint` — 0 violations
+
+### Milestone 91: Browser Conformance Seed ✅
+> Seeded browser-level conformance work. The remaining permanent harness work
+> is tracked in Milestone 94.
+
+- [x] Added `auth_workspace` coverage to `test_all_cdp.py`
+- [x] Added `docs/CONFORMANCE.md` as the canonical example/test matrix
+- [x] Added `requirements-dev.txt` with `websocket-client` for the existing CDP harness and created a project-local `.venv`
+- [x] Ran `test_all_cdp.py auth_workspace` through `.venv/bin/python` against temporary headless Chrome: 11 passed, 0 failed, 18 skipped
+
+### Milestone 90: Auth Workspace Conformance Example ✅
+> Add one realistic full-stack auth app and socket-level tests that compose
+> API routes, HttpOnly cookies, CSRF, `ws_auth`, `ws_init`, route-aware SSR,
+> and server-private state.
+
+- [x] Added `examples/auth_workspace`
+- [x] Split auth example into pure client-visible `auth_workspace/app.gleam` and server entry `auth_workspace.gleam`
+- [x] Auth example covers login, logout, `/api/me`, profile writes, HttpOnly `beacon_session`, CSRF, `ws_auth`, `ws_init`, and protected admin UI
+- [x] Added socket-level integration test for unauthenticated SSR, bad login CSRF, login cookie flags, `/api/me`, bad profile CSRF, valid profile update, unauthenticated WS rejection, authenticated WS join, private-key non-leakage, logout, and post-logout WS rejection
+- [x] Added build-pipeline test proving the auth example is supported as an `app_with_server` client-state bundle and excludes server-only fields from the public model
+- [x] Fixed generated `beacon_codec.gleam` imports so app_with_server codecs no longer emit unused-import warnings for decode/option/string
+- [x] `gleam build` — zero warnings
+- [x] `gleam test` — 721 passed, 0 failures
+- [x] `gleam run -m beacon/lint` — 0 violations
+- [x] `examples/auth_workspace` startup auto-build produced an enhanced client bundle
+
+### Milestone 89: Rendering Hardening & Security Tightening 🚧
+> Beacon is being moved to one opinionated rendering model: SSR for first paint,
+> then generated client rendering from server-authoritative model sync/patch
+> messages. Local-only state stays client-only for instant UI interactions.
+
+- [x] Removed post-mount HTML mount updates from normal runtime updates
+- [x] Server ignores client-sent patch ops as state authority; update runs server-side
+- [x] Client still performs optimistic/local rendering but no longer sends model ops as authority
+- [x] Added runtime regressions for server authority and no post-mount `SendMount`
+- [x] Replaced documentary origin test with real origin validation assertions
+- [x] Added WebSocket incomplete-frame buffer cap before full-frame decode
+- [x] Added HTTP pre-upgrade limits: header count, header bytes, read timeout, pre-upgrade accounting
+- [x] Fixed hard navigate protocol-relative URL rejection in client runtime
+- [x] Removed `panic` from `element.to_json` keyed-node handling
+- [x] `beacon.start` fails when required client-state bundle generation does not produce a manifest
+- [x] Linter catches degraded rendering path phrases in shipped source
+- [x] `gleam build` — zero warnings
+- [x] `gleam test` — 719 passed, 0 failures
+- [x] `gleam run -m beacon/lint` — 0 violations
+- [x] HttpOnly cookie join/session recovery — SSR sets `beacon_join_token`, client sends no DOM token, runtime reads cookie from WS upgrade request
+- [x] Router generated apps now use per-route client-state bundles/serializers: generated dispatchers pass route-specific model encoders into runtime/SSR, router JS builds one route-tagged `BeaconApp`, unsupported route shapes fail startup, and `examples/routed` starts with the generated router bundle
+- [x] Multi-file and `app_with_server` client-visible codegen no longer rejects by default; enhanced build copies imported/sibling modules and excludes server state/update
+- [x] Added richer browser-ready examples: `examples/routed_workspace` covers per-route Local state plus server model updates, and `examples/private_session` covers `app_with_server` privacy with server-only audit/secret state
+- [x] Added build-pipeline tests proving the new examples analyze as supported client-state bundle shapes
+- [x] Browser/CDP integration proved SSR first paint, hydration takeover, local-only events, no HTML live updates, and no flicker/spam regressions
+  - `examples/private_session`: SSR included public content, leaked no server secret in HTML/JS/body, sent `join` then model events, received `mount` + `model_sync` + `patch` frames, and never received post-update `mount` frames
+  - `examples/routed_workspace`: local inspector/tab/draft/compact/filter state caused zero WebSocket traffic, model actions used `event_batch`/`patch`, route navigation used the allowed route `mount`, and normal live updates used no HTML mount frames
+  - DOM instrumentation used a full `MutationObserver`, request/WS interception, `requestAnimationFrame` body samples, and `layout-shift` observation; probes found no empty-root-after-content samples, zero layout shift, no console/page errors, and mutation bursts limited to expected initial/route render work
+  - Browser probes found and fixed three client runtime bugs: route navigation stale-model state, missing delegated `on_change`, and local-event replay before model events
 
 ### Milestone 88: End-to-End Build & Security Tests ✅
 > Added 19 new tests covering build integration (privacy stripping, codec generation,
@@ -38,7 +254,7 @@
 - [x] Phase 6: Scanner — `find_app_module` two-pass search for multi-file/app_with_server apps
 - [x] Phase 7: Build simplification — `analyze_app()`, `generate_codec()`, `try_enhanced_bundle()` separated; `auto_build_client_js()` linearized
 
-**Architecture:** Codec generation and JS bundling are now independent concerns. `generate_codec()` always runs when a Model type is found. `try_enhanced_bundle()` only succeeds for single-file apps. When enhanced fails, `build_base_client()` builds runtime-only JS. Codec is always compiled + hot-reloaded regardless of which JS bundle was built. Three-way case matching on `#(has_local, has_server)` ensures the codec accepts `#(Model, Server)` and only encodes Model fields.
+**Architecture note:** This milestone separated codec generation and JS bundling, but Milestone 89 supersedes the degraded runtime bundle behavior: normal apps now require the generated client-state bundle and fail startup when it cannot be produced. Three-way case matching on `#(has_local, has_server)` still ensures the codec accepts `#(Model, Server)` and only encodes Model fields.
 
 **Files modified:**
 - `src/beacon/build.gleam` — `has_server` branches in 3 codec generators; `analyze_app()`, `generate_codec()`, `try_enhanced_bundle()` public API; `find_app_module` two-pass + `collect_gleam_files` helper
@@ -364,7 +580,7 @@
 
 ### Recent work (78) — File-based routing:
 - **Phase 1 — Scanner enhancement**: Added `has_init`, `has_update`, `has_model`, `has_msg`, `has_local`, `init_takes_params`, `has_guard`, `has_on_update` fields to `RouteDefinition`. Added `extract_public_type_names` for custom type detection. Added `detect_init_arity` for param detection. Added `_param` naming convention for dynamic segments (e.g., `_slug.gleam` → `:slug`).
-- **Phase 2 — Route dispatcher codegen**: Extended `codegen.gleam` to generate `route_dispatcher.gleam` alongside `routes.gleam`. The dispatcher has `start_for_route(conn_id, transport_subject, path)` — pattern-matches path segments, creates per-route `RuntimeConfig`, calls `runtime.start_and_connect`. Also generates `ssr_for_route(path, title, secret_key)` for route-aware SSR. Handles dynamic params by building `Dict(String, String)` and passing to `init(params)`.
+- **Phase 2 — Route dispatcher codegen**: Extended `codegen.gleam` to generate `route_dispatcher.gleam` alongside `routes.gleam`. The dispatcher now has `start_for_route(conn_id, transport_subject, path, secret_key, req)` — pattern-matches path segments, creates per-route `RuntimeConfig`, calls `runtime.start_and_connect_with_request`. Also generates `ssr_for_route(path, title, secret_key)` for route-aware SSR. Handles dynamic params by building `Dict(String, String)` and passing to `init(params)`.
 - **Phase 3 — Runtime helper extraction**: Extracted `start_and_connect` from `connect_transport_per_connection`. New public function `runtime.start_and_connect(config, conn_id, transport_subject) -> Result(#(on_event, shutdown), BeaconError)`. Extracted `forward_client_message` helper for DRY message forwarding. `connect_transport_per_connection` now delegates to `start_and_connect`.
 - **Phase 4 — Route manager actor**: New `src/beacon/router/manager.gleam`. Per-connection actor that coordinates route lifecycle. Handles join (starts initial route runtime from path), navigate (kills old runtime, spawns new one), and forwards all other events. Uses `RouteDispatcher` function type for dependency injection.
 - **Phase 5 — Router builder API**: Added `RouterBuilder` opaque type and `beacon.router()`, `beacon.router_title()`, `beacon.router_secret_key()`, `beacon.router_middleware()`, `beacon.router_static_dir()`, `beacon.router_routes_dir()`, `beacon.start_router()`. `start_router` auto-runs scanner+codegen, loads generated dispatcher via Erlang FFI (`beacon_router_ffi.erl`), creates route manager factory per connection.
@@ -380,7 +596,7 @@
 - **Pre-existing bug fix**: `encode_flat_fields` wasn't encoding enum types through their encoder functions (e.g., `json.string(model.direction)` instead of `json.string(encode_direction(model.direction))`). Fixed via new `generate_server_field_encoder` helper.
 
 ### Recent fixes (72):
-- **Patch optimization proof tests**: Assert SendPatch (not SendModelSync) after join, patch size < model, append detection, multiple-increments-all-patches, client ops fallback
+- **Patch optimization proof tests**: Assert SendPatch (not SendModelSync) after join, patch size < model, append detection, multiple-increments-all-patches, client ops authority
 - **Patch roundtrip tests**: 10 different model shapes (nested objects, arrays of objects, mixed types, deeply nested, special chars, empty→populated, populated→empty)
 - **Diff precision test**: Assert only changed field appears in ops (unchanged fields excluded)
 - **Sim infrastructure**: Added bytes_sent/received, patches_received, model_syncs_received, mounts_received to metrics. Response type tracking in pool. Wire efficiency logging in reports.
@@ -542,7 +758,7 @@
 - `verify_session_token` checks signature validity AND expiration via max_age_seconds.
 - Transport updated with `page_html` option — SSR HTML passed from counter example.
 - Counter example now uses SSR: HTTP GET returns pre-rendered page with `Count: 0` visible immediately (no JS needed for first paint).
-- `data-beacon-token` attribute on #beacon-app div carries the signed session token for the client to send on WebSocket connect.
+- Superseded by Milestone 89: join/session token now lives in the HttpOnly `beacon_join_token` cookie, not a DOM attribute.
 - 13 SSR tests: page rendering (7), token create/verify (5), response (1). All pass.
 
 ### 2.2 Hydration
@@ -556,7 +772,7 @@
 - When `hydrated=true`, event listeners are attached immediately (before WebSocket connects).
 - On first mount message, if still hydrated, skip innerHTML replacement — just keep the existing SSR DOM and attach events.
 - After first mount, `hydrated` is set to false — subsequent mounts replace innerHTML normally.
-- Join message now includes session token: `{type:"join",token:"..."}`.
+- Join message keeps the token field for protocol compatibility; browser recovery now uses the HttpOnly cookie.
 - Both `priv/static/beacon.js` (development) and embedded minified JS (transport.gleam) updated.
 - Hydration means: user sees content immediately (SSR), events work as soon as JS loads (before WebSocket), and there's no flash when WebSocket connects.
 
@@ -568,7 +784,7 @@
 **2.3 Notes:**
 - `ClientJoin` now carries a `token: String` field (empty string if no token).
 - Transport decoder uses `decode.optional_field("token", "", decode.string)` — defaults to "" if missing.
-- JS client reads `data-beacon-token` from appRoot and sends it with the join message.
+- Superseded by Milestone 89: JS sends an empty token and the runtime reads `beacon_join_token` from the WS upgrade request.
 - `ssr.verify_session_token` handles: valid token (returns timestamp), wrong secret (Error), expired (Error), tampered (Error).
 - Runtime logs token receipt. Full state recovery (restoring model from token) deferred — current approach re-runs init on each join, which is correct for the counter. A more sophisticated approach would serialize/deserialize model state in the token, but that requires type-specific serialization which is a Milestone 3+ concern.
 

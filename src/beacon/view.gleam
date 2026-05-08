@@ -7,13 +7,14 @@
 ///
 /// Reference: LiveView HEEx compile-time splitting,
 /// Architecture doc section 9 (Build-Time Template Analysis).
-
 import beacon/element.{
-  type Attr, type Node, ElementNode, EventAttr, HtmlAttr, MemoNode, NoneNode,
-  RawHtml, TextNode,
+  type Attr, type Node, ElementNode, EventAttr, HtmlAttr, KeyedNode, MemoNode,
+  NoneNode, RawHtml, TextNode,
 }
 import beacon/template/rendered.{type Rendered}
+import gleam/int
 import gleam/list
+import gleam/option.{Some}
 import gleam/string
 import gleam/string_tree.{type StringTree}
 
@@ -48,11 +49,7 @@ type RenderState {
 }
 
 fn new_state() -> RenderState {
-  RenderState(
-    statics: [],
-    current_static: string_tree.new(),
-    dynamics: [],
-  )
+  RenderState(statics: [], current_static: string_tree.new(), dynamics: [])
 }
 
 /// Flush the current static buffer to the statics list and start a new one.
@@ -104,6 +101,21 @@ fn do_render(node: Node(msg), state: RenderState) -> RenderState {
       add_dynamic(state, content)
     }
 
+    KeyedNode(key, child) -> {
+      do_render(
+        case child {
+          ElementNode(tag, attributes, children) ->
+            ElementNode(
+              tag: tag,
+              attributes: [HtmlAttr("data-beacon-key", key), ..attributes],
+              children: children,
+            )
+          other -> other
+        },
+        state,
+      )
+    }
+
     ElementNode(tag, attributes, children) -> {
       // Opening tag is STATIC
       let state = append_static(state, "<" <> tag)
@@ -131,10 +143,7 @@ fn do_render(node: Node(msg), state: RenderState) -> RenderState {
 }
 
 /// Render a list of children.
-fn render_children(
-  state: RenderState,
-  children: List(Node(msg)),
-) -> RenderState {
+fn render_children(state: RenderState, children: List(Node(msg))) -> RenderState {
   list.fold(children, state, fn(acc, child) { do_render(child, acc) })
 }
 
@@ -152,16 +161,22 @@ fn render_attrs(state: RenderState, attrs: List(Attr)) -> RenderState {
         |> append_static(" " <> name <> "=\"")
         |> add_dynamic(escape_attr(value))
         |> append_static("\"")
-      EventAttr(event_name, handler_id) ->
+      EventAttr(event_name, handler_id, debounce_ms) -> {
         // Event handlers are static — they don't change between renders
-        acc
-        |> append_static(
-          " data-beacon-event-"
-          <> event_name
-          <> "=\""
-          <> handler_id
-          <> "\"",
-        )
+        let with_event =
+          acc
+          |> append_static(
+            " data-beacon-event-" <> event_name <> "=\"" <> handler_id <> "\"",
+          )
+        case debounce_ms {
+          Some(delay) if event_name == "input" ->
+            with_event
+            |> append_static(
+              " data-beacon-input-debounce=\"" <> int.to_string(delay) <> "\"",
+            )
+          _ -> with_event
+        }
+      }
     }
   })
 }
@@ -169,8 +184,20 @@ fn render_attrs(state: RenderState, attrs: List(Attr)) -> RenderState {
 /// Check if a tag is a void element (no closing tag).
 fn is_void_element(tag: String) -> Bool {
   case tag {
-    "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input"
-    | "link" | "meta" | "param" | "source" | "track" | "wbr" -> True
+    "area"
+    | "base"
+    | "br"
+    | "col"
+    | "embed"
+    | "hr"
+    | "img"
+    | "input"
+    | "link"
+    | "meta"
+    | "param"
+    | "source"
+    | "track"
+    | "wbr" -> True
     _ -> False
   }
 }

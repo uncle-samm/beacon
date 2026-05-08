@@ -1,9 +1,7 @@
 /// Connection pool — spawns N real WebSocket connections, each executing
 /// a scenario against a real Beacon server. Collects metrics atomically.
-
 import beacon/log
 import beacon/sim/metrics.{type MetricsTable}
-import gleam/string
 import beacon/sim/scenario.{
   type Action, type Scenario, AbruptDisconnect, AssertResponseContains, Connect,
   Disconnect, Join, SendEvent, SendMalformed, Sleep, WaitForModelSync,
@@ -11,6 +9,7 @@ import beacon/sim/scenario.{
 }
 import gleam/erlang/process
 import gleam/int
+import gleam/string
 
 /// Pool configuration.
 pub type PoolConfig {
@@ -44,12 +43,7 @@ pub fn run(config: PoolConfig) -> PoolResult {
   let result_subject = process.new_subject()
 
   // Spawn N workers with stagger
-  spawn_workers(
-    config.concurrency,
-    config,
-    result_subject,
-    0,
-  )
+  spawn_workers(config.concurrency, config, result_subject, 0)
 
   // Collect results
   let #(succeeded, failed) =
@@ -70,12 +64,7 @@ pub fn run_no_retry(config: PoolConfig) -> PoolResult {
   let start = metrics.now_us()
   let result_subject = process.new_subject()
 
-  spawn_workers_no_retry(
-    config.concurrency,
-    config,
-    result_subject,
-    0,
-  )
+  spawn_workers_no_retry(config.concurrency, config, result_subject, 0)
 
   let #(succeeded, failed) =
     collect_results(result_subject, config.concurrency, 0, 0)
@@ -137,8 +126,10 @@ fn execute_actions_no_retry(
   case actions {
     [] -> {
       case socket {
-        Some(s) -> { ws_close(s)
-          Nil }
+        Some(s) -> {
+          ws_close(s)
+          Nil
+        }
         None -> Nil
       }
       True
@@ -149,8 +140,10 @@ fn execute_actions_no_retry(
           execute_actions_no_retry(host, port, rest, mt, new_socket)
         Error(_reason) -> {
           case socket {
-            Some(s) -> { ws_close(s)
-          Nil }
+            Some(s) -> {
+              ws_close(s)
+              Nil
+            }
             None -> Nil
           }
           False
@@ -230,9 +223,7 @@ fn collect_results(
           // Timeout — count remaining as failed
           log.warning(
             "beacon.sim.pool",
-            "Timeout waiting for "
-              <> int.to_string(remaining)
-              <> " workers",
+            "Timeout waiting for " <> int.to_string(remaining) <> " workers",
           )
           #(succeeded, failed + remaining)
         }
@@ -272,8 +263,7 @@ fn execute_actions(
     }
     [action, ..rest] -> {
       case execute_action(host, port, action, mt, socket) {
-        Ok(new_socket) ->
-          execute_actions(host, port, rest, mt, new_socket)
+        Ok(new_socket) -> execute_actions(host, port, rest, mt, new_socket)
         Error(_reason) -> {
           // Clean up on failure
           case socket {
@@ -381,7 +371,8 @@ fn execute_action(
               track_response_type(mt, payload)
               case string.contains(payload, "\"type\":\"patch\"") {
                 True -> Ok(Some(s))
-                False -> Error("Expected patch, got: " <> string.slice(payload, 0, 50))
+                False ->
+                  Error("Expected patch, got: " <> string.slice(payload, 0, 50))
               }
             }
             Error(reason) -> Error(reason)
@@ -400,7 +391,10 @@ fn execute_action(
               track_response_type(mt, payload)
               case string.contains(payload, "\"type\":\"model_sync\"") {
                 True -> Ok(Some(s))
-                False -> Error("Expected model_sync, got: " <> string.slice(payload, 0, 50))
+                False ->
+                  Error(
+                    "Expected model_sync, got: " <> string.slice(payload, 0, 50),
+                  )
               }
             }
             Error(reason) -> Error(reason)
@@ -419,7 +413,13 @@ fn execute_action(
               track_response_type(mt, payload)
               case string.contains(payload, expected) {
                 True -> Ok(Some(s))
-                False -> Error("Response missing '" <> expected <> "': " <> string.slice(payload, 0, 80))
+                False ->
+                  Error(
+                    "Response missing '"
+                    <> expected
+                    <> "': "
+                    <> string.slice(payload, 0, 80),
+                  )
               }
             }
             Error(reason) -> Error(reason)

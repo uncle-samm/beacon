@@ -34,17 +34,9 @@ fn child_update(
 
 fn child_view(model: ChildModel) -> element.Node(ChildMsg) {
   element.el("div", [element.attr("class", "counter")], [
-    element.el(
-      "button",
-      [element.on("click", "child_dec")],
-      [element.text("-")],
-    ),
+    element.el("button", [element.on("click", "child_dec")], [element.text("-")]),
     element.text(int_str(model.count)),
-    element.el(
-      "button",
-      [element.on("click", "child_inc")],
-      [element.text("+")],
-    ),
+    element.el("button", [element.on("click", "child_inc")], [element.text("+")]),
   ])
 }
 
@@ -76,8 +68,7 @@ pub fn map_node_preserves_structure_test() {
 }
 
 pub fn map_node_preserves_attributes_test() {
-  let child_node =
-    element.el("div", [element.attr("class", "test")], [])
+  let child_node = element.el("div", [element.attr("class", "test")], [])
   let parent_node = component.map_node(child_node, CounterMsg)
   let html = element.to_string(parent_node)
   let assert True = str_contains(html, "class=\"test\"")

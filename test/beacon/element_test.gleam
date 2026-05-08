@@ -1,4 +1,6 @@
+import beacon
 import beacon/element
+import beacon/island
 
 pub fn text_to_string_test() {
   let node = element.text("hello world")
@@ -44,8 +46,7 @@ pub fn nested_elements_test() {
       element.el("h1", [], [element.text("Title")]),
       element.el("p", [], [element.text("Content")]),
     ])
-  let assert "<div><h1>Title</h1><p>Content</p></div>" =
-    element.to_string(node)
+  let assert "<div><h1>Title</h1><p>Content</p></div>" = element.to_string(node)
 }
 
 pub fn void_element_test() {
@@ -72,6 +73,40 @@ pub fn attribute_escapes_quotes_test() {
   let node = element.el("div", [element.attr("title", "He said \"hi\"")], [])
   let result = element.to_string(node)
   let assert True = str_contains(result, "&quot;")
+}
+
+pub fn beacon_keyed_renders_data_beacon_key_test() {
+  let node = beacon.keyed("terminal-session-1", element.el("div", [], []))
+  let result = element.to_string(node)
+  let assert True =
+    str_contains(result, "data-beacon-key=\"terminal-session-1\"")
+}
+
+pub fn preserve_children_attr_renders_test() {
+  let node = element.el("div", [beacon.preserve_children()], [])
+  let result = element.to_string(node)
+  let assert True =
+    str_contains(result, "data-beacon-preserve-children=\"true\"")
+}
+
+pub fn hook_watch_attr_renders_csv_test() {
+  let node =
+    element.el("div", [beacon.hook_watch(["data-terminal-session"])], [])
+  let result = element.to_string(node)
+  let assert True =
+    str_contains(result, "data-beacon-hook-watch=\"data-terminal-session\"")
+}
+
+pub fn island_mount_renders_keyed_preserved_hook_test() {
+  let node = island.mount("terminal-session-1", "terminal-log", [])
+  let result = element.to_string(node)
+  let assert True =
+    str_contains(result, "data-beacon-key=\"terminal-session-1\"")
+  let assert True =
+    str_contains(result, "data-beacon-island=\"terminal-session-1\"")
+  let assert True = str_contains(result, "data-beacon-hook=\"terminal-log\"")
+  let assert True =
+    str_contains(result, "data-beacon-preserve-children=\"true\"")
 }
 
 pub fn to_json_string_text_test() {

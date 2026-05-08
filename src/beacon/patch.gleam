@@ -10,7 +10,6 @@
 /// - remove: a field was deleted
 ///
 /// Reference: RFC 6902 (JSON Patch), adapted for Beacon's state-over-the-wire.
-
 import beacon/log
 
 /// Diff two JSON model strings and produce patch operations.
@@ -23,10 +22,7 @@ pub fn diff(old_json: String, new_json: String) -> String {
 
 /// Apply patch operations to a model JSON string.
 /// Returns the patched model JSON string, or an error if application fails.
-pub fn apply_ops(
-  model_json: String,
-  ops_json: String,
-) -> Result(String, String) {
+pub fn apply_ops(model_json: String, ops_json: String) -> Result(String, String) {
   log.debug("beacon.patch", "Applying patch ops to model")
   apply_json_ops(model_json, ops_json)
 }

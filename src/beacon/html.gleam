@@ -1,7 +1,6 @@
 /// HTML element helpers — shorthand for building views.
 /// Instead of `element.el("div", [element.attr("class", "x")], [...])`,
 /// write `html.div([html.class("x")], [...])`.
-
 import beacon/element.{type Attr, type Node}
 
 // === Text ===

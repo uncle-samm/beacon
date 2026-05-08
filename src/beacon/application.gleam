@@ -3,12 +3,12 @@
 /// so that crashes are contained and services restart automatically.
 ///
 /// Reference: Phoenix application structure, Erlang/OTP supervisor pattern.
-
 import beacon/effect.{type Effect}
 import beacon/element.{type Node}
 import beacon/error
 import beacon/log
 import beacon/middleware
+import beacon/notification.{type Notification}
 import beacon/pubsub
 import beacon/route
 import beacon/runtime
@@ -24,8 +24,8 @@ import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/otp/static_supervisor as supervisor
-import gleam/string
 import gleam/otp/supervision
+import gleam/string
 
 /// Configuration for starting a Beacon application.
 pub type AppConfig(model, msg) {
@@ -40,8 +40,9 @@ pub type AppConfig(model, msg) {
     view: fn(model) -> Node(msg),
     /// Decode client events to app messages.
     /// If None, uses the handler registry (automatic via on_click/on_input).
-    decode_event: Option(fn(String, String, String, String) ->
-      Result(msg, error.BeaconError)),
+    decode_event: Option(
+      fn(String, String, String, String) -> Result(msg, error.BeaconError),
+    ),
     /// Secret key for session tokens.
     secret_key: String,
     /// Application title (used in SSR HTML).
@@ -59,10 +60,14 @@ pub type AppConfig(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when URL changes — produces a Msg for the update loop.
     on_route_change: Option(fn(route.Route) -> msg),
+    /// Called before a client-side route transition is applied.
+    on_route_leave: Option(fn(route.Route, route.Route) -> effect.Effect(msg)),
     /// Dynamic subscription function: model → list of topics.
     dynamic_subscriptions: Option(fn(model) -> List(String)),
     /// Topic-aware notification handler for dynamic subscriptions.
     on_notify: Option(fn(String) -> msg),
+    /// Typed notification handler for dynamic subscriptions.
+    on_notification: Option(fn(Notification) -> msg),
     /// Configurable security limits for the transport layer.
     security_limits: transport.SecurityLimits,
     /// Optional: extra HTML to inject into `<head>` (stylesheets, meta tags, etc.).
@@ -72,8 +77,7 @@ pub type AppConfig(model, msg) {
     /// If it returns Some(response), that response is sent immediately.
     /// If it returns None, the request falls through to SSR/static serving.
     api_handler: Option(
-      fn(Request(Connection)) ->
-        Option(response.Response(ResponseBody)),
+      fn(Request(Connection)) -> Option(response.Response(ResponseBody)),
     ),
     /// Optional: WebSocket authentication function.
     /// Runs before WS upgrade — Ok allows, Error(reason) rejects with 401.
@@ -83,6 +87,8 @@ pub type AppConfig(model, msg) {
     init_from_request: Option(
       fn(Request(Connection)) -> #(model, effect.Effect(msg)),
     ),
+    /// Enable framework-owned client tracing.
+    dev_mode: Bool,
   )
 }
 
@@ -120,6 +126,8 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       secret_key: config.secret_key,
       title: config.title,
       head_html: config.head_html,
+      dev_mode: config.dev_mode,
+      serialize_model: config.serialize_model,
     )
 
   // When routes are configured, render per-request so each URL gets
@@ -146,14 +154,14 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
             config.on_route_change,
             config.update,
           )
-        page.html
+        page
       }
       #(None, Some(factory))
     }
     _, _ -> {
       let page = ssr.render_page(ssr_config)
       log.info("beacon.application", "SSR page rendered (static)")
-      #(Some(page.html), None)
+      #(Some(page), None)
     }
   }
 
@@ -168,10 +176,13 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
       deserialize_model: config.deserialize_model,
       route_patterns: config.route_patterns,
       on_route_change: config.on_route_change,
+      on_route_leave: config.on_route_leave,
       dynamic_subscriptions: config.dynamic_subscriptions,
       on_notify: config.on_notify,
+      on_notification: config.on_notification,
       init_from_request: config.init_from_request,
       secret_key: config.secret_key,
+      dev_mode: config.dev_mode,
     )
 
   // Create transport with per-connection runtime factory
@@ -183,11 +194,7 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
     )
   let static_cfg = case config.static_dir {
     Some(dir) ->
-      Some(static.StaticConfig(
-        directory: dir,
-        prefix: "/static",
-        max_age: 3600,
-      ))
+      Some(static.StaticConfig(directory: dir, prefix: "/static", max_age: 3600))
     None -> None
   }
   let transport_config =
@@ -234,12 +241,13 @@ pub fn start_supervised(
   )
 
   // Start state manager under supervision
-  let state_mgr_spec = supervision.worker(fn() {
-    case state_manager.start_in_memory() {
-      Ok(subject) -> Ok(actor.Started(pid: process.self(), data: subject))
-      Error(err) -> Error(err)
-    }
-  })
+  let state_mgr_spec =
+    supervision.worker(fn() {
+      case state_manager.start_in_memory() {
+        Ok(subject) -> Ok(actor.Started(pid: process.self(), data: subject))
+        Error(err) -> Error(err)
+      }
+    })
 
   // Build supervisor
   let sup_result =
@@ -263,7 +271,9 @@ pub fn start_supervised(
         "beacon.application",
         "Failed to start supervisor: " <> string.inspect(err),
       )
-      Error(error.ConfigError(reason: "Supervisor start failed: " <> string.inspect(err)))
+      Error(error.ConfigError(
+        reason: "Supervisor start failed: " <> string.inspect(err),
+      ))
     }
   }
 }
@@ -281,7 +291,10 @@ pub fn wait_forever() -> Nil {
 fn wait_for_shutdown() -> Nil {
   case receive_shutdown_signal(60_000) {
     True -> {
-      log.info("beacon.application", "Shutdown signal received, draining connections...")
+      log.info(
+        "beacon.application",
+        "Shutdown signal received, draining connections...",
+      )
       // Give in-flight requests time to complete
       let timeout = shutdown_timeout()
       log.info(
@@ -300,7 +313,10 @@ fn shutdown_timeout() -> Int {
   case get_env_int("BEACON_SHUTDOWN_TIMEOUT") {
     Ok(ms) -> ms
     Error(reason) -> {
-      log.debug("beacon.application", "BEACON_SHUTDOWN_TIMEOUT not set: " <> reason <> ", using 5000ms")
+      log.debug(
+        "beacon.application",
+        "BEACON_SHUTDOWN_TIMEOUT not set: " <> reason <> ", using 5000ms",
+      )
       5000
     }
   }

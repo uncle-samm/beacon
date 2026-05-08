@@ -1,6 +1,5 @@
 /// Environment-based configuration for Beacon apps.
-/// Reads from environment variables with fallback defaults.
-
+/// Reads from environment variables with explicit defaults.
 import gleam/int
 import gleam/option.{type Option, None, Some}
 
@@ -12,7 +11,7 @@ pub fn get_env(name: String) -> Option(String) {
   }
 }
 
-/// Get an environment variable with a default fallback.
+/// Get an environment variable with a default.
 pub fn get_env_or(name: String, default: String) -> String {
   case env_get(name) {
     Ok(value) -> value

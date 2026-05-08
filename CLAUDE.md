@@ -2,6 +2,10 @@
 
 Full-stack Gleam web framework on BEAM. MVU architecture, one process per session, WebSocket transport.
 
+## Codex Project Instructions
+
+Codex reads `AGENTS.md` for project-local guidance. There is no repo-editable Codex system prompt file such as `codex.md`; do not touch `~/.codex` for this project. Project skills live in `.agents/skills/*/SKILL.md` and are the Codex source of truth. The old Claude tigerstyle slash command is superseded by `.agents/skills/tigerstyle/SKILL.md` unless a future command adds genuinely new behavior.
+
 ## Learn More
 
 | File | What you'll learn |
@@ -11,7 +15,7 @@ Full-stack Gleam web framework on BEAM. MVU architecture, one process per sessio
 | `docs/PROGRESS.md` | **Current milestone + completed work — read FIRST every session** |
 | `docs/TIGERSTYLE.md` | Full TigerStyle engineering principles |
 | `docs/SECURITY.md` | SecurityLimits, origin validation, rate limiting, CSP, tokens |
-| `docs/FILE_BASED_ROUTING.md` | Route files, dynamic params, codegen |
+| `docs/FILE_BASED_ROUTING.md` | Explicit route-aware apps, dynamic params, no route discovery |
 | `docs/WIRE_PROTOCOL.md` | All 13 WebSocket message types with JSON examples |
 | `docs/EFFECTS.md` | Effects, timers, async patterns |
 | `docs/MIDDLEWARE.md` | HTTP middleware pipeline, scoping, built-ins |

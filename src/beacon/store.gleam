@@ -4,7 +4,6 @@
 ///
 /// - `Store` — key-value (one value per key)
 /// - `ListStore` — bag-type (multiple values per key, like chat messages)
-
 import beacon/log
 import beacon/pubsub
 import beacon/state_manager

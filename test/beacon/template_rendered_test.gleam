@@ -31,11 +31,7 @@ pub fn to_html_simple_test() {
 }
 
 pub fn to_html_multiple_dynamics_test() {
-  let r =
-    rendered.build(
-      ["<h1>", "</h1><p>", "</p>"],
-      ["Title", "Body"],
-    )
+  let r = rendered.build(["<h1>", "</h1><p>", "</p>"], ["Title", "Body"])
   let assert "<h1>Title</h1><p>Body</p>" = rendered.to_html(r)
 }
 
@@ -65,16 +61,8 @@ pub fn diff_one_dynamic_changed_test() {
 }
 
 pub fn diff_multiple_dynamics_only_changed_sent_test() {
-  let old =
-    rendered.build(
-      ["<h1>", "</h1><p>", "</p>"],
-      ["Title", "Old Body"],
-    )
-  let new =
-    rendered.build(
-      ["<h1>", "</h1><p>", "</p>"],
-      ["Title", "New Body"],
-    )
+  let old = rendered.build(["<h1>", "</h1><p>", "</p>"], ["Title", "Old Body"])
+  let new = rendered.build(["<h1>", "</h1><p>", "</p>"], ["Title", "New Body"])
   // Only index 1 changed
   let assert rendered.DynamicDiff(changes: [#(1, "New Body")]) =
     rendered.diff(old, new)
@@ -82,19 +70,11 @@ pub fn diff_multiple_dynamics_only_changed_sent_test() {
 
 pub fn diff_all_dynamics_changed_test() {
   let old =
-    rendered.build(
-      ["<h1>", "</h1><p>", "</p>"],
-      ["Old Title", "Old Body"],
-    )
+    rendered.build(["<h1>", "</h1><p>", "</p>"], ["Old Title", "Old Body"])
   let new =
-    rendered.build(
-      ["<h1>", "</h1><p>", "</p>"],
-      ["New Title", "New Body"],
-    )
-  let assert rendered.DynamicDiff(changes: [
-    #(0, "New Title"),
-    #(1, "New Body"),
-  ]) = rendered.diff(old, new)
+    rendered.build(["<h1>", "</h1><p>", "</p>"], ["New Title", "New Body"])
+  let assert rendered.DynamicDiff(changes: [#(0, "New Title"), #(1, "New Body")]) =
+    rendered.diff(old, new)
 }
 
 pub fn diff_structure_changed_full_render_test() {
@@ -118,8 +98,7 @@ pub fn diff_json_no_diff_test() {
 }
 
 pub fn diff_json_dynamic_diff_test() {
-  let diff =
-    rendered.DynamicDiff(changes: [#(0, "World"), #(2, "Changed")])
+  let diff = rendered.DynamicDiff(changes: [#(0, "World"), #(2, "Changed")])
   let json_str = rendered.diff_to_json_string(diff)
   let assert True = str_contains(json_str, "\"0\":\"World\"")
   let assert True = str_contains(json_str, "\"2\":\"Changed\"")

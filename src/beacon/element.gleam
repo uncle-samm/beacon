@@ -7,9 +7,10 @@
 /// and Beacon handles the diffing.
 ///
 /// Reference: Lustre vdom/vnode.gleam, Elm's Html type.
-
+import gleam/int
 import gleam/json
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/string
 import gleam/string_tree.{type StringTree}
 
@@ -18,11 +19,10 @@ pub type Node(msg) {
   /// A text node with string content.
   TextNode(content: String)
   /// An HTML element with tag, attributes, and children.
-  ElementNode(
-    tag: String,
-    attributes: List(Attr),
-    children: List(Node(msg)),
-  )
+  ElementNode(tag: String, attributes: List(Attr), children: List(Node(msg)))
+  /// A keyed node preserves DOM identity across list reorders.
+  /// The key is materialized as a data attribute on the rendered element when possible.
+  KeyedNode(key: String, child: Node(msg))
   /// A memoized node that skips re-rendering when dependencies haven't changed.
   /// The `key` is a unique identifier, `deps` are the dependency values
   /// (compared for equality), and `child` is the rendered output.
@@ -52,7 +52,7 @@ pub type Attr {
   HtmlAttr(name: String, value: String)
   /// An event handler like on_click. The value is the event name
   /// that gets sent back to the server.
-  EventAttr(event_name: String, handler_id: String)
+  EventAttr(event_name: String, handler_id: String, debounce_ms: Option(Int))
 }
 
 /// Convert a Node tree to an HTML string for SSR.
@@ -68,6 +68,9 @@ pub fn to_string_tree(node: Node(msg)) -> StringTree {
     RawHtml(html) -> string_tree.from_string(html)
     TextNode(content) -> {
       string_tree.from_string(escape_html(content))
+    }
+    KeyedNode(key, child) -> {
+      to_string_tree(materialize_key(child, key))
     }
     MemoNode(_key, _deps, child) -> {
       // Memo is transparent for rendering — just render the child
@@ -102,8 +105,7 @@ pub fn to_string_tree(node: Node(msg)) -> StringTree {
 /// Convert a Node tree to a JSON value for wire transport.
 pub fn to_json(node: Node(msg)) -> json.Json {
   case node {
-    NoneNode ->
-      json.object([#("t", json.string("none"))])
+    NoneNode -> json.object([#("t", json.string("none"))])
     RawHtml(html) ->
       json.object([
         #("t", json.string("raw")),
@@ -114,6 +116,8 @@ pub fn to_json(node: Node(msg)) -> json.Json {
         #("t", json.string("text")),
         #("c", json.string(content)),
       ])
+    KeyedNode(key, child) ->
+      to_json(materialize_key(child, key))
     MemoNode(_key, _deps, child) ->
       // Memo is transparent for JSON — serialize the child
       to_json(child)
@@ -172,6 +176,13 @@ pub fn el(
   ElementNode(tag: tag, attributes: attributes, children: children)
 }
 
+/// Create a keyed node that preserves DOM identity across reorders.
+/// If the child is an element, the key is emitted as `data-beacon-key`.
+/// For non-element children the key is currently transparent.
+pub fn keyed(key: String, child: Node(msg)) -> Node(msg) {
+  KeyedNode(key: key, child: child)
+}
+
 /// Create an HTML attribute (key-value pair).
 pub fn attr(name: String, value: String) -> Attr {
   HtmlAttr(name: name, value: value)
@@ -179,7 +190,20 @@ pub fn attr(name: String, value: String) -> Attr {
 
 /// Create an event handler attribute. Prefer beacon.on_click(), beacon.on_input(), etc.
 pub fn on(event_name: String, handler_id: String) -> Attr {
-  EventAttr(event_name: event_name, handler_id: handler_id)
+  EventAttr(event_name: event_name, handler_id: handler_id, debounce_ms: None)
+}
+
+/// Create an event handler attribute with debounce metadata.
+pub fn on_debounced(
+  event_name: String,
+  handler_id: String,
+  debounce_ms: Int,
+) -> Attr {
+  EventAttr(
+    event_name: event_name,
+    handler_id: handler_id,
+    debounce_ms: Some(debounce_ms),
+  )
 }
 
 /// Create a memoized node. The diff engine will skip re-diffing this subtree
@@ -194,15 +218,38 @@ pub fn on(event_name: String, handler_id: String) -> Attr {
 /// )
 /// ```
 /// Reference: Elm's Html.Lazy, Lustre's memo.
-pub fn memo(
-  key: String,
-  deps: List(String),
-  child: Node(msg),
-) -> Node(msg) {
+pub fn memo(key: String, deps: List(String), child: Node(msg)) -> Node(msg) {
   MemoNode(key: key, deps: deps, child: child)
 }
 
 // --- Internal helpers ---
+
+fn materialize_key(node: Node(msg), key: String) -> Node(msg) {
+  case node {
+    ElementNode(tag, attributes, children) ->
+      case has_attr(attributes, "data-beacon-key") {
+        True ->
+          ElementNode(tag: tag, attributes: attributes, children: children)
+        False ->
+          ElementNode(
+            tag: tag,
+            attributes: [HtmlAttr("data-beacon-key", key), ..attributes],
+            children: children,
+          )
+      }
+    KeyedNode(_, child) -> materialize_key(child, key)
+    other -> other
+  }
+}
+
+fn has_attr(attributes: List(Attr), name: String) -> Bool {
+  list.any(attributes, fn(attr) {
+    case attr {
+      HtmlAttr(attr_name, _) -> attr_name == name
+      EventAttr(_, _, _) -> False
+    }
+  })
+}
 
 fn attr_to_json(attribute: Attr) -> json.Json {
   case attribute {
@@ -212,11 +259,15 @@ fn attr_to_json(attribute: Attr) -> json.Json {
         #("n", json.string(name)),
         #("v", json.string(value)),
       ])
-    EventAttr(event_name, handler_id) ->
+    EventAttr(event_name, handler_id, debounce_ms) ->
       json.object([
         #("t", json.string("event")),
         #("n", json.string(event_name)),
         #("h", json.string(handler_id)),
+        #("d", case debounce_ms {
+          Some(delay) -> json.int(delay)
+          None -> json.null()
+        }),
       ])
   }
 }
@@ -231,21 +282,43 @@ fn render_attributes(tree: StringTree, attributes: List(Attr)) -> StringTree {
         |> string_tree.append("=\"")
         |> string_tree.append(escape_attr(value))
         |> string_tree.append("\"")
-      EventAttr(event_name, handler_id) ->
-        acc
-        |> string_tree.append(" data-beacon-event-")
-        |> string_tree.append(event_name)
-        |> string_tree.append("=\"")
-        |> string_tree.append(handler_id)
-        |> string_tree.append("\"")
+      EventAttr(event_name, handler_id, debounce_ms) -> {
+        let with_event =
+          acc
+          |> string_tree.append(" data-beacon-event-")
+          |> string_tree.append(event_name)
+          |> string_tree.append("=\"")
+          |> string_tree.append(handler_id)
+          |> string_tree.append("\"")
+        case debounce_ms {
+          Some(delay) if event_name == "input" ->
+            with_event
+            |> string_tree.append(" data-beacon-input-debounce=\"")
+            |> string_tree.append(int.to_string(delay))
+            |> string_tree.append("\"")
+          _ -> with_event
+        }
+      }
     }
   })
 }
 
 fn is_void_element(tag: String) -> Bool {
   case tag {
-    "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input"
-    | "link" | "meta" | "param" | "source" | "track" | "wbr" -> True
+    "area"
+    | "base"
+    | "br"
+    | "col"
+    | "embed"
+    | "hr"
+    | "img"
+    | "input"
+    | "link"
+    | "meta"
+    | "param"
+    | "source"
+    | "track"
+    | "wbr" -> True
     _ -> False
   }
 }

@@ -3,7 +3,6 @@
 /// Components compose via message mapping.
 ///
 /// Reference: Lustre's element.map, Elm's Html.map, LiveView components.
-
 import beacon/effect.{type Effect}
 import beacon/element.{type Node}
 import beacon/log
@@ -65,6 +64,8 @@ pub fn map_node(node: Node(a), f: fn(a) -> b) -> Node(b) {
         attributes: attributes,
         children: map_children(children, f),
       )
+    element.KeyedNode(key, child) ->
+      element.KeyedNode(key: key, child: map_node(child, f))
     element.MemoNode(key, deps, child) ->
       element.MemoNode(key: key, deps: deps, child: map_node(child, f))
   }

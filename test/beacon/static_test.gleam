@@ -95,8 +95,7 @@ pub fn serve_traversal_blocked_test() {
 pub fn serve_304_not_modified_test() {
   let test_dir = "/tmp/beacon_static_304_" <> unique_id()
   let assert Ok(Nil) = simplifile.create_directory_all(test_dir)
-  let assert Ok(Nil) =
-    simplifile.write(test_dir <> "/file.css", "body{}")
+  let assert Ok(Nil) = simplifile.write(test_dir <> "/file.css", "body{}")
 
   let config =
     static.StaticConfig(directory: test_dir, prefix: "/static", max_age: 3600)

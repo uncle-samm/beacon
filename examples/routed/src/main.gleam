@@ -1,15 +1,161 @@
-/// Routed example — demonstrates file-based routing with beacon.router().
-///
-/// Route files:
-///   src/routes/index.gleam       → /          (counter with state)
-///   src/routes/about.gleam       → /about     (static page)
-///   src/routes/settings.gleam    → /settings  (form with input)
-///   src/routes/stats.gleam       → /stats     (state isolation demo)
-
 import beacon
+import beacon/effect
+import beacon/html
+import beacon/route
+import routed/pages/about
+import routed/pages/home
+import routed/pages/settings
+import routed/pages/stats
+
+pub type Model {
+  Model(path: String, home: home.Model, name: String, visits: Int)
+}
+
+pub type Server {
+  Server(home: home.Server)
+}
+
+pub type Msg {
+  RouteChanged(String)
+  Home(home.Msg)
+  SetName(String)
+}
+
+pub fn init() -> Model {
+  Model(path: "/", home: home.init(), name: "", visits: 0)
+}
+
+pub fn init_server() -> Server {
+  Server(home: home.init_server())
+}
+
+pub fn update(
+  model: Model,
+  server: Server,
+  msg: Msg,
+) -> #(Model, Server, effect.Effect(Msg)) {
+  case msg {
+    RouteChanged(path) -> #(
+      Model(..model, path: path, visits: model.visits + 1),
+      server,
+      effect.none(),
+    )
+    Home(child_msg) -> {
+      let #(model, server) =
+        route.update_server_model(
+          model,
+          server,
+          child_msg,
+          fn(model: Model) { model.home },
+          fn(model: Model, home: home.Model) { Model(..model, home: home) },
+          fn(server: Server) { server.home },
+          fn(_server: Server, home_server: home.Server) {
+            Server(home: home_server)
+          },
+          home.update_server,
+        )
+      #(model, server, effect.none())
+    }
+    SetName(name) -> #(Model(..model, name: name), server, effect.none())
+  }
+}
+
+pub fn update_client(model: Model, msg: Msg) -> Model {
+  case msg {
+    RouteChanged(path) -> Model(..model, path: path, visits: model.visits + 1)
+    Home(child_msg) ->
+      route.update_model(
+        model,
+        child_msg,
+        fn(model: Model) { model.home },
+        fn(model: Model, home: home.Model) { Model(..model, home: home) },
+        home.update,
+      )
+    SetName(name) -> Model(..model, name: name)
+  }
+}
+
+pub fn view(model: Model) -> beacon.Node(Msg) {
+  // Invariant: `model.path` is initialized to "/" and later updated only from
+  // `route_pages()` entries through RouteChanged.
+  let assert Ok(page) = route.dispatch_view(pages(), model, model.path)
+  html.main(
+    [
+      html.style(
+        "font-family:system-ui;max-width:780px;margin:32px auto;padding:0 16px;",
+      ),
+    ],
+    [
+      html.nav([html.style("display:flex;gap:12px;margin-bottom:24px;")], [
+        html.a([html.href("/")], [html.text("Home")]),
+        html.a([html.href("/about")], [html.text("About")]),
+        html.a([html.href("/settings")], [html.text("Settings")]),
+        html.a([html.href("/stats")], [html.text("Stats")]),
+      ]),
+      page,
+    ],
+  )
+}
+
+fn pages() -> List(route.Page(Model, Msg)) {
+  [
+    home.page(
+      fn(r: route.Route) { RouteChanged(r.path) },
+      fn(model: Model) { model.home },
+      Home,
+    ),
+    about.page(
+      fn(r: route.Route) { RouteChanged(r.path) },
+      fn(_model: Model, _route) { about.view() },
+    ),
+    settings.page(
+      fn(r: route.Route) { RouteChanged(r.path) },
+      fn(model: Model, _route) { settings.view(model.name, SetName) },
+    ),
+    stats.page(
+      fn(r: route.Route) { RouteChanged(r.path) },
+      fn(model: Model, _route) { stats.view(model.visits) },
+    ),
+  ]
+}
+
+fn server_pages() -> List(route.Page(#(Model, Server), Msg)) {
+  [
+    home.page(
+      fn(r: route.Route) { RouteChanged(r.path) },
+      fn(state: #(Model, Server)) {
+        let #(model, _server) = state
+        model.home
+      },
+      Home,
+    ),
+    about.page(
+      fn(r: route.Route) { RouteChanged(r.path) },
+      fn(state: #(Model, Server), _route) {
+        let #(_model, _server) = state
+        about.view()
+      },
+    ),
+    settings.page(
+      fn(r: route.Route) { RouteChanged(r.path) },
+      fn(state: #(Model, Server), _route) {
+        let #(model, _server) = state
+        settings.view(model.name, SetName)
+      },
+    ),
+    stats.page(
+      fn(r: route.Route) { RouteChanged(r.path) },
+      fn(state: #(Model, Server), _route) {
+        let #(model, _server) = state
+        stats.view(model.visits)
+      },
+    ),
+  ]
+}
 
 pub fn main() {
-  beacon.router()
-  |> beacon.router_title("Beacon Routed")
-  |> beacon.start_router(8080)
+  beacon.app_with_server(init, init_server, update, view)
+  |> beacon.title("Beacon Routed")
+  |> beacon.route_pages(server_pages())
+  |> beacon.start(8080)
 }

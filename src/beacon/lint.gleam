@@ -5,9 +5,9 @@
 /// 1. No `todo` or `panic` in non-test source code
 /// 2. No catch-all `_` patterns in case expressions that don't log
 /// 3. Public functions in key modules should have logging
+/// 4. No degraded-path phrases in shipped source
 ///
 /// Reference: CLAUDE.md engineering principles, TigerBeetle approach.
-
 import beacon/log
 import glance
 import gleam/int
@@ -47,7 +47,10 @@ pub fn lint_directory(dir: String) -> List(Violation) {
               }
             }
             Error(err) -> {
-              log.warning("beacon.lint", "Cannot stat " <> path <> ": " <> string.inspect(err))
+              log.warning(
+                "beacon.lint",
+                "Cannot stat " <> path <> ": " <> string.inspect(err),
+              )
               []
             }
           }
@@ -55,7 +58,10 @@ pub fn lint_directory(dir: String) -> List(Violation) {
       violations
     }
     Error(err) -> {
-      log.warning("beacon.lint", "Cannot read directory " <> dir <> ": " <> string.inspect(err))
+      log.warning(
+        "beacon.lint",
+        "Cannot read directory " <> dir <> ": " <> string.inspect(err),
+      )
       []
     }
   }
@@ -78,10 +84,18 @@ pub fn lint_source(file_path: String, source: String) -> List(Violation) {
     Ok(module) -> {
       let todo_violations = check_no_todo_panic(file_path, module)
       let logging_violations = check_public_functions_log(file_path, module)
-      list.append(todo_violations, logging_violations)
+      let degraded_path_violations =
+        check_no_degraded_path_phrases(file_path, source)
+      list.append(
+        list.append(todo_violations, logging_violations),
+        degraded_path_violations,
+      )
     }
     Error(err) -> {
-      log.warning("beacon.lint", "Cannot parse " <> file_path <> ": " <> string.inspect(err))
+      log.warning(
+        "beacon.lint",
+        "Cannot parse " <> file_path <> ": " <> string.inspect(err),
+      )
       []
     }
   }
@@ -133,6 +147,38 @@ fn check_public_functions_log(
   }
 }
 
+/// Check for source phrases that historically hid unsupported rendering paths.
+fn check_no_degraded_path_phrases(
+  file_path: String,
+  source: String,
+) -> List(Violation) {
+  let forbidden = [
+    "fall" <> "back",
+    "fall " <> "back",
+    "runtime" <> "-only",
+    "SSR morphing " <> "only",
+    "HTML morphing " <> "only",
+    "beacon." <> "router",
+    "start_" <> "router",
+    "router_" <> "routes_dir",
+    "file-" <> "based routing",
+  ]
+  list.filter_map(forbidden, fn(phrase) {
+    case string.contains(source, phrase) {
+      True ->
+        Ok(Violation(
+          file: file_path,
+          location: "text",
+          rule: "no-degraded-path-phrases",
+          message: "Found forbidden degraded-path phrase `"
+            <> phrase
+            <> "`. Beacon must fail loudly instead of degrading to another rendering path.",
+        ))
+      False -> Error(Nil)
+    }
+  })
+}
+
 /// Check if a function name suggests it's a pure utility (no side effects → no logging needed).
 fn is_pure_function_name(name: String) -> Bool {
   string.starts_with(name, "encode_")
@@ -144,8 +190,20 @@ fn is_pure_function_name(name: String) -> Bool {
   || string.starts_with(name, "has_")
   || string.starts_with(name, "get_")
   || string.starts_with(name, "patches_to_")
+  || string.starts_with(name, "default_")
   || name == "diff"
   || name == "main"
+  || name == "listen"
+  || name == "accept"
+  || name == "send_bytes"
+  || name == "close"
+  || name == "controlling_process"
+  || name == "set_active_once"
+  || name == "send_text_frame"
+  || name == "send_close_frame"
+  || name == "read_body"
+  || name == "classify_tcp_message"
+  || name == "connection_tracker_init"
 }
 
 /// Check if a function body contains any call to log.info/debug/warning/error.
@@ -186,8 +244,7 @@ fn expression_has_log(expr: glance.Expression) -> Bool {
       })
     }
 
-    glance.Block(statements: stmts, ..) ->
-      list.any(stmts, statement_has_log)
+    glance.Block(statements: stmts, ..) -> list.any(stmts, statement_has_log)
 
     glance.Case(clauses: clauses, ..) ->
       list.any(clauses, fn(c) { expression_has_log(c.body) })
@@ -313,8 +370,7 @@ fn find_todo_panic_in_expression(
         find_todo_panic_in_expression(file_path, func_name, e)
       })
 
-    glance.NegateInt(value: inner, ..)
-    | glance.NegateBool(value: inner, ..) ->
+    glance.NegateInt(value: inner, ..) | glance.NegateBool(value: inner, ..) ->
       find_todo_panic_in_expression(file_path, func_name, inner)
 
     glance.FieldAccess(container: inner, ..) ->
@@ -326,10 +382,7 @@ fn find_todo_panic_in_expression(
 
 /// Convert a Span to a human-readable location string.
 fn span_to_string(span: glance.Span) -> String {
-  "byte "
-  <> int.to_string(span.start)
-  <> "-"
-  <> int.to_string(span.end)
+  "byte " <> int.to_string(span.start) <> "-" <> int.to_string(span.end)
 }
 
 /// Format a lint violation as a human-readable string.

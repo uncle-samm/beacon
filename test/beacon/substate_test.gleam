@@ -71,16 +71,18 @@ pub fn shutdown_test() {
 
 pub fn concurrent_substates_test() {
   // Multiple substates can run concurrently
-  let assert Ok(s1) = substate.start(substate.SubstateConfig(
-    name: "counter1",
-    initial: CountState(count: 0),
-    update: count_update,
-  ))
-  let assert Ok(s2) = substate.start(substate.SubstateConfig(
-    name: "counter2",
-    initial: CountState(count: 100),
-    update: count_update,
-  ))
+  let assert Ok(s1) =
+    substate.start(substate.SubstateConfig(
+      name: "counter1",
+      initial: CountState(count: 0),
+      update: count_update,
+    ))
+  let assert Ok(s2) =
+    substate.start(substate.SubstateConfig(
+      name: "counter2",
+      initial: CountState(count: 100),
+      update: count_update,
+    ))
 
   substate.update(s1, Inc)
   substate.update(s2, Dec)

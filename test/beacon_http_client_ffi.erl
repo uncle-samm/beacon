@@ -1,5 +1,5 @@
 -module(beacon_http_client_ffi).
--export([start_httpc/0, http_get/1, ws_connect/2, ws_connect_no_retry/2, ws_send/2, ws_recv/2, ws_close/1]).
+-export([start_httpc/0, http_get/1, http_request/4, ws_connect/2, ws_connect_with_headers/3, ws_connect_no_retry/2, ws_send/2, ws_recv/2, ws_close/1]).
 
 %% Start the inets application (required for httpc).
 start_httpc() ->
@@ -16,6 +16,51 @@ http_get(Url) ->
             {ok, {Status, HeadersBin, Body}};
         {error, Reason} ->
             {error, list_to_binary(io_lib:format("~p", [Reason]))}
+    end.
+
+%% Make a raw HTTP request with explicit method, headers, and body.
+%% Returns {ok, {Status, Headers, Body}} or {error, Reason}.
+http_request(Method, Url, Headers, Body) ->
+    MethodBin = ensure_binary(Method),
+    UrlMap = uri_string:parse(binary_to_list(ensure_binary(Url))),
+    HostBin = list_to_binary(maps:get(host, UrlMap, "localhost")),
+    Port = maps:get(port, UrlMap, 80),
+    Path0 = list_to_binary(maps:get(path, UrlMap, "/")),
+    Query = maps:get(query, UrlMap, undefined),
+    Target = case Query of
+        undefined -> Path0;
+        "" -> Path0;
+        _ -> <<Path0/binary, "?", (list_to_binary(Query))/binary>>
+    end,
+    BodyBin = ensure_binary(Body),
+    HeaderLines = render_headers(Headers),
+    case gen_tcp:connect(binary_to_list(HostBin), Port, [binary, {active, false}, {packet, raw}], 5000) of
+        {ok, Socket} ->
+            Request = iolist_to_binary([
+                MethodBin, <<" ">>, Target, <<" HTTP/1.1\r\n">>,
+                <<"Host: ">>, HostBin, <<":">>, integer_to_binary(Port), <<"\r\n">>,
+                HeaderLines,
+                <<"Content-Length: ">>, integer_to_binary(byte_size(BodyBin)), <<"\r\n">>,
+                <<"Connection: close\r\n">>,
+                <<"\r\n">>,
+                BodyBin
+            ]),
+            case gen_tcp:send(Socket, Request) of
+                ok ->
+                    case recv_all(Socket, <<>>) of
+                        {ok, Data} ->
+                            gen_tcp:close(Socket),
+                            parse_http_response(Data);
+                        {error, Reason} ->
+                            gen_tcp:close(Socket),
+                            {error, list_to_binary(io_lib:format("recv failed: ~p", [Reason]))}
+                    end;
+                {error, Reason} ->
+                    gen_tcp:close(Socket),
+                    {error, list_to_binary(io_lib:format("send failed: ~p", [Reason]))}
+            end;
+        {error, Reason} ->
+            {error, list_to_binary(io_lib:format("connect failed: ~p", [Reason]))}
     end.
 
 %% Open a real WebSocket connection via gen_tcp + HTTP upgrade handshake.
@@ -53,6 +98,38 @@ ws_connect(Host, Port, Attempt) ->
             end;
         {error, Reason} ->
             maybe_retry(Host, Port, Attempt, list_to_binary(io_lib:format("connect: ~p", [Reason])))
+    end.
+
+ws_connect_with_headers(Host, Port, Headers) ->
+    HostStr = binary_to_list(Host),
+    case gen_tcp:connect(HostStr, Port, [binary, {active, false}, {packet, raw}], 5000) of
+        {ok, Socket} ->
+            Key = base64:encode(crypto:strong_rand_bytes(16)),
+            Req = iolist_to_binary([
+                <<"GET /ws HTTP/1.1\r\n">>,
+                <<"Host: ">>, Host, <<"\r\n">>,
+                render_headers(Headers),
+                <<"Upgrade: websocket\r\n">>,
+                <<"Connection: Upgrade\r\n">>,
+                <<"Sec-WebSocket-Key: ">>, Key, <<"\r\n">>,
+                <<"Sec-WebSocket-Version: 13\r\n">>,
+                <<"\r\n">>
+            ]),
+            ok = gen_tcp:send(Socket, Req),
+            case gen_tcp:recv(Socket, 0, 5000) of
+                {ok, Response} ->
+                    case binary:match(Response, <<"101">>) of
+                        {_, _} -> {ok, Socket};
+                        nomatch ->
+                            gen_tcp:close(Socket),
+                            {error, <<"upgrade_failed">>}
+                    end;
+                {error, Reason} ->
+                    gen_tcp:close(Socket),
+                    {error, list_to_binary(io_lib:format("recv: ~p", [Reason]))}
+            end;
+        {error, Reason} ->
+            {error, list_to_binary(io_lib:format("connect: ~p", [Reason]))}
     end.
 
 %% Retry up to 3 times with exponential backoff — mirrors real client reconnect behavior.
@@ -140,6 +217,49 @@ ws_recv(Socket, Timeout) ->
 ws_close(Socket) ->
     gen_tcp:close(Socket),
     nil.
+
+render_headers(Headers) ->
+    iolist_to_binary([
+        [ensure_binary(K), <<": ">>, ensure_binary(V), <<"\r\n">>]
+        || {K, V} <- Headers
+    ]).
+
+ensure_binary(Value) when is_binary(Value) -> Value;
+ensure_binary(Value) when is_list(Value) -> list_to_binary(Value);
+ensure_binary(Value) -> list_to_binary(io_lib:format("~p", [Value])).
+
+recv_all(Socket, Acc) ->
+    case gen_tcp:recv(Socket, 0, 5000) of
+        {ok, Data} -> recv_all(Socket, <<Acc/binary, Data/binary>>);
+        {error, closed} -> {ok, Acc};
+        {error, Reason} -> {error, Reason}
+    end.
+
+parse_http_response(Data) ->
+    case binary:split(Data, <<"\r\n\r\n">>) of
+        [HeaderBlock, Body] ->
+            Headers = binary:split(HeaderBlock, <<"\r\n">>, [global]),
+            Status = parse_status(Headers),
+            HeaderPairs = parse_headers(tl(Headers), []),
+            {ok, {Status, HeaderPairs, Body}};
+        _ ->
+            {error, <<"malformed HTTP response">>}
+    end.
+
+parse_status([StatusLine | _]) ->
+    case binary:split(StatusLine, <<" ">>, [global]) of
+        [_, StatusCode | _] -> binary_to_integer(StatusCode);
+        _ -> 0
+    end;
+parse_status([]) -> 0.
+
+parse_headers([], Acc) ->
+    lists:reverse(Acc);
+parse_headers([Line | Rest], Acc) ->
+    case binary:split(Line, <<": ">>) of
+        [Name, Value] -> parse_headers(Rest, [{Name, Value} | Acc]);
+        _ -> parse_headers(Rest, Acc)
+    end.
 
 %% XOR mask payload bytes with the 4-byte mask key.
 mask_payload(<<>>, _, _, _, _, _, Acc) -> Acc;

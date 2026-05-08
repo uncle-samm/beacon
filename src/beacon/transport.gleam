@@ -54,8 +54,8 @@ pub type ClientMessage {
     /// Reference: LiveView 1.1 event clocking.
     clock: Int,
     /// JSON-encoded patch operations from client-side model diff.
-    /// When present, server applies these ops instead of running update.
-    /// Empty string "" means no ops (server runs update as normal).
+    /// The server treats these as optimization hints only and never uses them
+    /// as authoritative state. Empty string "" means no client hint.
     /// Size is bounded by max_message_bytes in SecurityLimits (default 64KB).
     ops: String,
   )
@@ -127,8 +127,14 @@ pub type SecurityLimits {
     max_message_bytes: Int,
     /// Maximum events per second per connection. Default: 50.
     max_events_per_second: Int,
-    /// Maximum concurrent WebSocket connections globally. Default: 10000.
+    /// Maximum concurrent HTTP/WebSocket connections globally. Default: 10000.
     max_connections: Int,
+    /// Maximum number of HTTP headers accepted before upgrade. Default: 100.
+    max_http_headers: Int,
+    /// Maximum total HTTP header bytes accepted before upgrade. Default: 65536.
+    max_http_header_bytes: Int,
+    /// Timeout for request line/header reads before upgrade, in milliseconds. Default: 5000.
+    pre_upgrade_timeout_ms: Int,
   )
 }
 
@@ -138,6 +144,9 @@ pub fn default_security_limits() -> SecurityLimits {
     max_message_bytes: 65_536,
     max_events_per_second: 50,
     max_connections: 10_000,
+    max_http_headers: 100,
+    max_http_header_bytes: 65_536,
+    pre_upgrade_timeout_ms: 5000,
   )
 }
 
@@ -178,9 +187,9 @@ pub type TransportConfig {
     on_event: fn(ConnectionId, ClientMessage) -> Nil,
     /// Callback invoked when a WebSocket connection closes.
     on_disconnect: fn(ConnectionId) -> Nil,
-    /// Optional: pre-rendered HTML page for SSR.
+    /// Optional: pre-rendered page for SSR.
     /// If provided, HTTP requests get this instead of the default page.
-    page_html: Option(String),
+    page_html: Option(ssr.RenderedPage),
     /// Optional: middleware pipeline applied to all HTTP requests.
     /// Middleware runs before routing (SSR, static files, WebSocket upgrade).
     middlewares: List(middleware.Middleware),
@@ -199,10 +208,10 @@ pub type TransportConfig {
     /// If set, runs before upgrade — returns Ok to allow, Error to reject with 401.
     ws_auth: Option(fn(Request(Connection)) -> Result(Nil, String)),
     /// Optional: SSR factory for route-aware server-side rendering.
-    /// Given the HTTP request and path, returns the HTML string for that route.
+    /// Given the HTTP request and path, returns the rendered page for that route.
     /// The request is available for reading cookies, headers, etc.
     /// When set, HTTP requests use this instead of page_html.
-    ssr_factory: Option(fn(Request(Connection), String) -> String),
+    ssr_factory: Option(fn(Request(Connection), String) -> ssr.RenderedPage),
     /// Configurable security limits (message size, rate limiting, max connections).
     /// Defaults to `default_security_limits()`.
     security_limits: SecurityLimits,
@@ -692,28 +701,47 @@ fn ws_loop_inner(
   case msg {
     ReceivedTcpData(data) -> {
       let buffer = bit_array.append(state.buffer, data)
-      case process_frames(state, buffer) {
-        FrameContinue(new_state, new_buffer) -> {
-          server.set_active_once(new_state.socket)
-          ws_loop_inner(
-            ConnectionState(..new_state, buffer: new_buffer),
-            selector,
+      case
+        bit_array.byte_size(buffer) > state.security_limits.max_message_bytes
+      {
+        True -> {
+          log.warning(
+            "beacon.transport",
+            "Buffered WebSocket data exceeded limit for "
+              <> state.id
+              <> " ("
+              <> int.to_string(bit_array.byte_size(buffer))
+              <> " bytes)",
           )
+          send_ws_message(state, ServerError(reason: "Message too large"))
+          server.close(state.socket)
+          cleanup_connection(state)
         }
-        FrameClose(close_state) -> {
-          case server.send_close_frame(close_state.socket) {
-            Ok(Nil) -> Nil
-            Error(reason) ->
-              log.warning(
-                "beacon.transport",
-                "Failed to send close frame to "
-                  <> close_state.id
-                  <> ": "
-                  <> reason,
+        False -> {
+          case process_frames(state, buffer) {
+            FrameContinue(new_state, new_buffer) -> {
+              server.set_active_once(new_state.socket)
+              ws_loop_inner(
+                ConnectionState(..new_state, buffer: new_buffer),
+                selector,
               )
+            }
+            FrameClose(close_state) -> {
+              case server.send_close_frame(close_state.socket) {
+                Ok(Nil) -> Nil
+                Error(reason) ->
+                  log.warning(
+                    "beacon.transport",
+                    "Failed to send close frame to "
+                      <> close_state.id
+                      <> ": "
+                      <> reason,
+                  )
+              }
+              server.close(close_state.socket)
+              cleanup_connection(close_state)
+            }
           }
-          server.close(close_state.socket)
-          cleanup_connection(close_state)
         }
       }
     }
@@ -780,7 +808,7 @@ fn start_ws_connection(
   let subject = process.new_subject()
 
   // Use runtime_factory if available (per-connection runtimes)
-  // Otherwise fall back to shared callbacks
+  // Otherwise use shared callbacks
   let #(conn_on_event, conn_on_close) = case config.runtime_factory {
     Some(factory) -> {
       let #(evt_handler, close_handler) = factory(conn_id, subject, req)
@@ -791,13 +819,6 @@ fn start_ws_connection(
       #(config.on_event, config.on_disconnect)
     }
   }
-
-  // Track global connection count
-  let conn_count = connection_tracker_increment()
-  log.debug(
-    "beacon.transport",
-    "Global connections: " <> int.to_string(conn_count),
-  )
 
   let state =
     ConnectionState(
@@ -832,7 +853,6 @@ fn check_origin(req: Request(Connection)) -> Result(Nil, String) {
   case request.get_header(req, "origin") {
     Error(Nil) -> Ok(Nil)
     Ok(origin) -> {
-      let origin_host = extract_host_from_origin(origin)
       let request_host = case request.get_header(req, "host") {
         Ok(h) -> h
         Error(Nil) -> {
@@ -843,16 +863,26 @@ fn check_origin(req: Request(Connection)) -> Result(Nil, String) {
           ""
         }
       }
-      case origin_host == request_host {
-        True -> Ok(Nil)
-        False -> {
-          log.warning(
-            "beacon.transport",
-            "Origin mismatch: origin=" <> origin <> " host=" <> request_host,
-          )
-          Error("Origin mismatch")
-        }
-      }
+      origin_allowed_for_host(origin, request_host)
+    }
+  }
+}
+
+/// Validate that an Origin header value belongs to the request Host.
+/// Empty origins, empty hosts, protocol-relative URLs, and mismatches reject.
+pub fn origin_allowed_for_host(
+  origin: String,
+  request_host: String,
+) -> Result(Nil, String) {
+  let origin_host = extract_host_from_origin(origin)
+  case origin_host != "" && request_host != "" && origin_host == request_host {
+    True -> Ok(Nil)
+    False -> {
+      log.warning(
+        "beacon.transport",
+        "Origin mismatch: origin=" <> origin <> " host=" <> request_host,
+      )
+      Error("Origin mismatch")
     }
   }
 }
@@ -878,7 +908,7 @@ fn handle_ws_request(
 ) -> Nil {
   // Check global connection limit
   let current_count = connection_tracker_count()
-  case current_count >= config.security_limits.max_connections {
+  case current_count > config.security_limits.max_connections {
     True -> {
       log.warning(
         "beacon.transport",
@@ -888,13 +918,14 @@ fn handle_ws_request(
           <> int.to_string(config.security_limits.max_connections)
           <> ") — rejecting new connection",
       )
+      let _ = connection_tracker_decrement()
       transport_http.write_error(socket, 503, "Too many connections")
     }
     False -> {
       // Check origin — prevents cross-site WebSocket hijacking
       case check_origin(req) {
         Error(reason) -> {
-          transport_http.write_error(socket, 403, "Forbidden: " <> reason)
+          reject_ws_request(socket, 403, "Forbidden: " <> reason)
         }
         Ok(Nil) -> {
           // Check WebSocket auth if configured
@@ -905,11 +936,7 @@ fn handle_ws_request(
           case auth_ok {
             Error(reason) -> {
               log.warning("beacon.transport", "WS auth rejected: " <> reason)
-              transport_http.write_error(
-                socket,
-                401,
-                "Unauthorized: " <> reason,
-              )
+              reject_ws_request(socket, 401, "Unauthorized: " <> reason)
             }
             Ok(Nil) -> {
               // Perform the WebSocket upgrade handshake
@@ -923,6 +950,7 @@ fn handle_ws_request(
                     "beacon.transport",
                     "WebSocket upgrade failed: " <> reason,
                   )
+                  let _ = connection_tracker_decrement()
                   server.close(socket)
                 }
               }
@@ -932,6 +960,11 @@ fn handle_ws_request(
       }
     }
   }
+}
+
+fn reject_ws_request(socket: Socket, status: Int, body: String) -> Nil {
+  let _ = connection_tracker_decrement()
+  transport_http.write_error(socket, status, body)
 }
 
 // --- HTTP Handler ---
@@ -1025,44 +1058,80 @@ fn route_framework_request(
 /// Handle a single TCP connection: read HTTP request, route to WS or HTTP handler.
 /// Middleware runs on ALL requests, including /ws, before routing.
 fn per_connection_handler(socket: Socket, config: TransportConfig) -> Nil {
-  case transport_http.read_request(socket) {
-    Ok(req) -> {
-      case request.path_segments(req) {
-        ["ws"] -> {
-          // Run middleware on WS request first — middleware can reject (e.g. auth)
-          case check_middleware(req, config.middlewares) {
-            Ok(Nil) -> handle_ws_request(socket, req, config)
-            Error(resp) -> {
+  let conn_count = connection_tracker_increment()
+  case conn_count > config.security_limits.max_connections {
+    True -> {
+      log.warning(
+        "beacon.transport",
+        "Global connection limit reached ("
+          <> int.to_string(conn_count)
+          <> "/"
+          <> int.to_string(config.security_limits.max_connections)
+          <> ") — rejecting pre-upgrade connection",
+      )
+      let _ = connection_tracker_decrement()
+      transport_http.write_error(socket, 503, "Too many connections")
+    }
+    False -> {
+      log.debug(
+        "beacon.transport",
+        "Global connections after accept: " <> int.to_string(conn_count),
+      )
+      case
+        transport_http.read_request_with_limits(
+          socket,
+          config.security_limits.max_http_headers,
+          config.security_limits.max_http_header_bytes,
+          config.security_limits.pre_upgrade_timeout_ms,
+        )
+      {
+        Ok(req) -> {
+          case request.path_segments(req) {
+            ["ws"] -> {
+              case check_middleware(req, config.middlewares) {
+                Ok(Nil) -> handle_ws_request(socket, req, config)
+                Error(resp) -> {
+                  case transport_http.write_response(socket, resp) {
+                    Ok(Nil) -> Nil
+                    Error(reason) ->
+                      log.error(
+                        "beacon.transport",
+                        "Failed to write middleware rejection: " <> reason,
+                      )
+                  }
+                  server.close(socket)
+                  let _ = connection_tracker_decrement()
+                  Nil
+                }
+              }
+            }
+            _ -> {
+              let handler = create_handler(config)
+              let resp = handler(req)
               case transport_http.write_response(socket, resp) {
                 Ok(Nil) -> Nil
                 Error(reason) ->
                   log.error(
                     "beacon.transport",
-                    "Failed to write middleware rejection: " <> reason,
+                    "Failed to write response: " <> reason,
                   )
               }
               server.close(socket)
+              let _ = connection_tracker_decrement()
+              Nil
             }
           }
         }
-        _ -> {
-          let handler = create_handler(config)
-          let resp = handler(req)
-          case transport_http.write_response(socket, resp) {
-            Ok(Nil) -> Nil
-            Error(reason) ->
-              log.error(
-                "beacon.transport",
-                "Failed to write response: " <> reason,
-              )
-          }
+        Error(reason) -> {
+          log.error(
+            "beacon.transport",
+            "Failed to read HTTP request: " <> reason,
+          )
           server.close(socket)
+          let _ = connection_tracker_decrement()
+          Nil
         }
       }
-    }
-    Error(reason) -> {
-      log.error("beacon.transport", "Failed to read HTTP request: " <> reason)
-      server.close(socket)
     }
   }
 }
@@ -1096,21 +1165,25 @@ fn check_middleware(
 /// Serve the HTML page. Checks: ssr_factory (route-aware), page_html (static SSR),
 /// then default page. The request is passed to the SSR factory for cookie/header access.
 fn serve_page_or_ssr(
-  page_html: option.Option(String),
-  ssr_factory: option.Option(fn(Request(Connection), String) -> String),
+  page_html: option.Option(ssr.RenderedPage),
+  ssr_factory: option.Option(
+    fn(Request(Connection), String) -> ssr.RenderedPage,
+  ),
   req: Request(Connection),
 ) -> response.Response(ResponseBody) {
-  let html = case ssr_factory {
-    option.Some(factory) -> factory(req, req.path)
+  case ssr_factory {
+    option.Some(factory) -> ssr.to_response(factory(req, req.path))
     option.None ->
       case page_html {
-        option.Some(rendered) -> rendered
-        option.None -> default_page_html()
+        option.Some(rendered) -> ssr.to_response(rendered)
+        option.None ->
+          response.new(200)
+          |> response.set_header("content-type", "text/html; charset=utf-8")
+          |> response.set_body(
+            Bytes(bytes_tree.from_string(default_page_html())),
+          )
       }
   }
-  response.new(200)
-  |> response.set_header("content-type", "text/html; charset=utf-8")
-  |> response.set_body(Bytes(bytes_tree.from_string(html)))
 }
 
 /// Default page when no SSR is configured.
@@ -1147,8 +1220,7 @@ fn serve_client_js() -> response.Response(ResponseBody) {
   let assets_dir = ssr.client_assets_dir()
   let manifest_path = assets_dir <> "/beacon_client.manifest"
   case simplifile.read(manifest_path) {
-    Ok(name) ->
-      serve_js_file(assets_dir <> "/" <> string.trim(name))
+    Ok(name) -> serve_js_file(assets_dir <> "/" <> string.trim(name))
     Error(err) -> {
       log.error(
         "beacon.transport",

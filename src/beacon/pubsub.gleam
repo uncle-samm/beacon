@@ -3,7 +3,6 @@
 /// distributed BEAM nodes automatically.
 ///
 /// Reference: Phoenix PubSub, Erlang pg module.
-
 import beacon/log
 import gleam/erlang/process.{type Pid}
 import gleam/list
@@ -38,9 +37,7 @@ pub fn broadcast(topic: Topic, message: msg) -> Nil {
       <> int_to_string(list.length(members))
       <> " subscribers)",
   )
-  list.each(members, fn(pid) {
-    send_tagged(pid, topic, message)
-  })
+  list.each(members, fn(pid) { send_tagged(pid, topic, message) })
 }
 
 /// Get the number of subscribers for a topic.

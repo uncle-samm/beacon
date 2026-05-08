@@ -60,12 +60,13 @@ pub fn save_file_test() {
 }
 
 pub fn sanitize_traversal_test() {
-  let file = upload.UploadedFile(
-    filename: "../../../etc/passwd",
-    content_type: "text/plain",
-    data: <<>>,
-    size: 0,
-  )
+  let file =
+    upload.UploadedFile(
+      filename: "../../../etc/passwd",
+      content_type: "text/plain",
+      data: <<>>,
+      size: 0,
+    )
   let dir = "/tmp/beacon_upload_test"
   let _ = make_dir(dir)
   let assert Ok(path) = upload.save(file, dir)
@@ -103,8 +104,13 @@ pub fn parse_multipart_no_boundary_test() {
 pub fn parse_multipart_binary_safe_test() {
   // Build a valid multipart body with binary content (PNG magic bytes)
   let boundary = "----TestBoundary123"
-  let png_bytes = <<137, 80, 78, 71, 13, 10, 26, 10>>  // PNG header
-  let body = <<"------TestBoundary123\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.png\"\r\nContent-Type: image/png\r\n\r\n":utf8, png_bytes:bits, "\r\n------TestBoundary123--\r\n":utf8>>
+  let png_bytes = <<137, 80, 78, 71, 13, 10, 26, 10>>
+  // PNG header
+  let body = <<
+    "------TestBoundary123\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.png\"\r\nContent-Type: image/png\r\n\r\n":utf8,
+    png_bytes:bits,
+    "\r\n------TestBoundary123--\r\n":utf8,
+  >>
   let content_type = "multipart/form-data; boundary=" <> boundary
   let assert Ok(files) = upload.parse_multipart(body, content_type)
   let assert True = length(files) > 0

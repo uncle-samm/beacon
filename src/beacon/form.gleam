@@ -2,7 +2,6 @@
 /// Provides form field binding, validation, and CSRF protection.
 ///
 /// Reference: LiveView form handling, Livewire form validation.
-
 import beacon/element.{type Attr, type Node}
 import gleam/crypto
 import gleam/int
@@ -35,11 +34,7 @@ pub type Form {
 
 /// Create a new empty form with a CSRF token.
 pub fn new(secret_key: String) -> Form {
-  Form(
-    fields: [],
-    form_errors: [],
-    csrf_token: generate_csrf_token(secret_key),
-  )
+  Form(fields: [], form_errors: [], csrf_token: generate_csrf_token(secret_key))
 }
 
 /// Add a field to the form.
@@ -92,8 +87,7 @@ pub fn add_form_error(form: Form, error: String) -> Form {
 
 /// Clear all errors from the form.
 pub fn clear_errors(form: Form) -> Form {
-  let new_fields =
-    list.map(form.fields, fn(f) { Field(..f, errors: []) })
+  let new_fields = list.map(form.fields, fn(f) { Field(..f, errors: []) })
   Form(..form, fields: new_fields, form_errors: [])
 }
 
@@ -137,11 +131,7 @@ pub fn validate_required(form: Form, field_name: String) -> Form {
 }
 
 /// Validate that a field's value has a minimum length.
-pub fn validate_min_length(
-  form: Form,
-  field_name: String,
-  min: Int,
-) -> Form {
+pub fn validate_min_length(form: Form, field_name: String, min: Int) -> Form {
   case get_field(form, field_name) {
     Ok(field) -> {
       case string.length(field.value) < min {
@@ -162,7 +152,9 @@ pub fn validate_min_length(
 pub fn validate_email(form: Form, field_name: String) -> Form {
   case get_field(form, field_name) {
     Ok(field) -> {
-      case string.contains(field.value, "@") && string.contains(field.value, ".") {
+      case
+        string.contains(field.value, "@") && string.contains(field.value, ".")
+      {
         True -> form
         False -> add_error(form, field_name, "Invalid email address")
       }
@@ -172,11 +164,7 @@ pub fn validate_email(form: Form, field_name: String) -> Form {
 }
 
 /// Validate that a field's value has a maximum length.
-pub fn validate_max_length(
-  form: Form,
-  field_name: String,
-  max: Int,
-) -> Form {
+pub fn validate_max_length(form: Form, field_name: String, max: Int) -> Form {
   case get_field(form, field_name) {
     Ok(field) -> {
       case string.length(field.value) > max {
@@ -209,21 +197,12 @@ pub fn validate_matches(
 }
 
 /// Validate a form by running multiple validation functions.
-pub fn validate(
-  form: Form,
-  validators: List(fn(Form) -> Form),
-) -> Form {
-  list.fold(validators, clear_errors(form), fn(f, validator) {
-    validator(f)
-  })
+pub fn validate(form: Form, validators: List(fn(Form) -> Form)) -> Form {
+  list.fold(validators, clear_errors(form), fn(f, validator) { validator(f) })
 }
 
 /// Render a password input field.
-pub fn password_input(
-  form: Form,
-  name: String,
-  attrs: List(Attr),
-) -> Node(msg) {
+pub fn password_input(form: Form, name: String, attrs: List(Attr)) -> Node(msg) {
   let value = get_value(form, name)
   let base_attrs = [
     element.attr("type", "password"),
@@ -236,11 +215,7 @@ pub fn password_input(
 }
 
 /// Render a textarea field.
-pub fn textarea(
-  form: Form,
-  name: String,
-  attrs: List(Attr),
-) -> Node(msg) {
+pub fn textarea(form: Form, name: String, attrs: List(Attr)) -> Node(msg) {
   let value = get_value(form, name)
   let base_attrs = [
     element.attr("name", name),
@@ -267,7 +242,10 @@ pub fn select(
     list.map(options, fn(opt) {
       let #(value, label) = opt
       let selected_attrs = case value == current {
-        True -> [element.attr("value", value), element.attr("selected", "selected")]
+        True -> [
+          element.attr("value", value),
+          element.attr("selected", "selected"),
+        ]
         False -> [element.attr("value", value)]
       }
       element.el("option", selected_attrs, [element.text(label)])
@@ -278,8 +256,7 @@ pub fn select(
 /// Generate a CSRF token.
 fn generate_csrf_token(secret_key: String) -> String {
   let data = int.to_string(erlang_unique_integer())
-  let hash =
-    crypto.hash(crypto.Sha256, <<data:utf8, secret_key:utf8>>)
+  let hash = crypto.hash(crypto.Sha256, <<data:utf8, secret_key:utf8>>)
   encode_hex(hash)
 }
 
@@ -346,19 +323,19 @@ fn csrf_ets_delete(store: CsrfStore, key: String) -> Nil
 
 /// Render a hidden CSRF input field.
 pub fn csrf_field(form: Form) -> Node(msg) {
-  element.el("input", [
-    element.attr("type", "hidden"),
-    element.attr("name", "_csrf_token"),
-    element.attr("value", form.csrf_token),
-  ], [])
+  element.el(
+    "input",
+    [
+      element.attr("type", "hidden"),
+      element.attr("name", "_csrf_token"),
+      element.attr("value", form.csrf_token),
+    ],
+    [],
+  )
 }
 
 /// Render a text input field with error display.
-pub fn text_input(
-  form: Form,
-  name: String,
-  attrs: List(Attr),
-) -> Node(msg) {
+pub fn text_input(form: Form, name: String, attrs: List(Attr)) -> Node(msg) {
   let value = get_value(form, name)
   let base_attrs = [
     element.attr("type", "text"),
@@ -405,10 +382,7 @@ fn do_encode_hex(bytes: BitArray, acc: String) -> String {
     <<byte:int-size(8), rest:bits>> -> {
       let high = byte / 16
       let low = byte % 16
-      do_encode_hex(
-        rest,
-        acc <> hex_char(high) <> hex_char(low),
-      )
+      do_encode_hex(rest, acc <> hex_char(high) <> hex_char(low))
     }
     _ -> acc
   }

@@ -53,6 +53,20 @@ export const ClientState$ClientState$msg_affects_model = (value) =>
   value.msg_affects_model;
 export const ClientState$ClientState$7 = (value) => value.msg_affects_model;
 
+/**
+ * Decide whether an event should be forwarded to the server.
+ * Keydown events are always forwarded so server-side apps can react to them
+ * even when their local update is model-neutral.
+ */
+export function should_send_to_server(event_name, msg_affects_model, msg) {
+  let $ = msg_affects_model(msg);
+  if ($) {
+    return $;
+  } else {
+    return event_name === "keydown";
+  }
+}
+
 function morph_app_root(html) {
   let $ = query_selector("#beacon-app");
   if ($ instanceof Ok) {
@@ -118,8 +132,8 @@ export function init(model, local, update, view, msg_affects_model) {
   );
 }
 
-function send_model_update(handler_id, data, clock) {
-  let msg = ((((("{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"" + handler_id) + "\",\"data\":") + data) + ",\"target_path\":\"0\",\"clock\":") + $int.to_string(
+function send_model_update(event_name, handler_id, data, clock) {
+  let msg = ((((((("{\"type\":\"event\",\"name\":\"" + event_name) + "\",\"handler_id\":\"") + handler_id) + "\",\"data\":") + data) + ",\"target_path\":\"0\",\"clock\":") + $int.to_string(
     clock,
   )) + "}";
   return ws_send(msg);
@@ -128,7 +142,7 @@ function send_model_update(handler_id, data, clock) {
 /**
  * Handle an event from the DOM.
  */
-export function handle_event(state, handler_id, event_data) {
+export function handle_event(state, event_name, handler_id, event_data) {
   let $ = $handler.resolve(state.handler_registry, handler_id, event_data);
   if ($ instanceof Ok) {
     let msg = $[0];
@@ -144,9 +158,9 @@ export function handle_event(state, handler_id, event_data) {
     let $2 = attach_events();
     
     let new_clock = state.event_clock + 1;
-    let $3 = state.msg_affects_model(msg);
+    let $3 = should_send_to_server(event_name, state.msg_affects_model, msg);
     if ($3) {
-      send_model_update(handler_id, event_data, new_clock);
+      send_model_update(event_name, handler_id, event_data, new_clock);
       log(("Event " + handler_id) + " → server (model changed)")
     } else {
       log(("Event " + handler_id) + " → local only")

@@ -1,6 +1,6 @@
 /// Tests for the API route handler feature.
 /// Verifies that api_handler runs before SSR/static and can handle or pass through requests.
-
+import beacon/api
 import beacon/application
 import beacon/effect
 import beacon/element
@@ -13,7 +13,9 @@ import gleam/http
 import gleam/http/request.{type Request}
 import gleam/http/response
 import gleam/int
+import gleam/list
 import gleam/option
+import gleam/string
 import gleeunit/should
 
 type TestModel {
@@ -24,16 +26,10 @@ type TestMsg {
   TestInc
 }
 
-fn unique_port_offset() -> Int {
-  let t = erlang_unique_integer()
-  case t > 0 {
-    True -> t % 100
-    False -> { 0 - t } % 100
-  }
+fn free_test_port() -> Int {
+  let assert Ok(port) = do_free_port()
+  port
 }
-
-@external(erlang, "erlang", "unique_integer")
-fn erlang_unique_integer() -> Int
 
 fn test_app_config_with_api(
   port: Int,
@@ -51,9 +47,7 @@ fn test_app_config_with_api(
         element.text("count:" <> int.to_string(model.count)),
       ])
     },
-    decode_event: option.Some(fn(_name, _hid, _data, _path) {
-      Ok(TestInc)
-    }),
+    decode_event: option.Some(fn(_name, _hid, _data, _path) { Ok(TestInc) }),
     secret_key: "api-test-secret-key-long-enough-for-hmac!!",
     title: "API Test",
     serialize_model: option.None,
@@ -62,19 +56,22 @@ fn test_app_config_with_api(
     static_dir: option.None,
     route_patterns: [],
     on_route_change: option.None,
+    on_route_leave: option.None,
     dynamic_subscriptions: option.None,
     on_notify: option.None,
+    on_notification: option.None,
     security_limits: transport.default_security_limits(),
     head_html: option.None,
     api_handler: option.Some(api_handler),
     ws_auth: option.None,
     init_from_request: option.None,
+    dev_mode: False,
   )
 }
 
 /// API handler returns a custom response for /api/hello.
 pub fn api_route_handler_serves_response_test() {
-  let port = 9700 + unique_port_offset()
+  let port = free_test_port()
   let api = fn(req: Request(Connection)) {
     case request.path_segments(req) {
       ["api", "hello"] ->
@@ -100,7 +97,7 @@ pub fn api_route_handler_serves_response_test() {
 
 /// API handler returns None for unknown paths — falls through to SSR.
 pub fn api_route_handler_falls_through_test() {
-  let port = 9710 + unique_port_offset()
+  let port = free_test_port()
   let api = fn(req: Request(Connection)) {
     case request.path_segments(req) {
       ["api", "hello"] ->
@@ -119,12 +116,15 @@ pub fn api_route_handler_falls_through_test() {
   let resp = http_get(port, "/")
   should.equal(resp.status, 200)
   // SSR page should contain the app content or at least HTML
-  should.be_true(contains_string(resp.body, "<!DOCTYPE html>") || contains_string(resp.body, "<div"))
+  should.be_true(
+    contains_string(resp.body, "<!DOCTYPE html>")
+    || contains_string(resp.body, "<div"),
+  )
 }
 
 /// API handler can serve POST requests (method is preserved).
 pub fn api_route_handler_post_method_test() {
-  let port = 9720 + unique_port_offset()
+  let port = free_test_port()
   let api = fn(req: Request(Connection)) {
     case req.method, request.path_segments(req) {
       http.Post, ["api", "data"] ->
@@ -155,9 +155,83 @@ pub fn api_route_handler_post_method_test() {
   should.be_true(contains_string(resp.body, "get"))
 }
 
+pub fn typed_api_routes_match_get_and_set_json_header_test() {
+  let port = free_test_port()
+  let api_handler =
+    api.routes([
+      api.get("/api/status", fn(_req) { api.json(200, "{\"status\":\"ok\"}") }),
+    ])
+  let config = test_app_config_with_api(port, api_handler)
+  let assert Ok(_app) = application.start(config)
+  process.sleep(100)
+
+  let assert Ok(#(status, headers, body)) =
+    http_request(
+      "GET",
+      "http://localhost:" <> int.to_string(port) <> "/api/status",
+      [],
+      "",
+    )
+  should.equal(status, 200)
+  should.equal(body, "{\"status\":\"ok\"}")
+  should.be_true(has_header(headers, "content-type", "application/json"))
+}
+
+pub fn typed_api_routes_match_in_order_test() {
+  let port = free_test_port()
+  let api_handler =
+    api.routes([
+      api.get("/api/items", fn(_req) { api.text(200, "first") }),
+      api.get("/api/items", fn(_req) { api.text(200, "second") }),
+    ])
+  let config = test_app_config_with_api(port, api_handler)
+  let assert Ok(_app) = application.start(config)
+  process.sleep(100)
+
+  let resp = http_get(port, "/api/items")
+  should.equal(resp.status, 200)
+  should.equal(resp.body, "first")
+}
+
+pub fn typed_api_routes_fall_through_on_method_mismatch_test() {
+  let port = free_test_port()
+  let api_handler =
+    api.routes([
+      api.post("/api/items", fn(_req) { api.json(201, "{\"created\":true}") }),
+    ])
+  let config = test_app_config_with_api(port, api_handler)
+  let assert Ok(_app) = application.start(config)
+  process.sleep(100)
+
+  let resp = http_get(port, "/api/items")
+  should.equal(resp.status, 200)
+  should.be_true(contains_string(resp.body, "<!DOCTYPE html>"))
+}
+
+pub fn typed_api_routes_handle_post_test() {
+  let port = free_test_port()
+  let api_handler =
+    api.routes([
+      api.post("/api/items", fn(_req) { api.json(201, "{\"created\":true}") }),
+    ])
+  let config = test_app_config_with_api(port, api_handler)
+  let assert Ok(_app) = application.start(config)
+  process.sleep(100)
+
+  let assert Ok(#(status, _headers, body)) =
+    http_request(
+      "POST",
+      "http://localhost:" <> int.to_string(port) <> "/api/items",
+      [],
+      "",
+    )
+  should.equal(status, 201)
+  should.equal(body, "{\"created\":true}")
+}
+
 /// No API handler configured — all requests go to SSR.
 pub fn no_api_handler_falls_through_test() {
-  let port = 9730 + unique_port_offset()
+  let port = free_test_port()
   let config =
     application.AppConfig(
       port: port,
@@ -177,13 +251,16 @@ pub fn no_api_handler_falls_through_test() {
       static_dir: option.None,
       route_patterns: [],
       on_route_change: option.None,
+      on_route_leave: option.None,
       dynamic_subscriptions: option.None,
       on_notify: option.None,
+      on_notification: option.None,
       security_limits: transport.default_security_limits(),
       head_html: option.None,
       api_handler: option.None,
       ws_auth: option.None,
       init_from_request: option.None,
+      dev_mode: False,
     )
   let assert Ok(_app) = application.start(config)
   process.sleep(100)
@@ -191,12 +268,13 @@ pub fn no_api_handler_falls_through_test() {
   let resp = http_get(port, "/")
   should.equal(resp.status, 200)
   // Should get SSR HTML
-  should.be_true(contains_string(resp.body, "hello") || contains_string(resp.body, "<!DOCTYPE"))
+  should.be_true(
+    contains_string(resp.body, "hello")
+    || contains_string(resp.body, "<!DOCTYPE"),
+  )
 }
 
 // --- HTTP client helper (raw TCP) ---
-
-import gleam/string
 
 type SimpleResponse {
   SimpleResponse(status: Int, body: String)
@@ -215,6 +293,28 @@ fn http_get(port: Int, path: String) -> SimpleResponse {
 @external(erlang, "beacon_api_test_ffi", "http_get")
 fn do_http_get(port: Int, path: String) -> Result(SimpleResponse, String)
 
+@external(erlang, "beacon_api_test_ffi", "free_port")
+fn do_free_port() -> Result(Int, String)
+
+@external(erlang, "beacon_http_client_ffi", "http_request")
+fn http_request(
+  method: String,
+  url: String,
+  headers: List(#(String, String)),
+  body: String,
+) -> Result(#(Int, List(#(String, String)), String), String)
+
 fn contains_string(haystack: String, needle: String) -> Bool {
   string.contains(haystack, needle)
+}
+
+fn has_header(
+  headers: List(#(String, String)),
+  expected_name: String,
+  expected_value: String,
+) -> Bool {
+  list.any(headers, fn(header) {
+    let #(name, value) = header
+    string.lowercase(name) == expected_name && value == expected_value
+  })
 }

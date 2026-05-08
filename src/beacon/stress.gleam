@@ -2,7 +2,6 @@
 /// and measure the framework's performance under load.
 ///
 /// Usage: `gleam run -m beacon/stress` (with a server running)
-
 import beacon/debug
 import beacon/log
 import gleam/erlang/process
@@ -62,7 +61,12 @@ pub fn run(config: StressConfig) -> StressResult {
   let result_subject = process.new_subject()
 
   // Spawn connection processes
-  spawn_connections(config.connections, config.hold_duration_ms, result_subject, 1)
+  spawn_connections(
+    config.connections,
+    config.hold_duration_ms,
+    result_subject,
+    1,
+  )
 
   // Wait a moment for all processes to be alive
   process.sleep(100)
@@ -73,7 +77,12 @@ pub fn run(config: StressConfig) -> StressResult {
     process.new_selector()
     |> process.select(result_subject)
   let succeeded =
-    count_results(selector, config.connections, 0, config.hold_duration_ms + 5000)
+    count_results(
+      selector,
+      config.connections,
+      0,
+      config.hold_duration_ms + 5000,
+    )
 
   process.sleep(200)
   let stats_after = debug.stats()
@@ -104,8 +113,8 @@ pub fn run(config: StressConfig) -> StressResult {
       <> int.to_string(stats_after.process_count)
       <> " | Memory delta: "
       <> int.to_string(
-        { stats_after.memory_bytes - stats_before.memory_bytes } / 1024,
-      )
+      { stats_after.memory_bytes - stats_before.memory_bytes } / 1024,
+    )
       <> "KB",
   )
 

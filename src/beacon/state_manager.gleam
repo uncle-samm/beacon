@@ -2,7 +2,6 @@
 /// Provides an abstraction over different storage backends.
 ///
 /// Reference: Reflex.dev state manager (in-memory dict → Redis).
-
 import beacon/log
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
@@ -101,10 +100,7 @@ pub fn delete(
 }
 
 /// Get the number of stored sessions.
-pub fn count(
-  manager: Subject(StateManagerMessage(state)),
-  timeout: Int,
-) -> Int {
+pub fn count(manager: Subject(StateManagerMessage(state)), timeout: Int) -> Int {
   actor.call(manager, timeout, Count)
 }
 
@@ -137,10 +133,7 @@ pub fn ets_put(manager: EtsManager, session_id: String, state: state) -> Nil {
 }
 
 /// Retrieve state from the ETS table.
-pub fn ets_get(
-  manager: EtsManager,
-  session_id: String,
-) -> Result(state, Nil) {
+pub fn ets_get(manager: EtsManager, session_id: String) -> Result(state, Nil) {
   ets_ffi_get(manager.table, session_id)
 }
 
@@ -171,10 +164,7 @@ fn ets_ffi_count(table: EtsTable) -> Int
 
 // --- Internal ---
 
-fn result_map(
-  result: Result(a, e),
-  f: fn(a) -> b,
-) -> Result(b, e) {
+fn result_map(result: Result(a, e), f: fn(a) -> b) -> Result(b, e) {
   case result {
     Ok(a) -> Ok(f(a))
     Error(e) -> Error(e)

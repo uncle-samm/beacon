@@ -138,21 +138,33 @@ pub fn child_removed_test() {
 pub fn multiple_children_added_test() {
   let old = element.el("div", [], [element.text("a")])
   let new =
-    element.el("div", [], [element.text("a"), element.text("b"), element.text("c")])
+    element.el("div", [], [
+      element.text("a"),
+      element.text("b"),
+      element.text("c"),
+    ])
   let patches = diff.diff(old, new)
   // First child "a" is unchanged, "b" and "c" are inserted
-  let assert [diff.InsertChild(path: [], index: 1, ..), diff.InsertChild(path: [], index: 2, ..)] =
-    patches
+  let assert [
+    diff.InsertChild(path: [], index: 1, ..),
+    diff.InsertChild(path: [], index: 2, ..),
+  ] = patches
 }
 
 pub fn multiple_children_removed_test() {
   let old =
-    element.el("div", [], [element.text("a"), element.text("b"), element.text("c")])
+    element.el("div", [], [
+      element.text("a"),
+      element.text("b"),
+      element.text("c"),
+    ])
   let new = element.el("div", [], [element.text("a")])
   let patches = diff.diff(old, new)
   // Children at index 1 and 2 removed
-  let assert [diff.RemoveChild(path: [], index: 1), diff.RemoveChild(path: [], index: 1)] =
-    patches
+  let assert [
+    diff.RemoveChild(path: [], index: 1),
+    diff.RemoveChild(path: [], index: 1),
+  ] = patches
 }
 
 // --- JSON serialization ---
@@ -182,17 +194,9 @@ pub fn empty_tree_diff_test() {
 pub fn same_attributes_different_order_test() {
   // Both have same attributes — should produce no attribute patches
   let old =
-    element.el(
-      "div",
-      [element.attr("id", "x"), element.attr("class", "y")],
-      [],
-    )
+    element.el("div", [element.attr("id", "x"), element.attr("class", "y")], [])
   let new =
-    element.el(
-      "div",
-      [element.attr("id", "x"), element.attr("class", "y")],
-      [],
-    )
+    element.el("div", [element.attr("id", "x"), element.attr("class", "y")], [])
   let patches = diff.diff(old, new)
   let assert [] = patches
 }

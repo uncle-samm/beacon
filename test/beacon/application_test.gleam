@@ -41,72 +41,55 @@ fn test_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
     static_dir: option.None,
     route_patterns: [],
     on_route_change: option.None,
-    dynamic_subscriptions: option.None, on_notify: option.None,
+    on_route_leave: option.None,
+    dynamic_subscriptions: option.None,
+    on_notify: option.None,
+    on_notification: option.None,
     security_limits: transport.default_security_limits(),
     head_html: option.None,
     api_handler: option.None,
     ws_auth: option.None,
     init_from_request: option.None,
+    dev_mode: False,
   )
 }
 
 import gleam/option
 
 pub fn application_starts_test() {
-  // Use a unique port to avoid conflicts
-  let port = 9100 + unique_port_offset()
-  let assert Ok(_app) = application.start(test_config(port))
+  let assert Ok(_app) = application.start(test_config(0))
   process.sleep(50)
 }
 
 pub fn application_supervised_starts_test() {
-  let port = 9200 + unique_port_offset()
-  let assert Ok(_app) = application.start_supervised(test_config(port))
+  let assert Ok(_app) = application.start_supervised(test_config(0))
   process.sleep(50)
 }
 
 pub fn application_returns_supervisor_pid_test() {
-  let port = 9300 + unique_port_offset()
-  let assert Ok(app) = application.start(test_config(port))
+  let assert Ok(app) = application.start(test_config(0))
   // PID should be valid
   let assert True = is_process_alive(app.supervisor_pid)
 }
 
-fn unique_port_offset() -> Int {
-  abs(erlang_unique_pos()) % 500
-}
-
-@external(erlang, "erlang", "abs")
-fn abs(n: Int) -> Int
-
 pub fn application_with_middleware_starts_test() {
-  let port = 9400 + unique_port_offset()
   let config =
-    application.AppConfig(
-      ..test_config(port),
-      middlewares: [beacon_middleware.secure_headers()],
-    )
+    application.AppConfig(..test_config(0), middlewares: [
+      beacon_middleware.secure_headers(),
+    ])
   let assert Ok(_app) = application.start(config)
   process.sleep(50)
 }
 
 pub fn application_with_static_dir_starts_test() {
-  let port = 9500 + unique_port_offset()
   let config =
     application.AppConfig(
-      ..test_config(port),
+      ..test_config(0),
       static_dir: option.Some("priv/static"),
     )
   let assert Ok(_app) = application.start(config)
   process.sleep(50)
 }
-
-fn erlang_unique_pos() -> Int {
-  do_unique_pos()
-}
-
-@external(erlang, "erlang", "unique_integer")
-fn do_unique_pos() -> Int
 
 @external(erlang, "erlang", "is_process_alive")
 fn is_process_alive(pid: process.Pid) -> Bool

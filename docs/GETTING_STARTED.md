@@ -81,11 +81,30 @@ Beacon uses the MVU architecture:
 - **View** — renders the Model to HTML
 - **Update** — handles messages and returns new Model
 
-### Three State Layers
+### One App State Shape
 
-1. **Shared state** (via `store`) — all users see the same data
-2. **Server state** (Model) — per-tab, server-rendered
-3. **Local state** (Local) — per-tab, client-only, zero server traffic
+Beacon apps are one MVU app with up to three named state areas:
+
+1. **Model** — server-authoritative UI state. It is rendered on the server for
+   first paint, then synchronized as JSON patches/syncs.
+2. **Local** — optional per-tab client state. Use `pub type Local` for dropdowns,
+   drafts, focus state, and other interactions that should not touch the server.
+3. **Server** — optional private server state. Use `pub type Server` for session
+   IDs, database handles, audit keys, and anything that must not enter the
+   client bundle.
+
+Shared state via `store` is separate from per-session app state and is used when
+multiple users should see the same data.
+
+Beacon does one full server render for first paint. After the WebSocket joins,
+normal updates are model sync/patch messages and the browser renders from the
+generated client code. If the generated client renderer cannot be built, startup
+fails instead of serving a degraded app.
+
+The current public API still uses typed entrypoints such as `app`,
+`app_with_local`, and `app_with_server` because Gleam does not support overloaded
+functions. Treat them as type-specific doors into the same runtime model, not as
+separate application modes.
 
 ### Local State (Zero Traffic)
 
@@ -100,13 +119,57 @@ pub type Msg {
 beacon.app_with_local(init, init_local, update, view)
 ```
 
+`init_local(model)` receives the initial `Model`, so the first client-only values
+can be derived from server-known state without exposing `Server`.
+
 ### Routing
 
 ```gleam
+fn pages() -> List(route.Page(Model, Msg)) {
+  [
+    route.page("/", RouteChanged, fn(_model, _route) { home_view() }),
+    route.page("/about", RouteChanged, fn(_model, _route) { about_view() }),
+    route.page("/blog/:slug", RouteChanged, fn(model, route) {
+      blog_view(model, route)
+    }),
+  ]
+}
+
+pub fn view(model: Model) -> beacon.Node(Msg) {
+  let assert Ok(page) = route.dispatch_view(pages(), model, model.path)
+  page
+}
+
 beacon.app(init, update, view)
-|> beacon.routes(["/", "/about", "/blog/:slug"])
-|> beacon.on_route_change(OnRouteChange)
+|> beacon.route_pages(pages())
 |> beacon.start(8080)
+```
+
+Route modules can also own their own state:
+
+```gleam
+pub type Model {
+  Model(path: String, home: home.Model)
+}
+
+pub type Msg {
+  RouteChanged(String)
+  Home(home.Msg)
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    RouteChanged(path) -> Model(..model, path: path)
+    Home(child_msg) ->
+      route.update_model(
+        model,
+        child_msg,
+        fn(model) { model.home },
+        fn(model, home) { Model(..model, home: home) },
+        home.update,
+      )
+  }
+}
 ```
 
 ### Shared State (Stores)
@@ -124,32 +187,20 @@ beacon.app_with_local(init, init_local, update, view)
 ### API Routes
 
 ```gleam
-import gleam/http
-import gleam/http/request
-import gleam/http/response
-import gleam/option.{None, Some}
-import beacon/transport/server.{Bytes}
-import gleam/bytes_tree
+import beacon/api
 
 beacon.app(init, update, view)
-|> beacon.api_routes(fn(req) {
-  case req.method, request.path_segments(req) {
-    http.Get, ["api", "status"] ->
-      Some(
-        response.new(200)
-        |> response.set_header("content-type", "application/json")
-        |> response.set_body(Bytes(bytes_tree.from_string("{\"ok\":true}")))
-      )
-    http.Post, ["api", "webhook"] -> Some(handle_webhook(req))
-    _, _ -> None
-  }
-})
+|> beacon.api_routes(api.routes([
+  api.get("/api/status", fn(_req) { api.json(200, "{\"ok\":true}") }),
+  api.post("/api/webhook", handle_webhook),
+]))
 |> beacon.start(8080)
 ```
 
-The handler runs **before** SSR/static file routing. Return `Some(response)` to handle, `None` to fall through to normal page rendering.
+API routes run **before** SSR/static file routing. Unknown method/path combinations fall through to normal page rendering.
 
 Use `beacon/transport/http.read_body(req, max_bytes)` to read POST bodies.
+For custom matching, pass a raw `fn(req) -> Option(Response(ResponseBody))` to `beacon.api_routes`.
 
 ### Cookies
 
@@ -179,6 +230,43 @@ response.new(200)
 ```
 
 Shorthand: `beacon.get_cookie(req, "name")` is available on the main module.
+
+### Session Auth
+
+Use `beacon/auth` when your app wants the standard Beacon session shape: an
+opaque HttpOnly `beacon_session` cookie, a server-side session store, a readable
+CSRF token returned from login, and WebSocket auth that checks the same session.
+
+```gleam
+import beacon/api
+import beacon/auth
+import beacon/session
+
+let store = session.new_store("my_app_sessions")
+let auth_config = auth.default_session_config()
+
+beacon.app_with_server(init, init_server, update, view)
+|> beacon.api_routes(api.routes([
+  api.post("/api/login", fn(req) {
+    let assert Ok(user_id) = authenticate_login(req)
+    let login = auth.create_login(store, user_id)
+
+    api.json(200, "{\"csrf\":\"" <> login.csrf_token <> "\"}")
+    |> auth.with_session_cookie(login.session, auth_config)
+  }),
+  api.get("/api/me", auth.authenticated(store, auth_config, fn(_req, _sess, user) {
+    api.json(200, "{\"user\":\"" <> user <> "\"}")
+  })),
+  api.post("/api/logout", auth.csrf_authenticated(store, auth_config, fn(_req, sess, _user) {
+    auth.logout_response(store, sess, api.text(200, "Logged out"), auth_config)
+  })),
+]))
+|> beacon.ws_auth(auth.ws_session_auth(store, auth_config))
+|> beacon.start(8080)
+```
+
+For localhost HTTP development, use `auth.dev_session_config()` explicitly. The
+default config keeps the cookie `Secure`, `HttpOnly`, and `SameSite=Lax`.
 
 ### WebSocket Authentication
 
@@ -239,7 +327,8 @@ Available effects:
 
 ### Server-Only State
 
-Private state that never reaches the client:
+Private state that never reaches the client. Add `pub type Server` when the app
+needs secrets, sessions, database handles, audit state, or other private values:
 
 ```gleam
 beacon.app_with_server(init, init_server, update, view)
@@ -333,7 +422,7 @@ This starts your app with file watching and hot module reload:
 - Watches `.gleam` files for changes, auto-rebuilds server + client
 - Hot-swaps BEAM modules without restarting — no lost WebSocket connections
 - Notifies connected browsers to reload automatically
-- Uses native file watchers (`fswatch` on macOS, `inotifywait` on Linux) with polling fallback
+- Uses native file watchers (`fswatch` on macOS, `inotifywait` on Linux) or a polling watcher when native tooling is unavailable
 
 For production, use `gleam run` directly — no file watcher, no HMR overhead.
 
@@ -353,3 +442,7 @@ const app_title = "My App"                     // included — used by view
 ```
 
 The `Server` type is available in `update` but not `view`, so the compiler itself prevents accidental leaks.
+Imported route modules follow the same rule: route-local `Server`,
+`init_server`, `update_server`, and `server_` constants are stripped before the
+module is copied into the generated client bundle. Use
+`route.update_server_model` when a route mini-app owns private server state.

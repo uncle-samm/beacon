@@ -3,23 +3,26 @@
 /// Follows Lustre's runtime/server/runtime.gleam pattern.
 ///
 /// Reference: Lustre server runtime, LiveView process model, Reflex event chain.
-
+import beacon/cookie
 import beacon/effect.{type Effect}
 import beacon/element.{type Node}
 import beacon/error
 import beacon/handler.{type HandlerRegistry}
 import beacon/log
+import beacon/notification.{type Notification, Notification}
 import beacon/patch
 import beacon/pubsub
 import beacon/route
+import beacon/ssr
 import beacon/transport
 import beacon/transport/server
+import gleam/dynamic.{type Dynamic}
 import gleam/http/request
 
 /// Cached serialized state for diffing.
 /// When substates are detected, each is tracked independently to skip unchanged diffs.
 pub type CachedModelState {
-  /// No substates detected — fall back to full-model diffing (backward compat).
+  /// No substates detected — use full-model diffing.
   FullModelCache(json: Option(String))
   /// Substates detected — per-substate caches + flat field cache.
   SubstateCache(
@@ -31,6 +34,7 @@ pub type CachedModelState {
     flat_fields_json: Option(String),
   )
 }
+
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/int
@@ -78,6 +82,8 @@ pub type RuntimeMessage(msg) {
   )
   /// An effect dispatched a message back to the runtime.
   EffectDispatched(message: msg)
+  /// A keyed effect dispatched a message back to the runtime.
+  EffectDispatchedKeyed(key: String, generation: Int, message: msg)
   /// Shutdown the runtime.
   Shutdown
 }
@@ -93,12 +99,17 @@ pub type RuntimeState(model, msg) {
     view: fn(model) -> Node(msg),
     /// Function to decode client events into user messages.
     /// If None, the handler registry is used instead (automatic decoding).
-    decode_event: Option(fn(String, String, String, String) -> Result(msg, error.BeaconError)),
+    decode_event: Option(
+      fn(String, String, String, String) -> Result(msg, error.BeaconError),
+    ),
     /// Handler registry from the last view render.
     /// Used for automatic event decoding when decode_event is None.
     handler_registry: Option(HandlerRegistry(msg)),
     /// Currently connected clients: conn_id → transport subject.
-    connections: Dict(transport.ConnectionId, Subject(transport.InternalMessage)),
+    connections: Dict(
+      transport.ConnectionId,
+      Subject(transport.InternalMessage),
+    ),
     /// The runtime's own subject for dispatching effect messages.
     self: Subject(RuntimeMessage(msg)),
     /// Current event clock value — monotonically increasing.
@@ -114,6 +125,10 @@ pub type RuntimeState(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when URL changes — produces a Msg for the update loop.
     on_route_change: option.Option(fn(route.Route) -> msg),
+    /// Called before a client-side route transition is applied.
+    on_route_leave: option.Option(fn(route.Route, route.Route) -> Effect(msg)),
+    /// Most recently matched client route, used to gate route-leave effects.
+    current_route: Option(route.Route),
     /// Subject for sending commands to the PubSub listener process.
     listener_subject: Option(Subject(ListenerCommand)),
     /// Current set of dynamic subscriptions (for diffing).
@@ -122,8 +137,10 @@ pub type RuntimeState(model, msg) {
     dynamic_subscriptions: Option(fn(model) -> List(String)),
     /// Topic-aware notification handler for dynamic subscriptions.
     on_notify: Option(fn(String) -> msg),
+    /// Typed notification handler for dynamic subscriptions.
+    on_notification: Option(fn(Notification) -> msg),
     /// Cached serialized model state for diffing.
-    /// Tracks per-substate JSON when available, or full model JSON as fallback.
+    /// Tracks per-substate JSON when available, or full model JSON.
     cached_model: CachedModelState,
   )
 }
@@ -139,7 +156,9 @@ pub type RuntimeConfig(model, msg) {
     view: fn(model) -> Node(msg),
     /// Decode client events into user messages.
     /// If None, the handler registry (from on_click/on_input) is used automatically.
-    decode_event: Option(fn(String, String, String, String) -> Result(msg, error.BeaconError)),
+    decode_event: Option(
+      fn(String, String, String, String) -> Result(msg, error.BeaconError),
+    ),
     /// Serialize model to a string for session token embedding.
     /// If None, state recovery is disabled (reconnect re-runs init).
     serialize_model: option.Option(fn(model) -> String),
@@ -150,6 +169,8 @@ pub type RuntimeConfig(model, msg) {
     route_patterns: List(route.RoutePattern),
     /// Called when URL changes — produces a Msg for the update loop.
     on_route_change: option.Option(fn(route.Route) -> msg),
+    /// Called before a client-side route transition is applied.
+    on_route_leave: option.Option(fn(route.Route, route.Route) -> Effect(msg)),
     /// Dynamic subscription function: given the current model, returns
     /// the set of topics this runtime should be subscribed to.
     /// Called after every update. The framework diffs against current subscriptions.
@@ -157,6 +178,8 @@ pub type RuntimeConfig(model, msg) {
     /// Called when a PubSub notification arrives on a dynamically subscribed topic.
     /// Receives the topic string so the handler can distinguish between sources.
     on_notify: option.Option(fn(String) -> msg),
+    /// Called when a typed PubSub notification arrives on a dynamically subscribed topic.
+    on_notification: option.Option(fn(Notification) -> msg),
     /// Optional: request-aware init — replaces `init` when the HTTP request is available.
     /// Used by ws_init to pass cookies/headers into server state initialization.
     /// If set and a request is provided, this is used instead of `init`.
@@ -166,6 +189,8 @@ pub type RuntimeConfig(model, msg) {
     /// Secret key for session token HMAC verification.
     /// Threaded from AppConfig — must not be empty when state recovery is enabled.
     secret_key: String,
+    /// Enable framework-owned client tracing.
+    dev_mode: Bool,
   )
 }
 
@@ -195,10 +220,13 @@ pub fn start(
           secret_key: config.secret_key,
           route_patterns: config.route_patterns,
           on_route_change: config.on_route_change,
+          on_route_leave: config.on_route_leave,
+          current_route: None,
           listener_subject: None,
           current_subscriptions: [],
           dynamic_subscriptions: config.dynamic_subscriptions,
           on_notify: config.on_notify,
+          on_notification: config.on_notification,
           cached_model: FullModelCache(json: None),
         )
       log.info("beacon.runtime", "Runtime initialising")
@@ -228,22 +256,29 @@ pub fn start(
           <> case config.on_notify {
           Some(_) -> "YES"
           None -> "NO"
+        }
+          <> ", on_notification: "
+          <> case config.on_notification {
+          Some(_) -> "YES"
+          None -> "NO"
         },
       )
-      case config.dynamic_subscriptions, config.on_notify {
-        Some(compute), Some(notify) -> {
+      case config.dynamic_subscriptions {
+        Some(compute) -> {
           let initial_topics = compute(initial_model)
           let listener =
-            start_pubsub_listener(subject, notify, initial_topics)
+            start_pubsub_listener(
+              subject,
+              config.on_notify,
+              config.on_notification,
+              initial_topics,
+            )
           process.send(
             subject,
-            SetListenerSubject(
-              listener: listener,
-              initial_subs: initial_topics,
-            ),
+            SetListenerSubject(listener: listener, initial_subs: initial_topics),
           )
         }
-        _, _ -> Nil
+        None -> Nil
       }
       Ok(subject)
     }
@@ -252,14 +287,14 @@ pub fn start(
       Error(error.RuntimeError(reason: "Runtime init timed out"))
     }
     Error(actor.InitFailed(reason)) -> {
-      log.error(
-        "beacon.runtime",
-        "Failed to start runtime: " <> reason,
-      )
+      log.error("beacon.runtime", "Failed to start runtime: " <> reason)
       Error(error.RuntimeError(reason: "Runtime init failed: " <> reason))
     }
     Error(actor.InitExited(_reason)) -> {
-      log.error("beacon.runtime", "Failed to start runtime: init process exited")
+      log.error(
+        "beacon.runtime",
+        "Failed to start runtime: init process exited",
+      )
       Error(error.RuntimeError(reason: "Runtime init process exited"))
     }
   }
@@ -285,7 +320,10 @@ fn handle_message(
     }
 
     ClientJoined(conn_id, token, path) -> {
-      log.info("beacon.runtime", "Client joined: " <> conn_id <> " path: " <> path)
+      log.info(
+        "beacon.runtime",
+        "Client joined: " <> conn_id <> " path: " <> path,
+      )
       // Attempt state recovery from token
       let model_to_use = case token, state.deserialize_model {
         "", _ -> {
@@ -326,17 +364,16 @@ fn handle_message(
       // Apply initial route change so the mount reflects the URL the client is on.
       // Without this, all clients would see the default init() model (e.g. Home)
       // regardless of which URL they connected from.
-      let model_to_use = case state.on_route_change, path {
-        option.Some(make_msg), p if p != "" -> {
-          let matched_route = case route.match_path(state.route_patterns, p) {
-            option.Some(r) -> r
-            option.None -> route.from_path(p)
-          }
-          let msg = make_msg(matched_route)
-          let #(new_model, _effects) = state.update(model_to_use, msg)
-          new_model
+      let matched_route = route_for_path(state.route_patterns, path)
+      let #(model_to_use, route_effects) = case
+        state.on_route_change,
+        matched_route
+      {
+        option.Some(make_msg), option.Some(resolved_route) -> {
+          let msg = make_msg(resolved_route)
+          state.update(model_to_use, msg)
         }
-        _, _ -> model_to_use
+        _, _ -> #(model_to_use, effect.none())
       }
       // Render view to plain HTML for initial mount (SSR hydration)
       handler.start_render()
@@ -373,26 +410,37 @@ fn handle_message(
                     ),
                   )
                   // Cache the sent model JSON for future patch diffing
-                  log.debug("beacon.runtime", "Sent mount + model_sync to " <> conn_id)
+                  log.debug(
+                    "beacon.runtime",
+                    "Sent mount + model_sync to " <> conn_id,
+                  )
                 }
                 False -> {
                   log.error(
                     "beacon.runtime",
-                    "Model too large to send on join for " <> conn_id
+                    "Model too large to send on join for "
+                      <> conn_id
                       <> " — client will not receive model_sync",
                   )
                 }
               }
               // Update model state, cache handler registry, store last_model_json
               // (cache even if too large — needed for future patch diffing)
-              actor.continue(
+              let final_state =
                 RuntimeState(
                   ..state,
                   model: model_to_use,
                   handler_registry: Some(view_registry),
+                  current_route: matched_route,
                   cached_model: FullModelCache(json: Some(model_json)),
-                ),
+                )
+              run_effects_with_context(
+                route_effects,
+                final_state.self,
+                option.Some(conn_id),
+                final_state.connections,
               )
+              actor.continue(final_state)
             }
             None -> {
               log.warning(
@@ -400,13 +448,20 @@ fn handle_message(
                 "No model encoder available during mount — client won't receive model_sync. "
                   <> "Ensure beacon_codec.gleam is generated and compiled.",
               )
-              actor.continue(
+              let final_state =
                 RuntimeState(
                   ..state,
                   model: model_to_use,
                   handler_registry: Some(view_registry),
-                ),
+                  current_route: matched_route,
+                )
+              run_effects_with_context(
+                route_effects,
+                final_state.self,
+                option.Some(conn_id),
+                final_state.connections,
               )
+              actor.continue(final_state)
             }
           }
         }
@@ -415,18 +470,33 @@ fn handle_message(
             "beacon.runtime",
             "Client " <> conn_id <> " not found in connections for join",
           )
-          actor.continue(
+          let final_state =
             RuntimeState(
               ..state,
               model: model_to_use,
               handler_registry: Some(view_registry),
-            ),
+              current_route: matched_route,
+            )
+          run_effects_with_context(
+            route_effects,
+            final_state.self,
+            option.None,
+            final_state.connections,
           )
+          actor.continue(final_state)
         }
       }
     }
 
-    ClientEventReceived(conn_id, event_name, handler_id, event_data, target_path, clock, ops) -> {
+    ClientEventReceived(
+      conn_id,
+      event_name,
+      handler_id,
+      event_data,
+      target_path,
+      clock,
+      ops,
+    ) -> {
       log.debug(
         "beacon.runtime",
         "Event from "
@@ -438,109 +508,72 @@ fn handle_message(
           <> "] clock="
           <> int.to_string(clock)
           <> case ops {
-            "" -> ""
-            _ -> " +ops"
-          },
+          "" -> ""
+          _ -> " +client_ops_ignored"
+        },
       )
-      // If client sent patch ops, apply them directly to the model
-      // (client already ran update locally and knows the correct result).
       case ops {
-        "" -> {
-          // No ops — run update on server as normal
-          let resolve_result = case state.handler_registry {
-            Some(registry) -> {
-              log.debug(
-                "beacon.runtime",
-                "Resolving "
-                  <> handler_id
-                  <> " in registry with "
-                  <> int.to_string(handler.registry_size(registry))
-                  <> " handlers",
-              )
-              handler.resolve(registry, handler_id, event_data)
-            }
-            None -> Error(error.RuntimeError(reason: "No handler registry"))
-          }
-          let resolve_result = case resolve_result {
-            Ok(msg) -> Ok(msg)
-            Error(_) -> {
-              case state.decode_event {
-                Some(decode_fn) ->
-                  decode_fn(event_name, handler_id, event_data, target_path)
-                None -> Error(error.RuntimeError(reason: "Unknown handler: " <> handler_id))
-              }
-            }
-          }
-          case resolve_result {
-            Ok(msg) -> {
-              // run_update_for broadcasts to all clients internally
-              let new_state = run_update_for(RuntimeState(..state, event_clock: clock), msg, option.Some(conn_id))
-              actor.continue(new_state)
-            }
-            Error(err) -> {
-              let err_str = error.to_string(err)
-              log.warning(
-                "beacon.runtime",
-                "Failed to decode event from "
-                  <> conn_id
-                  <> ": "
-                  <> err_str,
-              )
-              // Send error back to the client — no silent failures
-              case dict.get(state.connections, conn_id) {
-                Ok(transport_subject) ->
-                  process.send(transport_subject, transport.SendError(reason: err_str))
-                Error(Nil) -> Nil
-              }
-              actor.continue(state)
-            }
+        "" -> Nil
+        _ ->
+          log.warning(
+            "beacon.runtime",
+            "Ignoring client-supplied model ops from "
+              <> conn_id
+              <> " because server update is authoritative",
+          )
+      }
+      let resolve_result = case state.handler_registry {
+        Some(registry) -> {
+          log.debug(
+            "beacon.runtime",
+            "Resolving "
+              <> handler_id
+              <> " in registry with "
+              <> int.to_string(handler.registry_size(registry))
+              <> " handlers",
+          )
+          handler.resolve(registry, handler_id, event_data)
+        }
+        None -> Error(error.RuntimeError(reason: "No handler registry"))
+      }
+      let resolve_result = case resolve_result {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> {
+          case state.decode_event {
+            Some(decode_fn) ->
+              decode_fn(event_name, handler_id, event_data, target_path)
+            None ->
+              Error(error.RuntimeError(
+                reason: "Unknown handler: " <> handler_id,
+              ))
           }
         }
-        _ -> {
-          // Client sent patch ops — apply to server model.
-          // Also resolve the handler and run effects (for on_update side effects
-          // like store writes). The update function's MODEL result is ignored
-          // (the ops are authoritative), but its EFFECTS are executed.
-          let resolve_result = case state.handler_registry {
-            Some(registry) -> handler.resolve(registry, handler_id, event_data)
-            None -> Error(error.RuntimeError(reason: "No handler registry"))
-          }
-          let resolve_result = case resolve_result {
-            Ok(msg) -> Ok(msg)
-            Error(_) -> {
-              case state.decode_event {
-                Some(decode_fn) ->
-                  decode_fn(event_name, handler_id, event_data, target_path)
-                None -> Error(error.RuntimeError(reason: "Unknown handler: " <> handler_id))
-              }
-            }
-          }
-          // Apply ops to get the correct model state FIRST
-          let new_state = apply_client_ops(
-            RuntimeState(..state, event_clock: clock),
-            ops,
-            conn_id,
-          )
-          // Run update with POST-ops model to get effects (store writes, etc.)
-          // The update's model result is ignored — the ops are authoritative.
-          // But on_update callbacks see the correct model.strokes, etc.
-          case resolve_result {
-            Ok(msg) -> {
-              let #(_model_ignored, effects) = new_state.update(new_state.model, msg)
-              run_effects_with_context(effects, new_state.self, option.Some(conn_id), new_state.connections)
-            }
-            Error(err) -> {
-              log.warning(
-                "beacon.runtime",
-                "Client ops path: failed to resolve handler from "
-                  <> conn_id
-                  <> ": "
-                  <> error.to_string(err)
-                  <> " — ops applied but effects skipped",
-              )
-            }
-          }
+      }
+      case resolve_result {
+        Ok(msg) -> {
+          let new_state =
+            run_update_for(
+              RuntimeState(..state, event_clock: clock),
+              msg,
+              option.Some(conn_id),
+            )
           actor.continue(new_state)
+        }
+        Error(err) -> {
+          let err_str = error.to_string(err)
+          log.warning(
+            "beacon.runtime",
+            "Failed to decode event from " <> conn_id <> ": " <> err_str,
+          )
+          case dict.get(state.connections, conn_id) {
+            Ok(transport_subject) ->
+              process.send(
+                transport_subject,
+                transport.SendError(reason: err_str),
+              )
+            Error(Nil) -> Nil
+          }
+          actor.continue(state)
         }
       }
     }
@@ -559,66 +592,67 @@ fn handle_message(
       let #(final_state, processed) =
         list.fold(events, #(state, 0), fn(acc, evt) {
           let #(acc_state, idx) = acc
-          let #(event_name, handler_id, event_data, _target_path, clock, evt_ops) = evt
-          // If the last event has ops, apply them directly
-          case evt_ops, idx == count - 1 {
-            ops, True if ops != "" -> {
-              let new_state = apply_client_ops(
-                RuntimeState(..acc_state, event_clock: clock),
-                ops,
-                conn_id,
+          let #(
+            event_name,
+            handler_id,
+            event_data,
+            _target_path,
+            clock,
+            evt_ops,
+          ) = evt
+          case evt_ops {
+            "" -> Nil
+            _ ->
+              log.warning(
+                "beacon.runtime",
+                "Ignoring client-supplied model ops in batch from "
+                  <> conn_id
+                  <> " because server update is authoritative",
               )
-              #(new_state, idx + 1)
-            }
-            _, _ -> {
-              let resolve_result = case acc_state.handler_registry {
-                Some(registry) ->
-                  handler.resolve(registry, handler_id, event_data)
+          }
+          let resolve_result = case acc_state.handler_registry {
+            Some(registry) -> handler.resolve(registry, handler_id, event_data)
+            None -> Error(error.RuntimeError(reason: "No handler registry"))
+          }
+          let resolve_result = case resolve_result {
+            Ok(msg) -> Ok(msg)
+            Error(_) ->
+              case acc_state.decode_event {
+                Some(decode_fn) ->
+                  decode_fn(event_name, handler_id, event_data, "")
                 None ->
-                  Error(error.RuntimeError(reason: "No handler registry"))
+                  Error(error.RuntimeError(
+                    reason: "Unknown handler: " <> handler_id,
+                  ))
               }
-              let resolve_result = case resolve_result {
-                Ok(msg) -> Ok(msg)
-                Error(_) ->
-                  case acc_state.decode_event {
-                    Some(decode_fn) ->
-                      decode_fn(event_name, handler_id, event_data, "")
-                    None ->
-                      Error(error.RuntimeError(
-                        reason: "Unknown handler: " <> handler_id,
-                      ))
-                  }
+          }
+          case resolve_result {
+            Ok(msg) -> {
+              let new_state = RuntimeState(..acc_state, event_clock: clock)
+              case idx == count - 1 {
+                True -> #(
+                  run_update_for(new_state, msg, option.Some(conn_id)),
+                  idx + 1,
+                )
+                False -> #(
+                  run_update_only(new_state, msg, option.Some(conn_id)),
+                  idx + 1,
+                )
               }
-              case resolve_result {
-                Ok(msg) -> {
-                  let new_state =
-                    RuntimeState(..acc_state, event_clock: clock)
-                  case idx == count - 1 {
-                    True -> #(
-                      run_update_for(new_state, msg, option.Some(conn_id)),
-                      idx + 1,
-                    )
-                    False -> #(
-                      run_update_only(new_state, msg, option.Some(conn_id)),
-                      idx + 1,
-                    )
-                  }
-                }
-                Error(err) -> {
-                  log.warning(
-                    "beacon.runtime",
-                    "Event skipped in batch (idx "
-                      <> int.to_string(idx)
-                      <> "/"
-                      <> int.to_string(count)
-                      <> ", handler="
-                      <> handler_id
-                      <> "): "
-                      <> error.to_string(err),
-                  )
-                  #(acc_state, idx + 1)
-                }
-              }
+            }
+            Error(err) -> {
+              log.warning(
+                "beacon.runtime",
+                "Event skipped in batch (idx "
+                  <> int.to_string(idx)
+                  <> "/"
+                  <> int.to_string(count)
+                  <> ", handler="
+                  <> handler_id
+                  <> "): "
+                  <> error.to_string(err),
+              )
+              #(acc_state, idx + 1)
             }
           }
         })
@@ -632,34 +666,59 @@ fn handle_message(
 
     ClientNavigated(conn_id, path) -> {
       log.info("beacon.runtime", "Navigation: " <> conn_id <> " → " <> path)
-      case state.on_route_change {
-        option.Some(make_msg) -> {
-          let matched_route = case route.match_path(state.route_patterns, path) {
-            option.Some(r) -> r
-            option.None -> route.from_path(path)
-          }
-          let msg = make_msg(matched_route)
-          let new_state = run_update(state, msg)
-          actor.continue(new_state)
+      let matched_route = route_for_path(state.route_patterns, path)
+      let state =
+        run_route_leave_effects(state, matched_route, option.Some(conn_id))
+      case state.on_route_change, matched_route {
+        option.Some(make_msg), option.Some(resolved_route) -> {
+          let msg = make_msg(resolved_route)
+          let new_state =
+            run_update(RuntimeState(..state, current_route: matched_route), msg)
+          actor.continue(
+            RuntimeState(..new_state, current_route: matched_route),
+          )
         }
-        option.None -> actor.continue(state)
+        _, _ ->
+          actor.continue(RuntimeState(..state, current_route: matched_route))
       }
     }
 
     SetListenerSubject(listener, initial_subs) -> {
       log.debug("beacon.runtime", "Listener subject registered")
-      actor.continue(RuntimeState(
-        ..state,
-        listener_subject: Some(listener),
-        current_subscriptions: initial_subs,
-      ))
+      actor.continue(
+        RuntimeState(
+          ..state,
+          listener_subject: Some(listener),
+          current_subscriptions: initial_subs,
+        ),
+      )
     }
 
     EffectDispatched(msg) -> {
-      log.info("beacon.runtime", "Effect dispatched (PubSub notification received)")
+      log.info(
+        "beacon.runtime",
+        "Effect dispatched (PubSub notification received)",
+      )
       // run_update internally broadcasts to all clients (via run_update_for)
       let new_state = run_update(state, msg)
       actor.continue(new_state)
+    }
+
+    EffectDispatchedKeyed(key, generation, msg) -> {
+      case effect.is_current_key_generation(key, generation) {
+        True -> {
+          log.debug("beacon.runtime", "Keyed effect dispatched for key " <> key)
+          let new_state = run_update(state, msg)
+          actor.continue(new_state)
+        }
+        False -> {
+          log.debug(
+            "beacon.runtime",
+            "Dropping stale keyed effect for key " <> key,
+          )
+          actor.continue(state)
+        }
+      }
     }
 
     Shutdown -> {
@@ -690,23 +749,22 @@ fn run_update_for(
   let #(new_model, effects) = state.update(state.model, msg)
   log.debug("beacon.runtime", "Model updated")
 
-  // Render view — needed for handler registry AND for HTML morph (server-rendered apps).
+  // Render view to refresh the handler registry. Live updates are state-over-the-wire;
+  // the server does not send post-mount HTML.
   handler.start_render()
-  let #(new_registry, new_html) = case rescue(fn() { new_model |> state.view }) {
-    Ok(vdom) -> #(handler.finish_render(), Some(element.to_string(vdom)))
+  let new_registry = case rescue(fn() { new_model |> state.view }) {
+    Ok(_vdom) -> handler.finish_render()
     Error(reason) -> {
       log.error("beacon.runtime", "View rendering failed: " <> reason)
       let _ = handler.finish_render()
-      let fallback_registry = case state.handler_registry {
+      case state.handler_registry {
         Some(r) -> r
         None -> handler.finish_render()
       }
-      #(fallback_registry, None)
     }
   }
 
   // State-over-the-wire: send model JSON to all clients (as patches when possible).
-  // Falls back to HTML morph if no serializer is available (app_with_server, runtime-only).
   let serializer = case discover_model_encoder() {
     Some(f) -> Some(f)
     None -> state.serialize_model
@@ -727,28 +785,25 @@ fn run_update_for(
       model: new_model,
       handler_registry: Some(new_registry),
     )
-  // If we have a serializer, use model_sync/patches. Otherwise send HTML morph.
   let new_cached = case new_model_json {
     Some(_) ->
       broadcast_with_substates(broadcast_state, new_model, new_model_json)
-    None ->
-      case new_html {
-        Some(html) -> {
-          // No serializer — send re-rendered HTML via mount morph (LiveView-style)
-          log.debug("beacon.runtime", "No serializer, sending HTML morph")
-          let _ = dict.each(broadcast_state.connections, fn(_conn_id, subject) {
-            process.send(subject, transport.SendMount(payload: html))
-          })
-          broadcast_state.cached_model
-        }
-        None -> broadcast_state.cached_model
-      }
+    None -> {
+      log.error(
+        "beacon.runtime",
+        "No model encoder available after update — live state update cannot be sent",
+      )
+      let _ =
+        dict.each(broadcast_state.connections, fn(_conn_id, subject) {
+          process.send(
+            subject,
+            transport.SendError(reason: "Model encoder missing"),
+          )
+        })
+      broadcast_state.cached_model
+    }
   }
-  let new_state =
-    RuntimeState(
-      ..broadcast_state,
-      cached_model: new_cached,
-    )
+  let new_state = RuntimeState(..broadcast_state, cached_model: new_cached)
 
   // Execute effects — pass connection context for targeted sends
   run_effects_with_context(effects, state.self, conn_id, state.connections)
@@ -774,9 +829,7 @@ fn update_dynamic_subscriptions(
           !list.contains(new_subs, t)
         })
       // Apply changes
-      list.each(to_subscribe, fn(t) {
-        process.send(listener, SubscribeTo(t))
-      })
+      list.each(to_subscribe, fn(t) { process.send(listener, SubscribeTo(t)) })
       list.each(to_unsubscribe, fn(t) {
         process.send(listener, UnsubscribeFrom(t))
       })
@@ -835,7 +888,7 @@ fn discover_model_encoder() -> Option(fn(model) -> String) {
 @external(erlang, "beacon_runtime_ffi", "try_load_codec_encoder")
 fn try_load_codec_encoder() -> Result(fn(model) -> String, Nil)
 
-/// Try per-substate broadcast, fall back to full-model.
+/// Try per-substate broadcast, otherwise use full-model diffing.
 /// Returns the new CachedModelState to store for future diffs.
 fn broadcast_with_substates(
   state: RuntimeState(model, msg),
@@ -868,8 +921,10 @@ fn broadcast_with_substates(
       }
       // Get old cached substates
       let #(old_substates, old_flat) = case state.cached_model {
-        SubstateCache(substate_jsons: old_s, flat_fields_json: old_f, ..) ->
-          #(old_s, old_f)
+        SubstateCache(substate_jsons: old_s, flat_fields_json: old_f, ..) -> #(
+          old_s,
+          old_f,
+        )
         _ -> #(dict.new(), None)
       }
       // Diff each substate independently — skip unchanged ones
@@ -929,7 +984,10 @@ fn broadcast_with_substates(
       let all_op_strings = list.append(substate_ops, flat_ops)
       case all_op_strings {
         [] -> {
-          log.debug("beacon.runtime", "Substates: all unchanged, skipping broadcast")
+          log.debug(
+            "beacon.runtime",
+            "Substates: all unchanged, skipping broadcast",
+          )
           Nil
         }
         _ -> {
@@ -956,7 +1014,7 @@ fn broadcast_with_substates(
       )
     }
     _ -> {
-      // No substates — fall back to full-model diff
+      // No substates — use full-model diff
       broadcast_model_sync_with_json(state, new_model_json)
       case new_model_json {
         Some(json) -> FullModelCache(json: Some(json))
@@ -1047,11 +1105,17 @@ fn broadcast_model_sync_with_json(
               let ops_json = patch.diff(old_json, model_json)
               case patch.is_empty(ops_json) {
                 True -> {
-                  log.debug("beacon.runtime", "Model unchanged, skipping broadcast")
+                  log.debug(
+                    "beacon.runtime",
+                    "Model unchanged, skipping broadcast",
+                  )
                   Nil
                 }
                 False -> {
-                  log.debug("beacon.runtime", "Broadcasting patch to all clients")
+                  log.debug(
+                    "beacon.runtime",
+                    "Broadcasting patch to all clients",
+                  )
                   dict.each(state.connections, fn(_conn_id, subject) {
                     process.send(
                       subject,
@@ -1066,7 +1130,10 @@ fn broadcast_model_sync_with_json(
               }
             }
             None -> {
-              log.debug("beacon.runtime", "No previous model, sending full model_sync")
+              log.debug(
+                "beacon.runtime",
+                "No previous model, sending full model_sync",
+              )
               dict.each(state.connections, fn(_conn_id, subject) {
                 process.send(
                   subject,
@@ -1083,190 +1150,20 @@ fn broadcast_model_sync_with_json(
       }
     }
     None -> {
-      // No model encoder — re-render view and send HTML mount to all clients.
-      // This is the server-rendering mode used by routed apps without per-route codecs.
-      log.debug(
+      log.error(
         "beacon.runtime",
-        "No model encoder — broadcasting HTML mount to all clients",
+        "No model encoder available — live state update cannot be sent",
       )
-      handler.start_render()
-      case rescue(fn() { state.model |> state.view }) {
-        Ok(vdom) -> {
-          let _ = handler.finish_render()
-          let mount_html = element.to_string(vdom)
-          dict.each(state.connections, fn(_conn_id, subject) {
-            process.send(
-              subject,
-              transport.SendMount(payload: mount_html),
-            )
-          })
-        }
-        Error(reason) -> {
-          let _ = handler.finish_render()
-          log.error("beacon.runtime", "View rendering failed in mount broadcast: " <> reason)
-          Nil
-        }
-      }
-    }
-  }
-}
-
-/// Maximum number of patch operations allowed in a single client message.
-/// Prevents clients from sending unbounded arrays that consume server memory.
-const max_ops_per_message = 1000
-
-/// Apply client-sent patch operations to the server model.
-/// The client already ran the update locally and sends the diff.
-/// Server applies the ops to stay in sync without re-running update.
-fn apply_client_ops(
-  state: RuntimeState(model, msg),
-  ops_json: String,
-  conn_id: transport.ConnectionId,
-) -> RuntimeState(model, msg) {
-  // Enforce ops count limit to prevent memory exhaustion from malicious clients
-  let ops_count = patch.count_ops(ops_json)
-  case ops_count > max_ops_per_message {
-    True -> {
-      log.warning(
-        "beacon.runtime",
-        "Rejecting patch with " <> int.to_string(ops_count)
-        <> " ops from " <> conn_id
-        <> " (max " <> int.to_string(max_ops_per_message) <> ")",
-      )
-      state
-    }
-    False -> apply_client_ops_inner(state, ops_json, conn_id)
-  }
-}
-
-/// Inner implementation of apply_client_ops, after ops count validation.
-fn apply_client_ops_inner(
-  state: RuntimeState(model, msg),
-  ops_json: String,
-  conn_id: transport.ConnectionId,
-) -> RuntimeState(model, msg) {
-  log.info("beacon.runtime", "Applying client ops from " <> conn_id)
-  // Serialize current model to JSON
-  let serializer = case discover_model_encoder() {
-    Some(f) -> Some(f)
-    None -> state.serialize_model
-  }
-  case serializer {
-    Some(serialize) -> {
-      let old_json = serialize(state.model)
-      // Apply the client's patch ops to produce new model JSON
-      case patch.apply_ops(old_json, ops_json) {
-        Ok(new_json) -> {
-          // Decode new model from the patched JSON
-          case discover_model_decoder() {
-            Some(decode_fn) -> {
-              case decode_fn(new_json) {
-                Ok(new_model) -> {
-                  log.info("beacon.runtime", "Client ops applied successfully")
-                  // Re-render view to keep handler registry fresh
-                  handler.start_render()
-                  let new_registry = case rescue(fn() { new_model |> state.view }) {
-                    Ok(_vdom) -> handler.finish_render()
-                    Error(reason) -> {
-                      log.error("beacon.runtime", "View rendering failed after ops: " <> reason)
-                      let _ = handler.finish_render()
-                      case state.handler_registry {
-                        Some(r) -> r
-                        None -> handler.finish_render()
-                      }
-                    }
-                  }
-                  let new_state = RuntimeState(
-                    ..state,
-                    model: new_model,
-                    handler_registry: Some(new_registry),
-                    cached_model: FullModelCache(json: Some(new_json)),
-                  )
-                  // Broadcast the same ops to other clients
-                  let _ = broadcast_ops_to_others(new_state, ops_json, conn_id)
-                  // Update dynamic subscriptions after model change
-                  update_dynamic_subscriptions(new_state)
-                }
-                Error(reason) -> {
-                  log.error(
-                    "beacon.runtime",
-                    "Failed to decode model after applying ops: " <> reason,
-                  )
-                  state
-                }
-              }
-            }
-            None -> {
-              log.warning(
-                "beacon.runtime",
-                "No model decoder — cannot apply client ops. Falling back to event processing.",
-              )
-              state
-            }
-          }
-        }
-        Error(reason) -> {
-          log.error(
-            "beacon.runtime",
-            "Failed to apply client ops: " <> reason,
+      let _ =
+        dict.each(state.connections, fn(_conn_id, subject) {
+          process.send(
+            subject,
+            transport.SendError(reason: "Model encoder missing"),
           )
-          state
-        }
-      }
-    }
-    None -> {
-      log.warning(
-        "beacon.runtime",
-        "No serializer — cannot apply client ops",
-      )
-      state
+        })
     }
   }
 }
-
-/// Send patch ops to all clients EXCEPT the one that sent them.
-/// The sending client already applied the ops locally (optimistic update).
-fn broadcast_ops_to_others(
-  state: RuntimeState(model, msg),
-  ops_json: String,
-  exclude_conn_id: transport.ConnectionId,
-) -> Nil {
-  dict.each(state.connections, fn(conn_id, subject) {
-    case conn_id == exclude_conn_id {
-      True -> Nil
-      False ->
-        process.send(
-          subject,
-          transport.SendPatch(
-            ops_json: ops_json,
-            version: state.event_clock,
-            ack_clock: state.event_clock,
-          ),
-        )
-    }
-  })
-}
-
-/// Auto-discover a model decoder from the beacon_codec module.
-/// The build tool generates beacon_codec.gleam with decode_model/1.
-fn discover_model_decoder() -> Option(fn(String) -> Result(model, String)) {
-  case try_load_codec_decoder() {
-    Ok(decoder) -> {
-      log.debug(
-        "beacon.runtime",
-        "Auto-discovered model decoder from beacon_codec",
-      )
-      Some(decoder)
-    }
-    Error(_) -> {
-      log.debug("beacon.runtime", "No beacon_codec decoder available")
-      None
-    }
-  }
-}
-
-@external(erlang, "beacon_runtime_ffi", "try_load_codec_decoder")
-fn try_load_codec_decoder() -> Result(fn(String) -> Result(model, String), Nil)
 
 /// Discover substate names from beacon_codec.
 @external(erlang, "beacon_runtime_ffi", "try_load_substate_names")
@@ -1274,9 +1171,7 @@ fn try_load_substate_names() -> Result(List(String), Nil)
 
 /// Discover a per-substate encoder from beacon_codec.
 @external(erlang, "beacon_runtime_ffi", "try_load_substate_encoder")
-fn try_load_substate_encoder(
-  name: String,
-) -> Result(fn(model) -> String, Nil)
+fn try_load_substate_encoder(name: String) -> Result(fn(model) -> String, Nil)
 
 /// Discover the flat fields encoder from beacon_codec.
 @external(erlang, "beacon_runtime_ffi", "try_load_flat_encoder")
@@ -1284,10 +1179,7 @@ fn try_load_flat_encoder() -> Result(fn(model) -> String, Nil)
 
 /// Execute effects by providing a dispatch function that sends messages
 /// back to the runtime actor.
-fn run_effects(
-  effects: Effect(msg),
-  self: Subject(RuntimeMessage(msg)),
-) -> Nil {
+fn run_effects(effects: Effect(msg), self: Subject(RuntimeMessage(msg))) -> Nil {
   run_effects_with_context(effects, self, option.None, dict.new())
 }
 
@@ -1306,8 +1198,7 @@ fn run_effects_with_context(
       case conn_id {
         option.Some(cid) -> {
           case dict.get(connections, cid) {
-            Ok(subject) ->
-              store_redirect_target(subject)
+            Ok(subject) -> store_redirect_target(subject)
             Error(Nil) -> {
               log.debug(
                 "beacon.runtime",
@@ -1328,7 +1219,13 @@ fn run_effects_with_context(
       let dispatch = fn(msg) {
         process.send(self, EffectDispatched(message: msg))
       }
-      effect.perform(effects, dispatch)
+      let dispatch_keyed = fn(key, generation, msg) {
+        process.send(
+          self,
+          EffectDispatchedKeyed(key: key, generation: generation, message: msg),
+        )
+      }
+      effect.perform(effects, dispatch, dispatch_keyed)
     }
   }
 }
@@ -1350,7 +1247,7 @@ pub fn connect_transport(
 pub fn connect_transport_with_ssr(
   runtime: Subject(RuntimeMessage(msg)),
   port: Int,
-  page_html: option.Option(String),
+  page_html: option.Option(ssr.RenderedPage),
 ) -> transport.TransportConfig {
   log.info(
     "beacon.runtime",
@@ -1363,10 +1260,7 @@ pub fn connect_transport_with_ssr(
     static_config: option.None,
     runtime_factory: option.None,
     on_connect: fn(conn_id, subject) {
-      process.send(
-        runtime,
-        ClientConnected(conn_id: conn_id, subject: subject),
-      )
+      process.send(runtime, ClientConnected(conn_id: conn_id, subject: subject))
     },
     on_event: fn(conn_id, client_msg) {
       case client_msg {
@@ -1391,27 +1285,27 @@ pub fn connect_transport_with_ssr(
           )
         }
         transport.ClientNavigate(path) -> {
-          process.send(
-            runtime,
-            ClientNavigated(conn_id: conn_id, path: path),
-          )
+          process.send(runtime, ClientNavigated(conn_id: conn_id, path: path))
         }
         transport.ClientEventBatch(events) -> {
           // Atomic batch: all events processed, single render at end.
           let event_tuples =
             list.filter_map(events, fn(evt) {
               case evt {
-                transport.ClientEvent(name, handler_id, data, target_path, clock, ops) ->
-                  Ok(#(name, handler_id, data, target_path, clock, ops))
+                transport.ClientEvent(
+                  name,
+                  handler_id,
+                  data,
+                  target_path,
+                  clock,
+                  ops,
+                ) -> Ok(#(name, handler_id, data, target_path, clock, ops))
                 _ -> Error(Nil)
               }
             })
           process.send(
             runtime,
-            ClientEventBatchReceived(
-              conn_id: conn_id,
-              events: event_tuples,
-            ),
+            ClientEventBatchReceived(conn_id: conn_id, events: event_tuples),
           )
         }
         transport.ClientHeartbeat -> {
@@ -1431,7 +1325,7 @@ pub fn connect_transport_with_ssr(
 }
 
 /// Start a runtime for a specific connection and return type-erased handler closures.
-/// This is the core helper used by both single-app and file-based routing modes.
+/// This is the core helper used by app startup and test harnesses.
 /// Each call spawns a new runtime actor, registers the connection, and returns:
 /// - on_event: forwards ClientMessages to the runtime
 /// - shutdown: kills the runtime process
@@ -1443,13 +1337,16 @@ pub fn start_and_connect(
   conn_id: transport.ConnectionId,
   transport_subject: process.Subject(transport.InternalMessage),
 ) -> Result(
-  #(
-    fn(transport.ConnectionId, transport.ClientMessage) -> Nil,
-    fn() -> Nil,
-  ),
+  #(fn(transport.ConnectionId, transport.ClientMessage) -> Nil, fn() -> Nil),
   error.BeaconError,
 ) {
-  start_and_connect_with_request(config, conn_id, transport_subject, option.None)
+  log.info("beacon.runtime", "Starting runtime connection for " <> conn_id)
+  start_and_connect_with_request(
+    config,
+    conn_id,
+    transport_subject,
+    option.None,
+  )
 }
 
 /// Start a per-connection runtime with access to the HTTP request.
@@ -1461,16 +1358,10 @@ pub fn start_and_connect_with_request(
   transport_subject: process.Subject(transport.InternalMessage),
   req: option.Option(request.Request(server.Connection)),
 ) -> Result(
-  #(
-    fn(transport.ConnectionId, transport.ClientMessage) -> Nil,
-    fn() -> Nil,
-  ),
+  #(fn(transport.ConnectionId, transport.ClientMessage) -> Nil, fn() -> Nil),
   error.BeaconError,
 ) {
-  log.info(
-    "beacon.runtime",
-    "Spawning runtime for " <> conn_id,
-  )
+  log.info("beacon.runtime", "Spawning runtime for " <> conn_id)
   // Use init_from_request if both the request and the callback are available
   let effective_config = case req, config.init_from_request {
     Some(r), Some(init_fn) -> {
@@ -1488,7 +1379,12 @@ pub fn start_and_connect_with_request(
       )
       // Return per-connection event and shutdown handlers
       let on_event = fn(_cid: transport.ConnectionId, client_msg) {
-        forward_client_message(runtime_subject, conn_id, client_msg)
+        forward_client_message_with_request(
+          runtime_subject,
+          conn_id,
+          req,
+          client_msg,
+        )
       }
       let shutdown = fn() {
         log.info("beacon.runtime", "Shutting down runtime for " <> conn_id)
@@ -1499,7 +1395,10 @@ pub fn start_and_connect_with_request(
     Error(err) -> {
       log.error(
         "beacon.runtime",
-        "Failed to spawn runtime for " <> conn_id <> ": " <> error.to_string(err),
+        "Failed to spawn runtime for "
+          <> conn_id
+          <> ": "
+          <> error.to_string(err),
       )
       Error(err)
     }
@@ -1508,9 +1407,10 @@ pub fn start_and_connect_with_request(
 
 /// Forward a client message to a runtime actor.
 /// Translates transport.ClientMessage variants into RuntimeMessage variants.
-fn forward_client_message(
+fn forward_client_message_with_request(
   runtime_subject: Subject(RuntimeMessage(msg)),
   conn_id: transport.ConnectionId,
+  req: option.Option(request.Request(server.Connection)),
   client_msg: transport.ClientMessage,
 ) -> Nil {
   case client_msg {
@@ -1527,11 +1427,13 @@ fn forward_client_message(
           ops: ops,
         ),
       )
-    transport.ClientJoin(token, path) ->
+    transport.ClientJoin(token, path) -> {
+      let join_token = token_for_join(req, token)
       process.send(
         runtime_subject,
-        ClientJoined(conn_id: conn_id, token: token, path: path),
+        ClientJoined(conn_id: conn_id, token: join_token, path: path),
       )
+    }
     transport.ClientNavigate(path) ->
       process.send(
         runtime_subject,
@@ -1548,20 +1450,30 @@ fn forward_client_message(
               target_path,
               clock,
               ops,
-            ) ->
-              Ok(#(name, handler_id, data, target_path, clock, ops))
+            ) -> Ok(#(name, handler_id, data, target_path, clock, ops))
             _ -> Error(Nil)
           }
         })
       process.send(
         runtime_subject,
-        ClientEventBatchReceived(
-          conn_id: conn_id,
-          events: event_tuples,
-        ),
+        ClientEventBatchReceived(conn_id: conn_id, events: event_tuples),
       )
     }
     transport.ClientHeartbeat -> Nil
+  }
+}
+
+fn token_for_join(
+  req: option.Option(request.Request(server.Connection)),
+  client_token: String,
+) -> String {
+  case req {
+    option.Some(http_req) ->
+      case cookie.get(http_req, ssr.session_cookie_name) {
+        Ok(token) -> token
+        Error(Nil) -> ""
+      }
+    option.None -> client_token
   }
 }
 
@@ -1571,39 +1483,49 @@ fn forward_client_message(
 pub fn connect_transport_per_connection(
   config: RuntimeConfig(model, msg),
   port: Int,
-  page_html: option.Option(String),
+  page_html: option.Option(ssr.RenderedPage),
 ) -> transport.TransportConfig {
   log.info(
     "beacon.runtime",
-    "Connecting transport (per-connection mode) on port "
-      <> int.to_string(port),
+    "Connecting transport (per-connection mode) on port " <> int.to_string(port),
   )
   transport.TransportConfig(
     port: port,
     page_html: page_html,
     middlewares: [],
     static_config: option.None,
-    runtime_factory: option.Some(fn(
-      conn_id: transport.ConnectionId,
-      transport_subject: process.Subject(transport.InternalMessage),
-      req: request.Request(server.Connection),
-    ) {
-      case start_and_connect_with_request(config, conn_id, transport_subject, option.Some(req)) {
-        Ok(#(on_event, shutdown)) -> {
-          let on_disconnect = fn(_cid: transport.ConnectionId) {
-            shutdown()
+    runtime_factory: option.Some(
+      fn(
+        conn_id: transport.ConnectionId,
+        transport_subject: process.Subject(transport.InternalMessage),
+        req: request.Request(server.Connection),
+      ) {
+        case
+          start_and_connect_with_request(
+            config,
+            conn_id,
+            transport_subject,
+            option.Some(req),
+          )
+        {
+          Ok(#(on_event, shutdown)) -> {
+            let on_disconnect = fn(_cid: transport.ConnectionId) { shutdown() }
+            #(on_event, on_disconnect)
           }
-          #(on_event, on_disconnect)
+          Error(err) -> {
+            log.error(
+              "beacon.runtime",
+              "Failed to start per-connection runtime: " <> error.to_string(err),
+            )
+            // Return no-op handlers
+            #(
+              fn(_: transport.ConnectionId, _: transport.ClientMessage) { Nil },
+              fn(_: transport.ConnectionId) { Nil },
+            )
+          }
         }
-        Error(err) -> {
-          log.error("beacon.runtime", "Failed to start per-connection runtime: " <> error.to_string(err))
-          // Return no-op handlers
-          #(fn(_: transport.ConnectionId, _: transport.ClientMessage) { Nil }, fn(
-            _: transport.ConnectionId,
-          ) { Nil })
-        }
-      }
-    }),
+      },
+    ),
     // These are unused when runtime_factory is set, but needed for the type
     on_connect: fn(_, _) { Nil },
     on_event: fn(_, _) { Nil },
@@ -1630,7 +1552,7 @@ type ListenerReceiveResult {
   /// A command was received from the runtime.
   CommandReceived(command: ListenerCommand)
   /// A PubSub notification was received on a topic.
-  NotificationReceived(topic: String)
+  NotificationReceived(topic: String, payload: Dynamic)
   /// Timeout — no message within the window.
   ReceiveTimeout
 }
@@ -1640,7 +1562,8 @@ type ListenerReceiveResult {
 /// Returns a Subject for sending commands to the listener.
 fn start_pubsub_listener(
   runtime_subject: Subject(RuntimeMessage(msg)),
-  on_notify: fn(String) -> msg,
+  on_notify: Option(fn(String) -> msg),
+  on_notification: Option(fn(Notification) -> msg),
   topics: List(String),
 ) -> Subject(ListenerCommand) {
   // Use a subject on the CALLER to receive the listener's command subject
@@ -1664,14 +1587,18 @@ fn start_pubsub_listener(
           <> int.to_string(list.length(topics))
           <> " initial topics",
       )
-      listener_loop(runtime_subject, command_subject, on_notify)
+      listener_loop(
+        runtime_subject,
+        command_subject,
+        on_notify,
+        on_notification,
+      )
     })
   // INVARIANT: The listener process was just spawned and MUST send its
   // command_subject back immediately. If this times out (5s), the listener
   // failed to start — a fatal configuration error. Crash is intentional:
   // the runtime cannot function without its PubSub listener.
-  let assert Ok(command_subject) =
-    process.receive(reply_subject, 5000)
+  let assert Ok(command_subject) = process.receive(reply_subject, 5000)
   command_subject
 }
 
@@ -1679,30 +1606,67 @@ fn start_pubsub_listener(
 fn listener_loop(
   runtime_subject: Subject(RuntimeMessage(msg)),
   command_subject: Subject(ListenerCommand),
-  on_notify: fn(String) -> msg,
+  on_notify: Option(fn(String) -> msg),
+  on_notification: Option(fn(Notification) -> msg),
 ) -> Nil {
   case receive_with_commands(command_subject, 60_000) {
     CommandReceived(SubscribeTo(topic)) -> {
       pubsub.subscribe(topic)
       log.debug("beacon.subscription", "Subscribed to: " <> topic)
-      listener_loop(runtime_subject, command_subject, on_notify)
+      listener_loop(
+        runtime_subject,
+        command_subject,
+        on_notify,
+        on_notification,
+      )
     }
     CommandReceived(UnsubscribeFrom(topic)) -> {
       pubsub.unsubscribe(topic)
       log.debug("beacon.subscription", "Unsubscribed from: " <> topic)
-      listener_loop(runtime_subject, command_subject, on_notify)
+      listener_loop(
+        runtime_subject,
+        command_subject,
+        on_notify,
+        on_notification,
+      )
     }
     CommandReceived(ShutdownListener) -> {
       log.info("beacon.subscription", "Listener shutting down")
       Nil
     }
-    NotificationReceived(topic) -> {
-      let msg = on_notify(topic)
-      process.send(runtime_subject, EffectDispatched(message: msg))
-      listener_loop(runtime_subject, command_subject, on_notify)
+    NotificationReceived(topic, payload) -> {
+      case on_notify {
+        Some(handler) ->
+          process.send(
+            runtime_subject,
+            EffectDispatched(message: handler(topic)),
+          )
+        None -> Nil
+      }
+      case on_notification {
+        Some(handler) ->
+          process.send(
+            runtime_subject,
+            EffectDispatched(
+              message: handler(Notification(topic: topic, payload: payload)),
+            ),
+          )
+        None -> Nil
+      }
+      listener_loop(
+        runtime_subject,
+        command_subject,
+        on_notify,
+        on_notification,
+      )
     }
     ReceiveTimeout -> {
-      listener_loop(runtime_subject, command_subject, on_notify)
+      listener_loop(
+        runtime_subject,
+        command_subject,
+        on_notify,
+        on_notification,
+      )
     }
   }
 }
@@ -1714,10 +1678,14 @@ fn receive_with_commands(
 ) -> ListenerReceiveResult
 
 @external(erlang, "beacon_runtime_ffi", "store_redirect_target")
-fn store_redirect_target(subject: process.Subject(transport.InternalMessage)) -> Nil
+fn store_redirect_target(
+  subject: process.Subject(transport.InternalMessage),
+) -> Nil
 
 @external(erlang, "beacon_runtime_ffi", "get_redirect_target")
-pub fn get_redirect_target() -> option.Option(process.Subject(transport.InternalMessage))
+pub fn get_redirect_target() -> option.Option(
+  process.Subject(transport.InternalMessage),
+)
 
 /// Attempt to recover model state from a session token.
 /// Token payload contains serialized model data.
@@ -1770,6 +1738,42 @@ fn extract_model_data(payload: String) -> Result(String, String) {
     Ok("") -> Error("No model data in token")
     Ok(data) -> Ok(data)
     Error(_) -> Error("Failed to parse token payload")
+  }
+}
+
+fn route_for_path(
+  patterns: List(route.RoutePattern),
+  path: String,
+) -> Option(route.Route) {
+  case path {
+    "" -> None
+    _ ->
+      case route.match_path(patterns, path) {
+        Some(resolved_route) -> Some(resolved_route)
+        None -> None
+      }
+  }
+}
+
+fn run_route_leave_effects(
+  state: RuntimeState(model, msg),
+  next_route: Option(route.Route),
+  conn_id: Option(transport.ConnectionId),
+) -> RuntimeState(model, msg) {
+  case state.on_route_leave, state.current_route, next_route {
+    Some(on_leave), Some(previous_route), Some(resolved_route)
+      if previous_route != resolved_route
+    -> {
+      let leave_effect = on_leave(previous_route, resolved_route)
+      run_effects_with_context(
+        leave_effect,
+        state.self,
+        conn_id,
+        state.connections,
+      )
+      state
+    }
+    _, _, _ -> state
   }
 }
 

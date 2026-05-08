@@ -3,7 +3,6 @@
 /// decodes client frames (which are always masked per Section 5.1).
 ///
 /// Reference: RFC 6455 (The WebSocket Protocol).
-
 import beacon/log
 import beacon/transport/server
 import gleam/bit_array
@@ -81,9 +80,7 @@ pub fn upgrade(
 /// Decode a WebSocket frame from buffered data.
 /// Returns Ok(#(frame, remaining_data)) on success,
 /// Error("incomplete") if more data is needed.
-pub fn decode_frame(
-  data: BitArray,
-) -> Result(#(WsFrame, BitArray), String) {
+pub fn decode_frame(data: BitArray) -> Result(#(WsFrame, BitArray), String) {
   case ffi_ws_decode_frame(data) {
     Ok(#(opcode, payload, rest)) -> {
       let frame = case opcode {

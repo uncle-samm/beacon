@@ -1,6 +1,5 @@
 /// Simulation report — aggregates metrics, computes percentiles,
 /// detects leaks, generates pass/fail assertions.
-
 import beacon/log
 import beacon/sim/metrics.{type SimMetrics}
 import beacon/sim/pool.{type PoolResult}
@@ -52,9 +51,7 @@ pub fn generate(
     False -> 0.0
   }
   let event_loss_rate = case m.events_sent > 0 {
-    True ->
-      int.to_float(m.events_failed)
-      /. int.to_float(m.events_sent)
+    True -> int.to_float(m.events_failed) /. int.to_float(m.events_sent)
     False -> 0.0
   }
 
@@ -125,10 +122,7 @@ pub fn log_report(r: SimReport) -> Nil {
       <> "KB, Processes: delta="
       <> int.to_string(r.processes_leaked),
   )
-  log.info(
-    "beacon.sim",
-    "Duration: " <> int.to_string(r.duration_ms) <> "ms",
-  )
+  log.info("beacon.sim", "Duration: " <> int.to_string(r.duration_ms) <> "ms")
   log.info(
     "beacon.sim",
     "Wire: "

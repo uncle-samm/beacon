@@ -12,6 +12,9 @@ pub type SecurityLimits {
     max_message_bytes: Int,        // Default: 65536 (64KB)
     max_events_per_second: Int,    // Default: 50
     max_connections: Int,          // Default: 10000
+    max_http_headers: Int,         // Default: 100
+    max_http_header_bytes: Int,    // Default: 65536
+    pre_upgrade_timeout_ms: Int,   // Default: 5000
   )
 }
 ```
@@ -31,11 +34,12 @@ beacon.app(init, update, view)
 |> beacon.start(8080)
 ```
 
-For routed apps, use `beacon.router_security_limits(builder, limits)`.
+Route-aware apps use the same `beacon.security_limits(builder, limits)` builder
+as every other Beacon app.
 
 ## Origin Validation
 
-On every WebSocket upgrade, the transport checks the `Origin` header against the `Host` header. If they do not match, the connection is rejected with HTTP 403. Requests without an `Origin` header (non-browser clients, same-origin) are allowed.
+On every WebSocket upgrade, the transport checks the `Origin` header against the `Host` header. Empty origins, empty hosts, and mismatches are rejected with HTTP 403. Requests without an `Origin` header (non-browser clients, same-origin) are allowed.
 
 ## Rate Limiting
 
@@ -45,11 +49,15 @@ On every WebSocket upgrade, the transport checks the `Origin` header against the
 
 ## Message Size Limits
 
-WebSocket text frames exceeding `max_message_bytes` (default 64KB) are rejected before decoding. The server sends a `ServerError("Message too large")` response.
+WebSocket text frames exceeding `max_message_bytes` (default 64KB) are rejected before decoding. The incomplete frame buffer is also capped before full-frame decode, so a peer cannot slowly accumulate an oversized partial frame. The server sends a `ServerError("Message too large")` response and closes the socket.
 
 ## Connection Limits
 
-Global WebSocket connection count is tracked via ETS. When `max_connections` (default 10,000) is reached, new upgrade requests receive HTTP 503.
+Global pre-upgrade and WebSocket connection count is tracked via ETS. When `max_connections` (default 10,000) is reached, new requests receive HTTP 503.
+
+## HTTP Pre-Upgrade Limits
+
+Before WebSocket upgrade, Beacon limits total header count, total header bytes, and request/header read time. Slow or oversized pre-upgrade requests fail before any runtime process is started.
 
 ## Secure Headers
 
@@ -64,7 +72,9 @@ The `middleware.secure_headers()` middleware (included by default in all apps) s
 
 ## Session Tokens
 
-SSR pages embed a signed session token in the `data-beacon-token` attribute. Tokens are created with `crypto.sign_message` using HMAC-SHA256 and contain a JSON payload with a timestamp and version. The `verify_session_token` function checks the signature and rejects tokens older than `max_age_seconds` (default 24 hours / 86400 seconds).
+SSR pages set a signed join/state recovery token in the HttpOnly `beacon_join_token` cookie. The browser client sends an empty join token; the runtime reads the cookie from the WebSocket upgrade request. Tokens are created with `crypto.sign_message` using HMAC-SHA256 and contain a JSON payload with a timestamp, version, and optionally serialized model state. The `verify_session_token` function checks the signature and rejects tokens older than `max_age_seconds` (default 24 hours / 86400 seconds).
+
+The cookie is `HttpOnly`, `SameSite=Lax`, path `/`, and has `Max-Age=86400`. JavaScript cannot read it, so XSS cannot directly steal the join token from DOM state.
 
 Auto-generated secret keys are warned about at startup. Set an explicit key for production:
 
@@ -73,6 +83,22 @@ beacon.app(init, update, view)
 |> beacon.secret_key("your-production-secret")
 |> beacon.start(8080)
 ```
+
+## Application Session Auth
+
+For application auth, prefer `beacon/auth` helpers over hand-written cookie and
+CSRF handling. `auth.default_session_config()` sets an opaque `beacon_session`
+cookie with `HttpOnly`, `Secure`, `SameSite=Lax`, and path `/`.
+
+`auth.create_login()` creates a server-side session and a cryptographically
+random session-bound CSRF token. Return that CSRF token in the login response
+body and require it on state-changing API routes with
+`auth.csrf_authenticated()`. Do not store the CSRF token in a cookie.
+
+Use `auth.ws_session_auth(store, config)` for WebSocket upgrades that should
+share the same session policy. Use `auth.dev_session_config()` only for
+localhost HTTP development, where the `Secure` cookie attribute would prevent
+the browser from storing the cookie.
 
 ## Timer Cap
 

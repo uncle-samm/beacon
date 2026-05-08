@@ -1,7 +1,6 @@
 /// Beacon's structured logging module.
 /// Wraps the `logging` package with consistent formatting and context.
 /// All log messages include the module/function context for traceability.
-
 import logging
 
 /// Initialize the logging system. Must be called once at application startup.

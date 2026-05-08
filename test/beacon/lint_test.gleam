@@ -112,8 +112,7 @@ pub fn public_fn_without_log_in_key_module_test() {
     "
 pub fn handle() { Nil }
 "
-  let violations =
-    lint.lint_source("src/beacon/transport.gleam", source)
+  let violations = lint.lint_source("src/beacon/transport.gleam", source)
   let assert [v] = violations
   let assert "public-fn-must-log" = v.rule
 }
@@ -124,8 +123,7 @@ pub fn public_fn_with_log_passes_test() {
 import beacon/log
 pub fn handle() { log.info(\"mod\", \"msg\") }
 "
-  let violations =
-    lint.lint_source("src/beacon/runtime.gleam", source)
+  let violations = lint.lint_source("src/beacon/runtime.gleam", source)
   let assert [] = violations
 }
 
@@ -134,8 +132,7 @@ pub fn private_fn_not_checked_for_log_test() {
     "
 fn helper() { Nil }
 "
-  let violations =
-    lint.lint_source("src/beacon/transport.gleam", source)
+  let violations = lint.lint_source("src/beacon/transport.gleam", source)
   let assert [] = violations
 }
 
@@ -144,8 +141,7 @@ pub fn non_key_module_not_checked_for_log_test() {
     "
 pub fn handle() { Nil }
 "
-  let violations =
-    lint.lint_source("src/beacon/form.gleam", source)
+  let violations = lint.lint_source("src/beacon/form.gleam", source)
   let assert [] = violations
 }
 
@@ -154,6 +150,18 @@ pub fn invalid_source_no_crash_test() {
   let violations = lint.lint_source("bad.gleam", source)
   // Should not crash, just return empty
   let assert [] = violations
+}
+
+pub fn removed_router_api_phrase_is_violation_test() {
+  let source =
+    "
+pub fn note() -> String {
+  \"beacon.router is not a supported API\"
+}
+"
+  let violations = lint.lint_source("src/beacon/bad_route_doc.gleam", source)
+  let assert [v] = violations
+  let assert "no-degraded-path-phrases" = v.rule
 }
 
 // --- Helper ---

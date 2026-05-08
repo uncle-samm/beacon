@@ -1,6 +1,5 @@
 /// Client-side handler registry — mirrors the server's beacon/handler.gleam
 /// but uses JavaScript module-level storage instead of BEAM process dictionary.
-
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/string
@@ -104,6 +103,7 @@ fn extract_value(data: String) -> String {
 // === JS FFI for storage ===
 
 const registry_key = "beacon_handler_registry"
+
 const stack_key = "beacon_handler_stack"
 
 fn pd_set_registry(registry: HandlerRegistry(msg)) -> Nil {

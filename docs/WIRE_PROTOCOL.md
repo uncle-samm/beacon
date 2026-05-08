@@ -4,12 +4,15 @@ Beacon communicates over WebSocket at `/ws` using JSON messages with a `type` di
 
 ## Client Messages (browser to server)
 
-**join** -- Sent after WebSocket opens. Optional `token` for state recovery, `path` for routing.
+**join** -- Sent after WebSocket opens. `path` drives routing. `token` remains in the JSON shape for direct runtime tests and non-browser clients, but browser join/session recovery uses the HttpOnly `beacon_join_token` cookie from the WebSocket upgrade request.
 ```json
 {"type": "join", "token": "", "path": "/"}
 ```
 
-**event** -- DOM event. `handler_id` maps to the view's handler. `clock` is monotonic. `ops` is client-computed patch (empty string if none).
+**event** -- DOM event. `handler_id` maps to the view's handler. `clock` is
+monotonic. `ops` is an optional client-computed patch hint (empty string if
+none). The server never treats `ops` as authoritative state; it runs the
+server-side update and replies with the server-computed model state or patch.
 ```json
 {"type": "event", "name": "click", "handler_id": "increment", "data": "{}", "target_path": "0.1.0", "clock": 5, "ops": ""}
 ```
@@ -31,17 +34,20 @@ Beacon communicates over WebSocket at `/ws` using JSON messages with a `type` di
 
 ## Server Messages (server to browser)
 
-**mount** -- Initial SSR HTML after `join`.
+**mount** -- Initial live mount HTML after `join`. Normal post-mount updates
+must not use `mount`; they use `model_sync` or `patch`.
 ```json
 {"type": "mount", "payload": "<div>...</div>"}
 ```
 
-**model_sync** -- Full authoritative model state. Sent on join.
+**model_sync** -- Full authoritative model state. Sent on join and whenever the
+server must replace the client's cached model JSON.
 ```json
 {"type": "model_sync", "model": "{\"count\":1}", "version": 1, "ack_clock": 1}
 ```
 
-**patch** -- Incremental JSON Patch ops. Sent after events when model changes.
+**patch** -- Incremental server-computed JSON Patch ops. Sent after events when
+model changes and the server can describe the change compactly.
 ```json
 {"type": "patch", "ops": "[{\"op\":\"replace\",\"path\":\"/count\",\"value\":2}]", "version": 2, "ack_clock": 2}
 ```
@@ -82,9 +88,9 @@ Each `event` has a monotonic `clock`. The server echoes it back as `ack_clock` o
 ## Reconnection Flow
 
 1. Client reopens WebSocket to `/ws`.
-2. Client sends `join` with saved token.
+2. Browser sends `join` with an empty token; the cookie is carried by the WebSocket upgrade request.
 3. Server validates token age (max 24h) and deserializes model.
-4. Success: `mount` with recovered state. Failure: uses current model.
+4. Success: `mount`/`model_sync` with recovered state. Failure: uses current model and logs the recovery error.
 
 ## Security
 

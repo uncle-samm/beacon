@@ -1,5 +1,5 @@
 /// URL routing — pattern matching, parameter extraction, route tables.
-
+import beacon/element.{type Node}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -27,6 +27,148 @@ pub type RoutePattern {
     /// Pattern segments (e.g., ["blog", ":slug"]).
     segments: List(String),
   )
+}
+
+/// Explicit route page declaration.
+///
+/// A page declares the URL pattern, the message to send when that page is
+/// entered during SSR or client-side navigation, and the typed render function
+/// for that page. Route modules can export page constructors and the app can
+/// import them explicitly; Beacon does not discover files.
+pub opaque type Page(model, msg) {
+  Page(
+    pattern: RoutePattern,
+    on_enter: fn(Route) -> msg,
+    render: fn(model, Route) -> Node(msg),
+  )
+}
+
+/// Declare a page route.
+///
+/// ```gleam
+/// route.page(
+///   "/projects/:id",
+///   fn(r) { RouteChanged(r.path) },
+///   fn(model, route) { project_view(model, route) },
+/// )
+/// ```
+pub fn page(
+  pattern pattern_string: String,
+  on_enter on_enter: fn(Route) -> msg,
+  render render: fn(model, Route) -> Node(msg),
+) -> Page(model, msg) {
+  Page(pattern: pattern(pattern_string), on_enter: on_enter, render: render)
+}
+
+/// Declare a page route backed by a child model selected from the root model.
+///
+/// This is the route mini-app building block. A route module can own its own
+/// `Model`, `Msg`, `update`, and `view`; the root app embeds that child model,
+/// wraps child messages into the root `Msg`, and stays on the single Beacon app
+/// runtime.
+pub fn page_model(
+  pattern pattern_string: String,
+  on_enter on_enter: fn(Route) -> msg,
+  select select: fn(root_model) -> child_model,
+  render render: fn(child_model, Route) -> Node(msg),
+) -> Page(root_model, msg) {
+  page(pattern_string, on_enter, fn(root_model, resolved) {
+    render(select(root_model), resolved)
+  })
+}
+
+/// Update a child route model embedded in the root model.
+///
+/// The parent still decides which child messages are accepted. This helper only
+/// removes the repetitive select-update-replace boilerplate for route mini-apps.
+pub fn update_model(
+  root_model: root_model,
+  child_msg: child_msg,
+  select: fn(root_model) -> child_model,
+  replace: fn(root_model, child_model) -> root_model,
+  update: fn(child_model, child_msg) -> child_model,
+) -> root_model {
+  let child_model = select(root_model)
+  let updated_child = update(child_model, child_msg)
+  replace(root_model, updated_child)
+}
+
+/// Update a child route model and child route server state embedded in root
+/// app state.
+///
+/// The child `Server` value stays private because it is selected only from the
+/// root server state. It is never passed to route rendering or client bundle
+/// generation.
+pub fn update_server_model(
+  root_model: root_model,
+  root_server: root_server,
+  child_msg: child_msg,
+  select_model: fn(root_model) -> child_model,
+  replace_model: fn(root_model, child_model) -> root_model,
+  select_server: fn(root_server) -> child_server,
+  replace_server: fn(root_server, child_server) -> root_server,
+  update: fn(child_model, child_server, child_msg) ->
+    #(child_model, child_server),
+) -> #(root_model, root_server) {
+  let child_model = select_model(root_model)
+  let child_server = select_server(root_server)
+  let #(updated_child, updated_server) =
+    update(child_model, child_server, child_msg)
+  #(
+    replace_model(root_model, updated_child),
+    replace_server(root_server, updated_server),
+  )
+}
+
+/// Get the pattern for a page route.
+pub fn page_pattern(page: Page(model, msg)) -> RoutePattern {
+  page.pattern
+}
+
+/// Extract all route patterns from an explicit page manifest.
+pub fn page_patterns(pages: List(Page(model, msg))) -> List(RoutePattern) {
+  list.map(pages, page_pattern)
+}
+
+/// Dispatch a matched route to the first matching page declaration.
+///
+/// This returns `Error` only when the route did not come from the same page
+/// manifest. `beacon.route_pages` treats that as a programming error and fails
+/// loudly.
+pub fn dispatch_page(
+  pages: List(Page(model, msg)),
+  resolved: Route,
+) -> Result(msg, String) {
+  case pages {
+    [] -> Error("No explicit route page matched " <> resolved.path)
+    [Page(pattern: pattern, on_enter: on_enter, ..), ..rest] -> {
+      case match_path([pattern], resolved.path) {
+        Some(route) -> Ok(on_enter(route))
+        None -> dispatch_page(rest, resolved)
+      }
+    }
+  }
+}
+
+/// Dispatch a model to the first matching page render function.
+///
+/// This is the typed root route dispatcher for explicit route manifests. The
+/// app still owns its `Model` and `Msg`, but the page list is now the single
+/// source for accepted patterns, enter messages, and view dispatch.
+pub fn dispatch_view(
+  pages: List(Page(model, msg)),
+  model: model,
+  path: String,
+) -> Result(Node(msg), String) {
+  case pages {
+    [] -> Error("No explicit route page view matched " <> path)
+    [Page(pattern: pattern, render: render, ..), ..rest] -> {
+      case match_path([pattern], path) {
+        Some(route) -> Ok(render(model, route))
+        None -> dispatch_view(rest, model, path)
+      }
+    }
+  }
 }
 
 /// Parse a path string into segments.
@@ -63,10 +205,7 @@ pub fn parse_query(query_string: String) -> Dict(String, String) {
 
 /// Match a URL path against a list of route patterns.
 /// Returns the first match with extracted parameters.
-pub fn match_path(
-  patterns: List(RoutePattern),
-  path: String,
-) -> Option(Route) {
+pub fn match_path(patterns: List(RoutePattern), path: String) -> Option(Route) {
   let #(path_part, query_part) = case string.split(path, "?") {
     [p, q] -> #(p, q)
     [p] -> #(p, "")
@@ -212,12 +351,13 @@ fn match_guarded_loop(
     [def, ..rest] -> {
       case match_segments(def.pattern.segments, segments, dict.new()) {
         option.Some(params) -> {
-          let matched_route = Route(
-            path: path_part,
-            segments: segments,
-            params: params,
-            query: query,
-          )
+          let matched_route =
+            Route(
+              path: path_part,
+              segments: segments,
+              params: params,
+              query: query,
+            )
           case def.guard {
             option.Some(guard_fn) -> {
               case guard_fn(matched_route) {
@@ -235,10 +375,7 @@ fn match_guarded_loop(
 }
 
 /// Check if a path matches any route (returns False for 404).
-pub fn is_valid_path(
-  patterns: List(RoutePattern),
-  path: String,
-) -> Bool {
+pub fn is_valid_path(patterns: List(RoutePattern), path: String) -> Bool {
   case match_path(patterns, path) {
     option.Some(_) -> True
     option.None -> False

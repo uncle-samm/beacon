@@ -1,5 +1,4 @@
 /// File upload handling — multipart form data parsing, size limits, type validation.
-
 import gleam/bit_array
 import gleam/int
 import gleam/list
@@ -93,7 +92,8 @@ pub fn save(file: UploadedFile, directory: String) -> Result(String, String) {
   let path = directory <> "/" <> safe_name
   case write_file(path, file.data) {
     Ok(Nil) -> Ok(path)
-    Error(reason) -> Error("Failed to save file: " <> path <> " (" <> reason <> ")")
+    Error(reason) ->
+      Error("Failed to save file: " <> path <> " (" <> reason <> ")")
   }
 }
 
@@ -168,9 +168,7 @@ fn extract_boundary(content_type: String) -> Result(String, Nil) {
 fn parse_parts(body: BitArray, boundary: String) -> List(UploadedFile) {
   let separator = <<"--":utf8, boundary:utf8>>
   let parts = binary_split(body, separator)
-  list.filter_map(parts, fn(part) {
-    parse_single_part_binary(part)
-  })
+  list.filter_map(parts, fn(part) { parse_single_part_binary(part) })
 }
 
 /// Parse a single multipart part from binary data.
@@ -187,8 +185,7 @@ fn parse_single_part_binary(part: BitArray) -> Result(UploadedFile, Nil) {
             && string.contains(headers, "Content-Disposition")
           {
             True -> {
-              let filename =
-                extract_header_value(headers, "filename=\"", "\"")
+              let filename = extract_header_value(headers, "filename=\"", "\"")
               let content_type_val =
                 extract_header_value(headers, "Content-Type: ", "\r\n")
               // Trim trailing \r\n before the next boundary
@@ -212,11 +209,7 @@ fn parse_single_part_binary(part: BitArray) -> Result(UploadedFile, Nil) {
 }
 
 /// Extract a value from headers between start and end markers.
-fn extract_header_value(
-  headers: String,
-  start: String,
-  end: String,
-) -> String {
+fn extract_header_value(headers: String, start: String, end: String) -> String {
   case string.split(headers, start) {
     [_, rest] -> {
       case string.split(rest, end) {

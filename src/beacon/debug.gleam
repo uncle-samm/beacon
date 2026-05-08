@@ -2,7 +2,6 @@
 /// Provides runtime statistics and monitoring capabilities.
 ///
 /// Reference: Phoenix.Telemetry, Erlang observer.
-
 import beacon/log
 import gleam/erlang/process
 import gleam/int

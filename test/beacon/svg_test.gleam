@@ -43,8 +43,7 @@ pub fn svg_rect_test() {
 }
 
 pub fn svg_line_test() {
-  let node =
-    svg.line([svg.x1("0"), svg.y1("0"), svg.x2("100"), svg.y2("100")])
+  let node = svg.line([svg.x1("0"), svg.y1("0"), svg.x2("100"), svg.y2("100")])
   let result = element.to_string(node)
   let assert True = str_contains(result, "<line")
   let assert True = str_contains(result, "x1=\"0\"")
@@ -79,9 +78,7 @@ pub fn svg_full_icon_test() {
       [html.class("w-4 h-4"), svg.viewbox("0 0 24 24"), svg.fill("none")],
       [
         svg.path([
-          svg.d(
-            "M12 2L2 22h20L12 2z",
-          ),
+          svg.d("M12 2L2 22h20L12 2z"),
           svg.stroke("currentColor"),
           svg.stroke_width("2"),
           svg.stroke_linecap("round"),
@@ -158,8 +155,7 @@ pub fn svg_in_html_context_test() {
 }
 
 pub fn svg_text_element_test() {
-  let node =
-    svg.text([svg.x("10"), svg.y("20")], [element.text("Hello SVG")])
+  let node = svg.text([svg.x("10"), svg.y("20")], [element.text("Hello SVG")])
   let result = element.to_string(node)
   let assert True = str_contains(result, "<text")
   let assert True = str_contains(result, "Hello SVG")
@@ -167,7 +163,8 @@ pub fn svg_text_element_test() {
 }
 
 pub fn svg_ellipse_test() {
-  let node = svg.ellipse([svg.cx("50"), svg.cy("50"), svg.rx("30"), svg.ry("20")])
+  let node =
+    svg.ellipse([svg.cx("50"), svg.cy("50"), svg.rx("30"), svg.ry("20")])
   let result = element.to_string(node)
   let assert True = str_contains(result, "<ellipse")
   let assert True = str_contains(result, "rx=\"30\"")
@@ -192,7 +189,11 @@ pub fn svg_clip_path_test() {
 
 pub fn svg_fill_rule_and_clip_rule_test() {
   let node =
-    svg.path([svg.d("M0 0h24v24H0z"), svg.fill_rule("evenodd"), svg.clip_rule("evenodd")])
+    svg.path([
+      svg.d("M0 0h24v24H0z"),
+      svg.fill_rule("evenodd"),
+      svg.clip_rule("evenodd"),
+    ])
   let result = element.to_string(node)
   let assert True = str_contains(result, "fill-rule=\"evenodd\"")
   let assert True = str_contains(result, "clip-rule=\"evenodd\"")
