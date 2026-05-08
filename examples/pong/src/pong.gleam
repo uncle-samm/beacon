@@ -1,8 +1,7 @@
 /// Pong — demonstrates:
-/// - app_with_effects for game tick loop
-/// - effect.background for server-side game loop
+/// - pure update with on_update for the server-side game loop
+/// - effect.background for scheduled ticks
 /// - All game logic runs on the server
-
 import beacon
 import beacon/effect
 import beacon/html
@@ -44,74 +43,67 @@ pub type Msg {
   PauseGame
 }
 
-pub fn init() -> #(Model, effect.Effect(Msg)) {
-  #(
-    Model(
-      left_y: height / 2,
-      right_y: height / 2,
-      ball_x: width / 2,
-      ball_y: height / 2,
-      ball_dx: 4,
-      ball_dy: 2,
-      left_score: 0,
-      right_score: 0,
-      running: False,
-    ),
-    effect.none(),
+pub fn init() -> Model {
+  Model(
+    left_y: height / 2,
+    right_y: height / 2,
+    ball_x: width / 2,
+    ball_y: height / 2,
+    ball_dx: 4,
+    ball_dy: 2,
+    left_score: 0,
+    right_score: 0,
+    running: False,
   )
 }
 
-pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
+pub fn update(model: Model, msg: Msg) -> Model {
   case msg {
-    LeftUp -> #(
-      Model(
-        ..model,
-        left_y: int.max(paddle_h / 2, model.left_y - paddle_speed),
-      ),
-      effect.none(),
-    )
-    LeftDown -> #(
+    LeftUp ->
+      Model(..model, left_y: int.max(paddle_h / 2, model.left_y - paddle_speed))
+    LeftDown ->
       Model(
         ..model,
         left_y: int.min(height - paddle_h / 2, model.left_y + paddle_speed),
-      ),
-      effect.none(),
-    )
-    RightUp -> #(
+      )
+    RightUp ->
       Model(
         ..model,
         right_y: int.max(paddle_h / 2, model.right_y - paddle_speed),
-      ),
-      effect.none(),
-    )
-    RightDown -> #(
+      )
+    RightDown ->
       Model(
         ..model,
-        right_y: int.min(
-          height - paddle_h / 2,
-          model.right_y + paddle_speed,
-        ),
-      ),
-      effect.none(),
-    )
+        right_y: int.min(height - paddle_h / 2, model.right_y + paddle_speed),
+      )
     StartGame -> {
-      let m =
-        Model(
-          ..model,
-          running: True,
-          ball_x: width / 2,
-          ball_y: height / 2,
-          ball_dx: 4,
-          ball_dy: 2,
-        )
-      #(m, tick_effect())
+      Model(
+        ..model,
+        running: True,
+        ball_x: width / 2,
+        ball_y: height / 2,
+        ball_dx: 4,
+        ball_dy: 2,
+      )
     }
-    PauseGame -> #(Model(..model, running: False), effect.none())
+    PauseGame -> Model(..model, running: False)
     Tick ->
       case model.running {
-        False -> #(model, effect.none())
-        True -> #(advance_ball(model), tick_effect())
+        False -> model
+        True -> advance_ball(model)
       }
+  }
+}
+
+fn after_update(model: Model, msg: Msg) -> effect.Effect(Msg) {
+  case msg {
+    StartGame -> tick_effect()
+    Tick ->
+      case model.running {
+        True -> tick_effect()
+        False -> effect.none()
+      }
+    _ -> effect.none()
   }
 }
 
@@ -165,14 +157,7 @@ fn advance_ball(model: Model) -> Model {
         ball_dx: -4,
         ball_dy: 2,
       )
-    _ ->
-      Model(
-        ..model,
-        ball_x: nx,
-        ball_y: new_y,
-        ball_dx: dx,
-        ball_dy: new_dy,
-      )
+    _ -> Model(..model, ball_x: nx, ball_y: new_y, ball_dx: dx, ball_dy: new_dy)
   }
 }
 
@@ -200,13 +185,7 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
         ),
       ],
       [
-        rect(
-          0,
-          model.left_y - paddle_h / 2,
-          paddle_w,
-          paddle_h,
-          "#4ecdc4",
-        ),
+        rect(0, model.left_y - paddle_h / 2, paddle_w, paddle_h, "#4ecdc4"),
         rect(
           width - paddle_w,
           model.right_y - paddle_h / 2,
@@ -248,8 +227,9 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
 }
 
 pub fn main() {
-  beacon.app_with_effects(init, update, view)
+  beacon.app(init, update, view)
   |> beacon.title("Beacon Pong")
+  |> beacon.on_update(after_update)
   |> beacon.start(8080)
 }
 

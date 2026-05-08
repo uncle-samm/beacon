@@ -3,6 +3,7 @@
 ///
 /// Reference: LiveView form handling, Livewire form validation.
 import beacon/element.{type Attr, type Node}
+import beacon/log
 import gleam/crypto
 import gleam/int
 import gleam/list
@@ -113,7 +114,13 @@ pub fn field_has_errors(form: Form, name: String) -> Bool {
         [_, ..] -> True
         [] -> False
       }
-    Error(Nil) -> False
+    Error(Nil) -> {
+      log.debug(
+        "beacon.form",
+        "Field not found while checking errors: " <> name,
+      )
+      False
+    }
   }
 }
 
@@ -305,7 +312,10 @@ pub fn verify_session_csrf(
         False -> False
       }
     }
-    Error(Nil) -> False
+    Error(Nil) -> {
+      log.warning("beacon.form", "CSRF token not found for session")
+      False
+    }
   }
 }
 

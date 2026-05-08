@@ -1,6 +1,6 @@
 -module(beacon_sim_ffi).
 -export([
-    new_metrics/0, increment/2, increment_by/3, record_latency/2, collect/1, destroy/1,
+    new_metrics/0, increment/2, increment_by/3, record_latency/2, record_payload/2, collect/1, destroy/1,
     monotonic_us/0, snapshot_memory/0, snapshot_processes/0,
     message_queue_len/1
 ]).
@@ -22,6 +22,7 @@ new_metrics() ->
     ets:insert(Counters, {patches_received, 0}),
     ets:insert(Counters, {model_syncs_received, 0}),
     ets:insert(Counters, {mounts_received, 0}),
+    ets:insert(Counters, {last_payload, <<>>}),
     {Counters, Latencies}.
 
 %% Atomically increment a counter by 1.
@@ -75,6 +76,11 @@ record_latency({_Counters, Latencies}, LatencyUs) ->
     ets:insert(Latencies, {latency, LatencyUs}),
     nil.
 
+%% Store the latest received WebSocket payload for behavioral assertions.
+record_payload({Counters, _Latencies}, Payload) ->
+    ets:insert(Counters, {last_payload, Payload}),
+    nil.
+
 %% Collect all metrics into a Gleam-friendly structure.
 %% Returns: {EventsSent, EventsAcked, EventsFailed,
 %%           ConnOpened, ConnClosed, ConnFailed, Latencies}
@@ -98,7 +104,8 @@ collect({Counters, Latencies}) ->
         Get(bytes_received),
         Get(patches_received),
         Get(model_syncs_received),
-        Get(mounts_received)
+        Get(mounts_received),
+        Get(last_payload)
     }.
 
 %% Delete metrics tables.

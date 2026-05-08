@@ -17,17 +17,100 @@ import simplifile
 /// Called by the example runner to auto-build before starting.
 pub fn build_from_source(path: String) -> Nil {
   // Clean stale codec artifacts to prevent type mismatches between apps
-  clean_codec_artifacts()
-  case simplifile.read(path) {
-    Ok(source) -> {
-      log.info("beacon.build", "Auto-building: " <> path)
-      compile_module(path, source)
-    }
+  case clean_codec_artifacts() {
+    Error(reason) -> log.error("beacon.build", reason)
+    Ok(Nil) ->
+      case simplifile.read(path) {
+        Ok(source) -> {
+          log.info("beacon.build", "Auto-building: " <> path)
+          case compile_module(path, source) {
+            Ok(Nil) -> Nil
+            Error(reason) -> log.error("beacon.build", reason)
+          }
+        }
+        Error(err) ->
+          log.error(
+            "beacon.build",
+            "Cannot read " <> path <> ": " <> string.inspect(err),
+          )
+      }
+  }
+}
+
+fn log_compile_result(result: Result(Nil, String)) -> Nil {
+  case result {
+    Ok(Nil) -> Nil
+    Error(reason) -> log.error("beacon.build", reason)
+  }
+}
+
+fn delete_path_if_exists(path: String) -> Result(Nil, String) {
+  case simplifile.is_file(path) {
     Error(err) ->
+      Error("Failed to inspect " <> path <> ": " <> string.inspect(err))
+    Ok(True) -> delete_existing_path(path)
+    Ok(False) -> {
+      case simplifile.is_directory(path) {
+        Error(err) ->
+          Error("Failed to inspect " <> path <> ": " <> string.inspect(err))
+        Ok(True) -> delete_existing_path(path)
+        Ok(False) -> Ok(Nil)
+      }
+    }
+  }
+}
+
+fn delete_existing_path(path: String) -> Result(Nil, String) {
+  case simplifile.delete(path) {
+    Ok(Nil) -> Ok(Nil)
+    Error(err) ->
+      Error("Failed to delete " <> path <> ": " <> string.inspect(err))
+  }
+}
+
+fn clean_old_client_bundles(dir: String) -> Result(Nil, String) {
+  case simplifile.get_files(dir) {
+    Error(err) -> Error("Failed to list " <> dir <> ": " <> string.inspect(err))
+    Ok(files) -> {
+      let errors =
+        list.filter_map(files, fn(f) {
+          case
+            string.contains(f, "beacon_client_") && string.ends_with(f, ".js")
+          {
+            False -> Error(Nil)
+            True -> {
+              case simplifile.delete(f) {
+                Ok(Nil) -> Error(Nil)
+                Error(err) ->
+                  Ok(
+                    "Failed to delete old bundle "
+                    <> f
+                    <> ": "
+                    <> string.inspect(err),
+                  )
+              }
+            }
+          }
+        })
+      case errors {
+        [] -> Ok(Nil)
+        [first, ..] -> Error(first)
+      }
+    }
+  }
+}
+
+fn optional_clean_generated_file(path: String) -> Result(Nil, String) {
+  case simplifile.is_file(path) {
+    Ok(False) -> Ok(Nil)
+    Ok(True) -> delete_existing_path(path)
+    Error(err) -> {
       log.error(
         "beacon.build",
-        "Cannot read " <> path <> ": " <> string.inspect(err),
+        "Failed to inspect " <> path <> ": " <> string.inspect(err),
       )
+      Error("Failed to inspect " <> path <> ": " <> string.inspect(err))
+    }
   }
 }
 
@@ -47,7 +130,7 @@ pub fn main() {
       case simplifile.read(arg) {
         Ok(source) -> {
           log.info("beacon.build", "Using specified module: " <> arg)
-          compile_module(arg, source)
+          log_compile_result(compile_module(arg, source))
         }
         Error(err) ->
           log.error(
@@ -60,7 +143,7 @@ pub fn main() {
       case find_app_module(arg) {
         Ok(#(path, source)) -> {
           log.info("beacon.build", "Found app module: " <> path)
-          compile_module(path, source)
+          log_compile_result(compile_module(path, source))
         }
         Error(reason) -> log.error("beacon.build", reason)
       }
@@ -74,73 +157,80 @@ pub fn main() {
 fn resolve_external_sources(
   source: String,
   source_root: String,
-) -> List(#(String, String, String)) {
+) -> Result(List(#(String, String, String)), String) {
   case glance.module(source) {
-    Error(_) -> {
-      log.warning(
-        "beacon.build",
+    Error(_) ->
+      Error(
         "Failed to parse source for external module resolution in "
-          <> source_root,
+        <> source_root,
       )
-      []
-    }
     Ok(module) -> {
-      list.filter_map(module.imports, fn(def) {
-        let import_ = def.definition
-        let mod_path = import_.module
-        // Skip framework/stdlib imports — only follow user modules
-        case
-          string.starts_with(mod_path, "gleam/")
-          || string.starts_with(mod_path, "beacon")
-          || mod_path == "simplifile"
-          || mod_path == "glance"
-          || mod_path == "mist"
-          || mod_path == "wisp"
-        {
-          True -> Error(Nil)
-          False -> {
-            // Resolve to file path relative to the project's source root.
-            // For apps at src/app/model.gleam importing app/route,
-            // the file is at src/app/route.gleam.
-            let file_path = source_root <> "/" <> mod_path <> ".gleam"
-            case simplifile.read(file_path) {
-              Ok(ext_source) -> {
-                // The alias is the last segment of the module path
-                // (e.g., "domains/auth" → "auth")
-                let alias = case import_.alias {
-                  option.Some(glance.Named(name)) -> name
-                  option.Some(glance.Discarded(name)) -> name
-                  option.None -> {
-                    case string.split(mod_path, "/") |> list.last {
-                      Ok(name) -> name
-                      Error(_) -> mod_path
+      let resolved =
+        list.fold(module.imports, Ok([]), fn(acc_result, def) {
+          case acc_result {
+            Error(reason) -> Error(reason)
+            Ok(acc) -> {
+              let import_ = def.definition
+              let mod_path = import_.module
+              // Skip framework/stdlib imports — only follow user modules
+              case
+                string.starts_with(mod_path, "gleam/")
+                || string.starts_with(mod_path, "beacon")
+                || mod_path == "simplifile"
+                || mod_path == "glance"
+                || mod_path == "mist"
+                || mod_path == "wisp"
+              {
+                True -> Ok(acc)
+                False -> {
+                  // Resolve to file path relative to the project's source root.
+                  // For apps at src/app/model.gleam importing app/route,
+                  // the file is at src/app/route.gleam.
+                  let file_path = source_root <> "/" <> mod_path <> ".gleam"
+                  case simplifile.read(file_path) {
+                    Ok(ext_source) -> {
+                      // The alias is the last segment of the module path
+                      // (e.g., "domains/auth" → "auth")
+                      let alias = case import_.alias {
+                        option.Some(glance.Named(name)) -> name
+                        option.Some(glance.Discarded(name)) -> name
+                        option.None -> {
+                          case string.split(mod_path, "/") |> list.last {
+                            Ok(name) -> name
+                            Error(_) -> mod_path
+                          }
+                        }
+                      }
+                      log.info(
+                        "beacon.build",
+                        "Resolved external module: "
+                          <> mod_path
+                          <> " (alias: "
+                          <> alias
+                          <> ")",
+                      )
+                      Ok([#(alias, mod_path, ext_source), ..acc])
+                    }
+                    Error(_) -> {
+                      // File doesn't exist — might be a hex package
+                      log.debug(
+                        "beacon.build",
+                        "Could not read external module file for "
+                          <> mod_path
+                          <> " — likely a hex package, skipping",
+                      )
+                      Ok(acc)
                     }
                   }
                 }
-                log.info(
-                  "beacon.build",
-                  "Resolved external module: "
-                    <> mod_path
-                    <> " (alias: "
-                    <> alias
-                    <> ")",
-                )
-                Ok(#(alias, mod_path, ext_source))
-              }
-              Error(_) -> {
-                // File doesn't exist — might be a hex package
-                log.debug(
-                  "beacon.build",
-                  "Could not read external module file for "
-                    <> mod_path
-                    <> " — likely a hex package, skipping",
-                )
-                Error(Nil)
               }
             }
           }
-        }
-      })
+        })
+      case resolved {
+        Ok(items) -> Ok(list.reverse(items))
+        Error(reason) -> Error(reason)
+      }
     }
   }
 }
@@ -150,11 +240,16 @@ fn resolve_external_sources(
 pub fn resolve_transitive_external_sources(
   source: String,
   source_root: String,
-) -> List(#(String, String, String)) {
-  let direct_sources = resolve_external_sources(source, source_root)
-  let #(sources, _seen) =
-    walk_external_sources(direct_sources, source_root, [], [])
-  sources
+) -> Result(List(#(String, String, String)), String) {
+  case resolve_external_sources(source, source_root) {
+    Error(reason) -> Error(reason)
+    Ok(direct_sources) -> {
+      case walk_external_sources(direct_sources, source_root, [], []) {
+        Ok(#(sources, _seen)) -> Ok(sources)
+        Error(reason) -> Error(reason)
+      }
+    }
+  }
 }
 
 /// Resolve all transitive Beacon framework sources reachable from copied source text.
@@ -162,14 +257,28 @@ pub fn resolve_transitive_external_sources(
 pub fn resolve_transitive_framework_sources(
   sources: List(String),
   beacon_root: String,
-) -> List(#(String, String, String)) {
-  let direct_sources =
-    list.flat_map(sources, fn(source) {
-      resolve_framework_sources(source, beacon_root)
+) -> Result(List(#(String, String, String)), String) {
+  let direct_result =
+    list.fold(sources, Ok([]), fn(acc_result, source) {
+      case acc_result {
+        Error(reason) -> Error(reason)
+        Ok(acc) -> {
+          case resolve_framework_sources(source, beacon_root) {
+            Ok(resolved) -> Ok(list.append(resolved, acc))
+            Error(reason) -> Error(reason)
+          }
+        }
+      }
     })
-  let #(sources, _seen) =
-    walk_framework_sources(direct_sources, beacon_root, [], [])
-  sources
+  case direct_result {
+    Error(reason) -> Error(reason)
+    Ok(direct_sources) -> {
+      case walk_framework_sources(direct_sources, beacon_root, [], []) {
+        Ok(#(sources, _seen)) -> Ok(sources)
+        Error(reason) -> Error(reason)
+      }
+    }
+  }
 }
 
 fn walk_external_sources(
@@ -177,21 +286,24 @@ fn walk_external_sources(
   source_root: String,
   seen: List(String),
   acc: List(#(String, String, String)),
-) -> #(List(#(String, String, String)), List(String)) {
+) -> Result(#(List(#(String, String, String)), List(String)), String) {
   case pending {
-    [] -> #(list.reverse(acc), seen)
+    [] -> Ok(#(list.reverse(acc), seen))
     [ext, ..rest] -> {
       let #(alias, module_path, ext_source) = ext
       case list.contains(seen, module_path) {
         True -> walk_external_sources(rest, source_root, seen, acc)
         False -> {
-          let child_sources = resolve_external_sources(ext_source, source_root)
-          walk_external_sources(
-            list.append(child_sources, rest),
-            source_root,
-            [module_path, ..seen],
-            [#(alias, module_path, ext_source), ..acc],
-          )
+          case resolve_external_sources(ext_source, source_root) {
+            Error(reason) -> Error(reason)
+            Ok(child_sources) ->
+              walk_external_sources(
+                list.append(child_sources, rest),
+                source_root,
+                [module_path, ..seen],
+                [#(alias, module_path, ext_source), ..acc],
+              )
+          }
         }
       }
     }
@@ -201,45 +313,54 @@ fn walk_external_sources(
 fn resolve_framework_sources(
   source: String,
   beacon_root: String,
-) -> List(#(String, String, String)) {
+) -> Result(List(#(String, String, String)), String) {
   case glance.module(source) {
-    Error(_) -> []
-    Ok(module) ->
-      list.filter_map(module.imports, fn(def) {
-        let import_ = def.definition
-        let mod_path = import_.module
-        case string.starts_with(mod_path, "beacon/") {
-          True -> {
-            let file_path = beacon_root <> "/src/" <> mod_path <> ".gleam"
-            case simplifile.read(file_path) {
-              Ok(ext_source) -> {
-                let alias = case import_.alias {
-                  option.Some(glance.Named(name)) -> name
-                  option.Some(glance.Discarded(name)) -> name
-                  option.None -> {
-                    case string.split(mod_path, "/") |> list.last {
-                      Ok(name) -> name
-                      Error(_) -> mod_path
+    Error(_) -> Error("Failed to parse source while resolving Beacon imports")
+    Ok(module) -> {
+      let resolved =
+        list.fold(module.imports, Ok([]), fn(acc_result, def) {
+          case acc_result {
+            Error(reason) -> Error(reason)
+            Ok(acc) -> {
+              let import_ = def.definition
+              let mod_path = import_.module
+              case string.starts_with(mod_path, "beacon/") {
+                True -> {
+                  let file_path = beacon_root <> "/src/" <> mod_path <> ".gleam"
+                  case simplifile.read(file_path) {
+                    Ok(ext_source) -> {
+                      let alias = case import_.alias {
+                        option.Some(glance.Named(name)) -> name
+                        option.Some(glance.Discarded(name)) -> name
+                        option.None -> {
+                          case string.split(mod_path, "/") |> list.last {
+                            Ok(name) -> name
+                            Error(_) -> mod_path
+                          }
+                        }
+                      }
+                      Ok([#(alias, mod_path, ext_source), ..acc])
+                    }
+                    Error(err) -> {
+                      Error(
+                        "Could not read framework module "
+                        <> mod_path
+                        <> ": "
+                        <> string.inspect(err),
+                      )
                     }
                   }
                 }
-                Ok(#(alias, mod_path, ext_source))
-              }
-              Error(err) -> {
-                log.warning(
-                  "beacon.build",
-                  "Could not read framework module "
-                    <> mod_path
-                    <> ": "
-                    <> string.inspect(err),
-                )
-                Error(Nil)
+                False -> Ok(acc)
               }
             }
           }
-          False -> Error(Nil)
-        }
-      })
+        })
+      case resolved {
+        Ok(items) -> Ok(list.reverse(items))
+        Error(reason) -> Error(reason)
+      }
+    }
   }
 }
 
@@ -248,21 +369,24 @@ fn walk_framework_sources(
   beacon_root: String,
   seen: List(String),
   acc: List(#(String, String, String)),
-) -> #(List(#(String, String, String)), List(String)) {
+) -> Result(#(List(#(String, String, String)), List(String)), String) {
   case pending {
-    [] -> #(list.reverse(acc), seen)
+    [] -> Ok(#(list.reverse(acc), seen))
     [ext, ..rest] -> {
       let #(alias, module_path, ext_source) = ext
       case list.contains(seen, module_path) {
         True -> walk_framework_sources(rest, beacon_root, seen, acc)
         False -> {
-          let child_sources = resolve_framework_sources(ext_source, beacon_root)
-          walk_framework_sources(
-            list.append(child_sources, rest),
-            beacon_root,
-            [module_path, ..seen],
-            [#(alias, module_path, ext_source), ..acc],
-          )
+          case resolve_framework_sources(ext_source, beacon_root) {
+            Error(reason) -> Error(reason)
+            Ok(child_sources) ->
+              walk_framework_sources(
+                list.append(child_sources, rest),
+                beacon_root,
+                [module_path, ..seen],
+                [#(alias, module_path, ext_source), ..acc],
+              )
+          }
         }
       }
     }
@@ -311,11 +435,14 @@ fn source_root_parts(parts: List(String), acc: List(String)) -> String {
 /// Compile a specific module — analyze, generate codec, build client JS.
 /// Apps must produce a generated client-state bundle with view compiled to JS.
 /// Unsupported app shapes log a structured error and startup aborts.
-fn compile_module(path: String, source: String) -> Nil {
+fn compile_module(path: String, source: String) -> Result(Nil, String) {
   // Resolve external module sources: imports + sibling files in same directory
   let base_dir = source_root(path)
-  let import_sources = resolve_transitive_external_sources(source, base_dir)
-  let sibling_sources = resolve_sibling_sources(path)
+  use import_sources <- result_try(resolve_transitive_external_sources(
+    source,
+    base_dir,
+  ))
+  use sibling_sources <- result_try(resolve_sibling_sources(path))
   let import_paths = list.map(import_sources, fn(s) { s.1 })
   let extra_siblings =
     list.filter(sibling_sources, fn(s) { !list.contains(import_paths, s.1) })
@@ -335,28 +462,39 @@ fn compile_module(path: String, source: String) -> Nil {
       generate_codec_module(module_path, analysis, source)
 
       case can_build_enhanced_bundle(source, analysis) {
-        True -> {
+        Ok(True) -> {
           // Build enhanced bundle: view + decode_model compiled to JS
           // Required for state-over-the-wire — client renders view locally
           log.info("beacon.build", "Building enhanced bundle...")
           case build_enhanced_bundle(path, source, analysis) {
-            Ok(Nil) -> log.info("beacon.build", "Enhanced bundle ready")
+            Ok(Nil) -> {
+              log.info("beacon.build", "Enhanced bundle ready")
+              Ok(Nil)
+            }
             Error(reason) -> {
-              log.error(
-                "beacon.build",
+              Error(
                 "Enhanced build FAILED: "
-                  <> reason
-                  <> " — no client JS will be produced. Fix the build error above.",
+                <> reason
+                <> " — no client JS will be produced. Fix the build error above.",
               )
             }
           }
         }
-        False -> {
-          log.error("beacon.build", unsupported_client_bundle_shape_message())
-        }
+        Ok(False) -> Error(unsupported_client_bundle_shape_message())
+        Error(reason) -> Error(reason)
       }
     }
-    Error(reason) -> log.error("beacon.build", "Analysis failed: " <> reason)
+    Error(reason) -> Error("Analysis failed: " <> reason)
+  }
+}
+
+fn result_try(
+  result: Result(a, String),
+  next: fn(a) -> Result(b, String),
+) -> Result(b, String) {
+  case result {
+    Ok(value) -> next(value)
+    Error(reason) -> Error(reason)
   }
 }
 
@@ -372,10 +510,13 @@ fn analyze_app(
   case find_app_module(dir) {
     Ok(#(path, source)) -> {
       let base_dir = source_root(path)
-      let import_sources = resolve_transitive_external_sources(source, base_dir)
+      use import_sources <- result_try(resolve_transitive_external_sources(
+        source,
+        base_dir,
+      ))
       // Also scan sibling files in the same directory as the primary file.
       // This catches ServerState/Msg in separate files not imported by model.gleam.
-      let sibling_sources = resolve_sibling_sources(path)
+      use sibling_sources <- result_try(resolve_sibling_sources(path))
       // Merge: import sources take priority (they have correct aliases from imports)
       let import_paths = list.map(import_sources, fn(s) { s.1 })
       let extra_siblings =
@@ -394,7 +535,7 @@ fn analyze_app(
 /// excluding the file itself. Returns #(alias, module_path, source) triples.
 fn resolve_sibling_sources(
   primary_path: String,
-) -> List(#(String, String, String)) {
+) -> Result(List(#(String, String, String)), String) {
   let root_dir = source_root(primary_path)
   let dir = case string.split(primary_path, "/") |> list.reverse {
     [_, ..rest] -> string.join(list.reverse(rest), "/")
@@ -405,33 +546,56 @@ fn resolve_sibling_sources(
     Error(_) -> primary_path
   }
   case simplifile.read_directory(dir) {
-    Ok(entries) ->
-      list.filter_map(entries, fn(entry) {
-        case
-          string.ends_with(entry, ".gleam")
-          && entry != primary_filename
-          && entry != "beacon_codec.gleam"
-        {
-          True -> {
-            let file_path = dir <> "/" <> entry
-            case simplifile.read(file_path) {
-              Ok(source) -> {
-                // Derive alias from filename: "server_state.gleam" -> "server_state"
-                let alias = string.replace(entry, ".gleam", "")
-                // Preserve the real module path relative to the source root so
-                // generated imports stay valid for nested app directories.
-                let module_path =
-                  string.replace(file_path, root_dir <> "/", "")
-                  |> string.replace(".gleam", "")
-                Ok(#(alias, module_path, source))
+    Ok(entries) -> {
+      let resolved =
+        list.fold(entries, Ok([]), fn(acc_result, entry) {
+          case acc_result {
+            Error(reason) -> Error(reason)
+            Ok(acc) -> {
+              case
+                string.ends_with(entry, ".gleam")
+                && entry != primary_filename
+                && entry != "beacon_codec.gleam"
+              {
+                True -> {
+                  let file_path = dir <> "/" <> entry
+                  case simplifile.read(file_path) {
+                    Ok(source) -> {
+                      // Derive alias from filename: "server_state.gleam" -> "server_state"
+                      let alias = string.replace(entry, ".gleam", "")
+                      // Preserve the real module path relative to the source root so
+                      // generated imports stay valid for nested app directories.
+                      let module_path =
+                        string.replace(file_path, root_dir <> "/", "")
+                        |> string.replace(".gleam", "")
+                      Ok([#(alias, module_path, source), ..acc])
+                    }
+                    Error(err) ->
+                      Error(
+                        "Failed to read sibling module "
+                        <> file_path
+                        <> ": "
+                        <> string.inspect(err),
+                      )
+                  }
+                }
+                False -> Ok(acc)
               }
-              Error(_) -> Error(Nil)
             }
           }
-          False -> Error(Nil)
-        }
-      })
-    Error(_) -> []
+        })
+      case resolved {
+        Ok(items) -> Ok(list.reverse(items))
+        Error(reason) -> Error(reason)
+      }
+    }
+    Error(err) ->
+      Error(
+        "Failed to read sibling module directory "
+        <> dir
+        <> ": "
+        <> string.inspect(err),
+      )
   }
 }
 
@@ -454,8 +618,9 @@ pub fn try_enhanced_bundle() -> Result(Nil, String) {
   case analyze_app("src") {
     Ok(#(path, source, analysis)) -> {
       case can_build_enhanced_bundle(source, analysis) {
-        True -> build_enhanced_bundle(path, source, analysis)
-        False -> Error(unsupported_client_bundle_shape_message())
+        Ok(True) -> build_enhanced_bundle(path, source, analysis)
+        Ok(False) -> Error(unsupported_client_bundle_shape_message())
+        Error(reason) -> Error(reason)
       }
     }
     Error(reason) -> Error(reason)
@@ -468,21 +633,22 @@ pub fn try_enhanced_bundle() -> Result(Nil, String) {
 pub fn can_build_enhanced_bundle(
   source: String,
   analysis: analyzer.Analysis,
-) -> Bool {
+) -> Result(Bool, String) {
   case analyzer.extract_client_source(source) {
     Ok(client_source) -> {
       let has_model = string.contains(client_source, "pub type Model")
       let has_msg = !list.is_empty(analysis.msg_variants)
       let has_view = string.contains(client_source, "pub fn view")
-      let has_client_update =
-        string.contains(client_source, "pub fn update")
-        || string.contains(client_source, "pub fn make_update")
-      has_model
-      && has_msg
-      && has_view
-      && { analysis.has_server || has_client_update }
+      let has_client_update = string.contains(client_source, "pub fn update")
+      let update_required = analysis.has_local && !analysis.has_server
+      Ok(
+        has_model
+        && has_msg
+        && has_view
+        && { !update_required || has_client_update },
+      )
     }
-    Error(_) -> False
+    Error(reason) -> Error("Client source extraction failed: " <> reason)
   }
 }
 
@@ -532,285 +698,176 @@ fn build_enhanced_bundle(
   let beacon_root = find_beacon_root()
   let dir = "build/beacon_client_app"
 
-  // Step 1: Extract pure client source from AST
-  case analyzer.extract_client_source(source) {
+  use client_source <- result_try(case analyzer.extract_client_source(source) {
+    Ok(client_source) -> Ok(client_source)
     Error(reason) -> Error("Source extraction failed: " <> reason)
-    Ok(client_source) -> {
-      // Step 2: Create temp JS project structure
-      case simplifile.delete(dir) {
-        Ok(Nil) -> Nil
-        Error(_) -> Nil
-        // Directory may not exist yet — that's fine
-      }
-      case create_build_directories(dir) {
-        Error(reason) -> Error("Directory setup failed: " <> reason)
-        Ok(Nil) -> {
-          // gleam.toml
-          let toml =
-            "name = \"beacon_client_app\"\nversion = \"0.1.0\"\ntarget = \"javascript\"\n\n[dependencies]\ngleam_stdlib = \">= 0.44.0 and < 2.0.0\"\ngleam_json = \">= 3.1.0 and < 4.0.0\"\n"
-          case simplifile.write(dir <> "/gleam.toml", toml) {
+  })
+  use Nil <- result_try(delete_path_if_exists(dir))
+  use Nil <- result_try(case create_build_directories(dir) {
+    Ok(Nil) -> Ok(Nil)
+    Error(reason) -> Error("Directory setup failed: " <> reason)
+  })
+
+  let toml =
+    "name = \"beacon_client_app\"\nversion = \"0.1.0\"\ntarget = \"javascript\"\n\n[dependencies]\ngleam_stdlib = \">= 0.44.0 and < 2.0.0\"\ngleam_json = \">= 3.1.0 and < 4.0.0\"\n"
+  use Nil <- result_try(case simplifile.write(dir <> "/gleam.toml", toml) {
+    Ok(Nil) -> Ok(Nil)
+    Error(err) -> Error("Failed to write gleam.toml: " <> string.inspect(err))
+  })
+  use Nil <- result_try(
+    case simplifile.write(dir <> "/src/app.gleam", client_source) {
+      Ok(Nil) -> Ok(Nil)
+      Error(err) -> Error("Failed to write app.gleam: " <> string.inspect(err))
+    },
+  )
+
+  copy_file(
+    beacon_root <> "/src/beacon/element.gleam",
+    dir <> "/src/beacon/element.gleam",
+  )
+  copy_file(
+    beacon_root <> "/src/beacon/html.gleam",
+    dir <> "/src/beacon/html.gleam",
+  )
+  copy_file(
+    beacon_root <> "/src/beacon/template/rendered.gleam",
+    dir <> "/src/beacon/template/rendered.gleam",
+  )
+  copy_file(
+    beacon_root <> "/beacon_client/src/beacon_client/handler.gleam",
+    dir <> "/src/beacon_client/handler.gleam",
+  )
+  copy_file(
+    beacon_root <> "/beacon_client/src/beacon_client/patch.mjs",
+    dir <> "/src/beacon_client/patch.mjs",
+  )
+  copy_file(
+    beacon_root <> "/beacon_client/src/beacon_client_ffi.mjs",
+    dir <> "/src/beacon_client_ffi.mjs",
+  )
+
+  let app_base_dir = source_root(path)
+  use import_sources <- result_try(resolve_transitive_external_sources(
+    source,
+    app_base_dir,
+  ))
+  use sibling_sources <- result_try(resolve_sibling_sources(path))
+  let import_paths = list.map(import_sources, fn(s) { s.1 })
+  let extra_siblings =
+    list.filter(sibling_sources, fn(s) { !list.contains(import_paths, s.1) })
+  let external_sources = list.append(import_sources, extra_siblings)
+  use client_sources <- result_try(client_external_sources(external_sources))
+  use Nil <- result_try(write_client_external_sources(client_sources, dir))
+  use framework_sources <- result_try(resolve_transitive_framework_sources(
+    [client_source, ..list.map(client_sources, fn(ext) { ext.2 })],
+    beacon_root,
+  ))
+  list.each(framework_sources, fn(ext) {
+    let #(_alias, module_path, _source_text) = ext
+    copy_module_source(
+      beacon_root <> "/src/" <> module_path <> ".gleam",
+      dir <> "/src/" <> module_path <> ".gleam",
+    )
+  })
+  use Nil <- result_try(write_client_log_shim(dir))
+
+  use Nil <- result_try(
+    case simplifile.write(dir <> "/src/beacon.gleam", generate_js_beacon()) {
+      Ok(Nil) -> Ok(Nil)
+      Error(err) ->
+        Error("Failed to write beacon.gleam: " <> string.inspect(err))
+    },
+  )
+
+  let has_client_update = string.contains(client_source, "pub fn update(")
+  let entry = generate_entry_point(analysis, source, has_client_update)
+  use Nil <- result_try(
+    case simplifile.write(dir <> "/src/beacon_app_entry.gleam", entry) {
+      Ok(Nil) -> Ok(Nil)
+      Error(err) ->
+        Error("Failed to write entry point: " <> string.inspect(err))
+    },
+  )
+
+  let compile_result = run_command("cd '" <> dir <> "' && gleam build 2>&1")
+  case string.contains(compile_result, "Compiled in") {
+    False -> Error("JS compilation failed:\n" <> compile_result)
+    True -> {
+      use Nil <- result_try(
+        case simplifile.create_directory_all("priv/static") {
+          Ok(Nil) -> Ok(Nil)
+          Error(err) ->
+            Error("Failed to create priv/static: " <> string.inspect(err))
+        },
+      )
+      let entry_js =
+        "import { initClientAfterBoot } from './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\ninitClientAfterBoot();\n"
+      use Nil <- result_try(
+        case simplifile.write(dir <> "/bundle_entry.mjs", entry_js) {
+          Ok(Nil) -> Ok(Nil)
+          Error(err) ->
+            Error("Failed to write bundle entry: " <> string.inspect(err))
+        },
+      )
+      let hash = generate_safe_hash()
+      let filename = "beacon_client_" <> hash <> ".js"
+      use Nil <- result_try(clean_old_client_bundles("priv/static"))
+      let result =
+        run_command(
+          "cd '"
+          <> dir
+          <> "' && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/"
+          <> filename
+          <> " --minify 2>&1",
+        )
+      case string.contains(result, "Done") || string.contains(result, ".js") {
+        False -> Error("esbuild failed:\n" <> result)
+        True -> {
+          case
+            simplifile.write("priv/static/beacon_client.manifest", filename)
+          {
+            Ok(Nil) -> Ok(Nil)
             Error(err) ->
-              Error("Failed to write gleam.toml: " <> string.inspect(err))
-            Ok(Nil) -> {
-              // Step 3: Write extracted pure source as app.gleam
-              case simplifile.write(dir <> "/src/app.gleam", client_source) {
-                Error(err) ->
-                  Error("Failed to write app.gleam: " <> string.inspect(err))
-                Ok(Nil) -> {
-                  // Step 4: Copy pure beacon modules
-                  copy_file(
-                    beacon_root <> "/src/beacon/element.gleam",
-                    dir <> "/src/beacon/element.gleam",
-                  )
-                  copy_file(
-                    beacon_root <> "/src/beacon/html.gleam",
-                    dir <> "/src/beacon/html.gleam",
-                  )
-                  copy_file(
-                    beacon_root <> "/src/beacon/template/rendered.gleam",
-                    dir <> "/src/beacon/template/rendered.gleam",
-                  )
-
-                  // Step 5: Copy beacon_client handler + FFI + patch module
-                  copy_file(
-                    beacon_root
-                      <> "/beacon_client/src/beacon_client/handler.gleam",
-                    dir <> "/src/beacon_client/handler.gleam",
-                  )
-                  copy_file(
-                    beacon_root <> "/beacon_client/src/beacon_client/patch.mjs",
-                    dir <> "/src/beacon_client/patch.mjs",
-                  )
-                  copy_file(
-                    beacon_root <> "/beacon_client/src/beacon_client_ffi.mjs",
-                    dir <> "/src/beacon_client_ffi.mjs",
-                  )
-
-                  // Step 5.5: Copy transitive external and sibling module files.
-                  let app_base_dir = source_root(path)
-                  let import_sources =
-                    resolve_transitive_external_sources(source, app_base_dir)
-                  let sibling_sources = resolve_sibling_sources(path)
-                  let import_paths = list.map(import_sources, fn(s) { s.1 })
-                  let extra_siblings =
-                    list.filter(sibling_sources, fn(s) {
-                      !list.contains(import_paths, s.1)
-                    })
-                  let external_sources =
-                    list.append(import_sources, extra_siblings)
-                  case client_external_sources(external_sources) {
-                    Error(reason) -> Error(reason)
-                    Ok(client_external_sources) -> {
-                      case
-                        write_client_external_sources(
-                          client_external_sources,
-                          dir,
-                        )
-                      {
-                        Error(reason) -> Error(reason)
-                        Ok(Nil) -> {
-                          // Copy Beacon framework modules referenced by copied user modules.
-                          let framework_sources =
-                            resolve_transitive_framework_sources(
-                              [
-                                client_source,
-                                ..list.map(client_external_sources, fn(ext) {
-                                  ext.2
-                                })
-                              ],
-                              beacon_root,
-                            )
-                          list.each(framework_sources, fn(ext) {
-                            let #(_alias, module_path, _source_text) = ext
-                            copy_module_source(
-                              beacon_root <> "/src/" <> module_path <> ".gleam",
-                              dir <> "/src/" <> module_path <> ".gleam",
-                            )
-                          })
-
-                          // Step 6: Generate JS beacon.gleam (event helpers using beacon_client/handler)
-                          case
-                            simplifile.write(
-                              dir <> "/src/beacon.gleam",
-                              generate_js_beacon(),
-                            )
-                          {
-                            Error(err) ->
-                              Error(
-                                "Failed to write beacon.gleam: "
-                                <> string.inspect(err),
-                              )
-                            Ok(Nil) -> {
-                              // Step 7: Generate beacon_app_entry.gleam
-                              // Check if update was extracted (pure update → LOCAL + optimistic)
-                              let has_client_update =
-                                string.contains(client_source, "pub fn update(")
-                              let entry =
-                                generate_entry_point(
-                                  analysis,
-                                  source,
-                                  has_client_update,
-                                )
-                              case
-                                simplifile.write(
-                                  dir <> "/src/beacon_app_entry.gleam",
-                                  entry,
-                                )
-                              {
-                                Error(err) ->
-                                  Error(
-                                    "Failed to write entry point: "
-                                    <> string.inspect(err),
-                                  )
-                                Ok(Nil) -> {
-                                  // Step 8: Compile JS project
-                                  let compile_result =
-                                    run_command(
-                                      "cd '" <> dir <> "' && gleam build 2>&1",
-                                    )
-                                  case
-                                    string.contains(
-                                      compile_result,
-                                      "Compiled in",
-                                    )
-                                  {
-                                    False ->
-                                      Error(
-                                        "JS compilation failed:\n"
-                                        <> compile_result,
-                                      )
-                                    True -> {
-                                      // Step 9: Bundle with esbuild
-                                      case
-                                        simplifile.create_directory_all(
-                                          "priv/static",
-                                        )
-                                      {
-                                        Error(err) ->
-                                          Error(
-                                            "Failed to create priv/static: "
-                                            <> string.inspect(err),
-                                          )
-                                        Ok(Nil) -> {
-                                          // Entry point that sets window.BeaconApp
-                                          let entry_js =
-                                            "import { initClientAfterBoot } from './build/dev/javascript/beacon_client_app/beacon_client_ffi.mjs';\nimport * as App from './build/dev/javascript/beacon_client_app/beacon_app_entry.mjs';\nwindow.BeaconApp = App;\ninitClientAfterBoot();\n"
-                                          case
-                                            simplifile.write(
-                                              dir <> "/bundle_entry.mjs",
-                                              entry_js,
-                                            )
-                                          {
-                                            Error(err) ->
-                                              Error(
-                                                "Failed to write bundle entry: "
-                                                <> string.inspect(err),
-                                              )
-                                            Ok(Nil) -> {
-                                              let hash = generate_safe_hash()
-                                              let filename =
-                                                "beacon_client_"
-                                                <> hash
-                                                <> ".js"
-                                              // Clean old bundles before writing new one
-                                              case
-                                                simplifile.get_files(
-                                                  "priv/static",
-                                                )
-                                              {
-                                                Ok(files) ->
-                                                  list.each(files, fn(f) {
-                                                    case
-                                                      string.contains(
-                                                        f,
-                                                        "beacon_client_",
-                                                      )
-                                                      && string.ends_with(
-                                                        f,
-                                                        ".js",
-                                                      )
-                                                    {
-                                                      True -> {
-                                                        case
-                                                          simplifile.delete(f)
-                                                        {
-                                                          Ok(Nil) -> Nil
-                                                          Error(err) ->
-                                                            log.warning(
-                                                              "beacon.build",
-                                                              "Failed to delete old bundle "
-                                                                <> f
-                                                                <> ": "
-                                                                <> string.inspect(
-                                                                err,
-                                                              ),
-                                                            )
-                                                        }
-                                                      }
-                                                      False -> Nil
-                                                    }
-                                                  })
-                                                Error(_) -> Nil
-                                              }
-
-                                              let result =
-                                                run_command(
-                                                  "cd '"
-                                                  <> dir
-                                                  <> "' && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/"
-                                                  <> filename
-                                                  <> " --minify 2>&1",
-                                                )
-                                              case
-                                                string.contains(result, "Done")
-                                                || string.contains(
-                                                  result,
-                                                  ".js",
-                                                )
-                                              {
-                                                True -> {
-                                                  case
-                                                    simplifile.write(
-                                                      "priv/static/beacon_client.manifest",
-                                                      filename,
-                                                    )
-                                                  {
-                                                    Ok(Nil) -> Ok(Nil)
-                                                    Error(err) ->
-                                                      Error(
-                                                        "Failed to write manifest: "
-                                                        <> string.inspect(err),
-                                                      )
-                                                  }
-                                                }
-                                                False ->
-                                                  Error(
-                                                    "esbuild failed:\n"
-                                                    <> result,
-                                                  )
-                                              }
-                                            }
-                                          }
-                                        }
-                                      }
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
+              Error("Failed to write manifest: " <> string.inspect(err))
           }
         }
       }
     }
   }
+}
+
+fn write_client_log_shim(dir: String) -> Result(Nil, String) {
+  case simplifile.write(dir <> "/src/beacon/log.gleam", generate_js_log()) {
+    Ok(Nil) -> Ok(Nil)
+    Error(err) ->
+      Error("Failed to write client log shim: " <> string.inspect(err))
+  }
+}
+
+fn generate_js_log() -> String {
+  "/// Client-side logging shim for generated JS bundles.
+import gleam/io
+
+pub fn debug(module: String, message: String) -> Nil {
+  write(\"DEBUG\", module, message)
+}
+
+pub fn info(module: String, message: String) -> Nil {
+  write(\"INFO\", module, message)
+}
+
+pub fn warning(module: String, message: String) -> Nil {
+  write(\"WARN\", module, message)
+}
+
+pub fn error(module: String, message: String) -> Nil {
+  write(\"ERROR\", module, message)
+}
+
+fn write(level: String, module: String, message: String) -> Nil {
+  io.println(level <> \" [\" <> module <> \"] \" <> message)
+}
+"
 }
 
 fn client_external_sources(
@@ -903,33 +960,66 @@ fn write_module_source_text(path: String, source: String) -> Result(Nil, String)
 
 /// Clean stale codec artifacts to prevent type mismatches between apps.
 /// Uses simplifile to avoid shell injection risks from rm commands.
-fn clean_codec_artifacts() -> Nil {
+fn clean_codec_artifacts() -> Result(Nil, String) {
   let artefacts_dir = "build/dev/erlang/beacon/_gleam_artefacts"
-  case simplifile.get_files(artefacts_dir) {
-    Ok(files) ->
-      list.each(files, fn(f) {
-        case string.contains(f, "beacon_codec") {
-          True -> {
-            case simplifile.delete(f) {
-              Ok(Nil) -> Nil
-              Error(err) ->
-                log.warning(
-                  "beacon.build",
-                  "Failed to delete codec artifact "
-                    <> f
-                    <> ": "
-                    <> string.inspect(err),
-                )
-            }
+  let artefact_cleanup = case simplifile.is_directory(artefacts_dir) {
+    Error(err) ->
+      Error(
+        "Failed to inspect codec artefacts directory "
+        <> artefacts_dir
+        <> ": "
+        <> string.inspect(err),
+      )
+    Ok(False) -> Ok(Nil)
+    Ok(True) -> {
+      case simplifile.get_files(artefacts_dir) {
+        Error(err) ->
+          Error(
+            "Failed to list codec artefacts directory "
+            <> artefacts_dir
+            <> ": "
+            <> string.inspect(err),
+          )
+        Ok(files) -> {
+          let errors =
+            list.filter_map(files, fn(f) {
+              case string.contains(f, "beacon_codec") {
+                False -> Error(Nil)
+                True -> {
+                  case simplifile.delete(f) {
+                    Ok(Nil) -> Error(Nil)
+                    Error(err) ->
+                      Ok(
+                        "Failed to delete codec artifact "
+                        <> f
+                        <> ": "
+                        <> string.inspect(err),
+                      )
+                  }
+                }
+              }
+            })
+          case errors {
+            [] -> Ok(Nil)
+            [first, ..] -> Error(first)
           }
-          False -> Nil
         }
-      })
-    Error(_) -> Nil
+      }
+    }
   }
-  case simplifile.delete("build/dev/erlang/beacon/ebin/beacon_codec.beam") {
-    Ok(Nil) -> Nil
-    Error(_) -> Nil
+
+  case artefact_cleanup {
+    Error(reason) -> Error(reason)
+    Ok(Nil) -> {
+      case
+        optional_clean_generated_file(
+          "build/dev/erlang/beacon/ebin/beacon_codec.beam",
+        )
+      {
+        Ok(Nil) -> Ok(Nil)
+        Error(reason) -> Error(reason)
+      }
+    }
   }
 }
 
@@ -1390,7 +1480,7 @@ fn default_client_custom_value(
 /// matching the server's model_sync JSON format exactly.
 fn generate_client_encode_model(
   analysis: analyzer.Analysis,
-  source: String,
+  _source: String,
 ) -> String {
   let model_fields = generate_client_encoder_fields(analysis)
   let custom_encoders_code = generate_client_custom_encoders(analysis)
@@ -1405,16 +1495,7 @@ pub fn encode_model(model: app.Model, _local: Nil) -> String {
 }
 "
     True -> {
-      let local_fields = case find_local_fields(source) {
-        Ok(fields) -> fields
-        Error(_) -> {
-          log.debug(
-            "beacon.build",
-            "Could not extract Local fields from source — using empty field list for encoder",
-          )
-          []
-        }
-      }
+      let local_fields = analysis.local_fields
       // Build local field encoders using the same infrastructure as model fields
       // Need to create a temporary analysis-like context for Local fields
       let local_field_strs =
@@ -1640,20 +1721,14 @@ pub fn msg_affects_model(msg: app.Msg) -> Bool {
 
 /// Generate decode_local function for apps with Local type.
 /// Returns empty string if no Local type.
-fn generate_local_decoder(analysis: analyzer.Analysis, source: String) -> String {
+fn generate_local_decoder(
+  analysis: analyzer.Analysis,
+  _source: String,
+) -> String {
   case analysis.has_local {
     False -> ""
     True -> {
-      let local_fields = case find_local_fields(source) {
-        Ok(fields) -> fields
-        Error(_) -> {
-          log.debug(
-            "beacon.build",
-            "Could not extract Local fields from source — using empty field list for local decoder",
-          )
-          []
-        }
-      }
+      let local_fields = analysis.local_fields
       let decode_fields =
         list.map(local_fields, fn(f) {
           let decoder =
@@ -1702,27 +1777,19 @@ pub fn decode_local(json_str: String) -> Result(app.Local, String) {
 /// Auto-build: find the app module in src/ and build enhanced bundle.
 /// Build the base client JS for routed apps (no app-specific codec/view).
 /// This bundles only the core runtime: WebSocket, morphing, event delegation.
-pub fn build_base_client() -> Nil {
+pub fn build_base_client() -> Result(Nil, String) {
   let beacon_root = find_beacon_root()
   let dir = "build/beacon_client_base"
   // The beacon_client package has a pre-built JS output tree
   let bc_js = beacon_root <> "/beacon_client/build/dev/javascript"
 
   // Clean and recreate build directory
-  case simplifile.delete(dir) {
-    Ok(Nil) -> Nil
-    Error(_) -> Nil
-    // Directory may not exist yet — that's fine
-  }
-  case simplifile.create_directory_all(dir) {
-    Ok(Nil) -> Nil
-    Error(err) -> {
-      log.error(
-        "beacon.build",
-        "Failed to create " <> dir <> ": " <> string.inspect(err),
-      )
-    }
-  }
+  use Nil <- result_try(delete_path_if_exists(dir))
+  use Nil <- result_try(case simplifile.create_directory_all(dir) {
+    Ok(Nil) -> Ok(Nil)
+    Error(err) ->
+      Error("Failed to create " <> dir <> ": " <> string.inspect(err))
+  })
 
   // Ensure beacon_client is built (JS target)
   let bc_build_result =
@@ -1742,80 +1809,52 @@ pub fn build_base_client() -> Nil {
   let entry_js =
     "import '" <> abs_bc_path <> "/beacon_client/beacon_client_ffi.mjs';\n"
   case simplifile.write(dir <> "/entry.mjs", entry_js) {
-    Error(err) -> {
-      log.error(
-        "beacon.build",
-        "Failed to write entry: " <> string.inspect(err),
-      )
-    }
+    Error(err) -> Error("Failed to write entry: " <> string.inspect(err))
     Ok(Nil) -> {
       // Create priv/static
       case simplifile.create_directory_all("priv/static") {
-        Error(err) -> {
-          log.error(
-            "beacon.build",
-            "Failed to create priv/static: " <> string.inspect(err),
-          )
-        }
+        Error(err) ->
+          Error("Failed to create priv/static: " <> string.inspect(err))
         Ok(Nil) -> {
           let hash = generate_safe_hash()
           let filename = "beacon_client_" <> hash <> ".js"
-          // Clean old bundles before writing new one
-          case simplifile.get_files("priv/static") {
-            Ok(files) ->
-              list.each(files, fn(f) {
-                case
-                  string.contains(f, "beacon_client_")
-                  && string.ends_with(f, ".js")
-                {
-                  True -> {
-                    case simplifile.delete(f) {
-                      Ok(Nil) -> Nil
-                      Error(err) ->
-                        log.warning(
-                          "beacon.build",
-                          "Failed to delete old bundle "
-                            <> f
-                            <> ": "
-                            <> string.inspect(err),
-                        )
-                    }
-                  }
-                  False -> Nil
-                }
-              })
-            Error(_) -> Nil
-          }
-          let result =
-            run_command(
-              "cd '"
-              <> dir
-              <> "' && npx esbuild entry.mjs --bundle --format=iife --outfile=../../priv/static/"
-              <> filename
-              <> " --minify 2>&1",
-            )
-          case
-            string.contains(result, "Done") || string.contains(result, ".js")
-          {
-            True -> {
+          // Clean old bundles before writing new one.
+          case clean_old_client_bundles("priv/static") {
+            Error(reason) -> Error(reason)
+            Ok(Nil) -> {
+              let result =
+                run_command(
+                  "cd '"
+                  <> dir
+                  <> "' && npx esbuild entry.mjs --bundle --format=iife --outfile=../../priv/static/"
+                  <> filename
+                  <> " --minify 2>&1",
+                )
               case
-                simplifile.write("priv/static/beacon_client.manifest", filename)
+                string.contains(result, "Done")
+                || string.contains(result, ".js")
               {
-                Ok(Nil) -> {
-                  log.info("beacon.build", "Base client JS built: " <> filename)
+                True -> {
+                  case
+                    simplifile.write(
+                      "priv/static/beacon_client.manifest",
+                      filename,
+                    )
+                  {
+                    Ok(Nil) -> {
+                      log.info(
+                        "beacon.build",
+                        "Base client JS built: " <> filename,
+                      )
+                      Ok(Nil)
+                    }
+                    Error(err) ->
+                      Error("Failed to write manifest: " <> string.inspect(err))
+                  }
                 }
-                Error(err) ->
-                  log.error(
-                    "beacon.build",
-                    "Failed to write manifest: " <> string.inspect(err),
-                  )
+                False -> Error("esbuild failed for base client:\n" <> result)
               }
             }
-            False ->
-              log.error(
-                "beacon.build",
-                "esbuild failed for base client:\n" <> result,
-              )
           }
         }
       }
@@ -1824,21 +1863,19 @@ pub fn build_base_client() -> Nil {
 }
 
 /// Called automatically by beacon.start() when no manifest exists.
-pub fn auto_build() -> Nil {
+pub fn auto_build() -> Result(Nil, String) {
   case find_app_module("src") {
     Ok(#(path, source)) -> {
       log.info("beacon.build", "Found app module: " <> path)
       compile_module(path, source)
     }
-    Error(reason) -> {
-      log.error(
-        "beacon.build",
+    Error(reason) ->
+      Error(
         "No app module found in src/: "
-          <> reason
-          <> " — no client JS will be produced. "
-          <> "Ensure your app has pub type Model (for codec-only mode) or pub type Model + pub type Msg + pub fn update + pub fn view in one file (for enhanced bundle).",
+        <> reason
+        <> " — no client JS will be produced. "
+        <> "Ensure your app has pub type Model (for codec-only mode) or pub type Model + pub type Msg + pub fn update + pub fn view in one file (for enhanced bundle).",
       )
-    }
   }
 }
 
@@ -1925,11 +1962,14 @@ fn find_enum_type(
 fn used_enum_types(analysis: analyzer.Analysis) -> List(analyzer.EnumTypeInfo) {
   list.filter(analysis.enum_types, fn(enum_type) {
     list.any(analysis.model_fields, fn(field) {
-      field_references_enum(field, enum_type)
+      field_references_enum(field, enum_type, "")
+    })
+    || list.any(analysis.local_fields, fn(field) {
+      field_references_enum(field, enum_type, "")
     })
     || list.any(analysis.custom_types, fn(custom_type) {
       list.any(custom_type.fields, fn(field) {
-        field_references_enum(field, enum_type)
+        field_references_enum(field, enum_type, custom_type.module)
       })
     })
   })
@@ -1938,23 +1978,31 @@ fn used_enum_types(analysis: analyzer.Analysis) -> List(analyzer.EnumTypeInfo) {
 fn field_references_enum(
   field: analyzer.TypeField,
   enum_type: analyzer.EnumTypeInfo,
+  owner_module: String,
 ) -> Bool {
   { field.type_name == enum_type.name && field.module == enum_type.module }
   || {
     field.inner_type == enum_type.name && field.inner_module == enum_type.module
+  }
+  || {
+    field.type_name == enum_type.name
+    && field.module == ""
+    && owner_module == enum_type.module
+  }
+  || {
+    field.inner_type == enum_type.name
+    && field.inner_module == ""
+    && owner_module == enum_type.module
   }
 }
 
 /// Generate import statements for external modules used in the analysis.
 pub fn generate_external_imports(
   analysis: analyzer.Analysis,
-  source: String,
+  _source: String,
   include_server_fields: Bool,
 ) -> String {
-  let local_fields = case find_local_fields(source) {
-    Ok(fields) -> fields
-    Error(_) -> []
-  }
+  let local_fields = analysis.local_fields
   let initial_fields =
     list.append(analysis.model_fields, case include_server_fields {
       True -> list.append(analysis.server_fields, local_fields)
@@ -2293,16 +2341,7 @@ fn generate_codec_module(
   // For apps with Local, extract Local fields too
   let local_field_encoders = case analysis.has_local {
     True -> {
-      let local_fields = case find_local_fields(source) {
-        Ok(fields) -> fields
-        Error(_) -> {
-          log.debug(
-            "beacon.build",
-            "Could not extract Local fields from source — using empty field list for server encoder",
-          )
-          []
-        }
-      }
+      let local_fields = analysis.local_fields
       list.map(local_fields, fn(f) {
         let encoder = generate_server_field_encoder("local", f, analysis)
         "    #(\"" <> f.name <> "\", " <> encoder <> ")"
@@ -2551,16 +2590,22 @@ fn generate_substate_encoders(
           let encoder = generate_server_field_encoder("model", f, analysis)
           "    #(\"" <> f.name <> "\", " <> encoder <> "),"
         })
-      let flat_fn =
-        "\npub fn encode_flat_fields("
-        <> param_name
-        <> ": "
-        <> param_type
-        <> ") -> String {\n"
-        <> model_extract
-        <> "  json.object([\n"
-        <> string.join(flat_encoders, "\n")
-        <> "\n  ])\n  |> json.to_string\n}\n"
+      let flat_fn = case flat_encoders {
+        [] ->
+          "\npub fn encode_flat_fields(_state: "
+          <> param_type
+          <> ") -> String {\n  json.object([])\n  |> json.to_string\n}\n"
+        _ ->
+          "\npub fn encode_flat_fields("
+          <> param_name
+          <> ": "
+          <> param_type
+          <> ") -> String {\n"
+          <> model_extract
+          <> "  json.object([\n"
+          <> string.join(flat_encoders, "\n")
+          <> "\n  ])\n  |> json.to_string\n}\n"
+      }
 
       string.join(substate_fns, "") <> names_fn <> flat_fn
     }
@@ -2573,7 +2618,7 @@ fn generate_substate_encoders(
 fn generate_server_decode_model(
   module_name: String,
   analysis: analyzer.Analysis,
-  source: String,
+  _source: String,
 ) -> String {
   // Model decoder fields
   let model_decode_fields =
@@ -2639,16 +2684,7 @@ fn generate_server_decode_model(
 
     True, _ -> {
       // Also decode Local fields and return the tuple #(Model, Local)
-      let local_fields = case find_local_fields(source) {
-        Ok(fields) -> fields
-        Error(_) -> {
-          log.debug(
-            "beacon.build",
-            "Could not extract Local fields from source — using empty field list for server decoder",
-          )
-          []
-        }
-      }
+      let local_fields = analysis.local_fields
       let local_decode_fields =
         list.map(local_fields, fn(f) {
           let decoder =
@@ -3047,91 +3083,6 @@ fn collect_gleam_files(dir: String) -> List(#(String, String)) {
       )
       []
     }
-  }
-}
-
-/// Extract Local type fields from source using the analyzer.
-fn find_local_fields(source: String) -> Result(List(analyzer.TypeField), Nil) {
-  case glance.module(source) {
-    Ok(module) -> {
-      case
-        list.find(module.custom_types, fn(def) {
-          def.definition.name == "Local"
-        })
-      {
-        Ok(def) -> Ok(extract_type_fields(def.definition))
-        Error(Nil) -> Error(Nil)
-      }
-    }
-    Error(_) -> Error(Nil)
-  }
-}
-
-/// Extract fields from a custom type (reuses analyzer logic).
-fn extract_type_fields(
-  custom_type: glance.CustomType,
-) -> List(analyzer.TypeField) {
-  case custom_type.variants {
-    [variant, ..] ->
-      list.filter_map(variant.fields, fn(field) {
-        case field {
-          glance.LabelledVariantField(item: field_type, label: name) -> {
-            let #(type_name, inner, mod_val, inner_mod_val) = case field_type {
-              glance.NamedType(name: n, module: mod, parameters: params, ..) ->
-                case params {
-                  [glance.NamedType(name: inner_name, module: inner_mod, ..)] -> {
-                    let m = case mod {
-                      option.Some(m) -> m
-                      option.None -> {
-                        log.debug(
-                          "beacon.build",
-                          "No module qualifier for type field '" <> name <> "'",
-                        )
-                        ""
-                      }
-                    }
-                    let im = case inner_mod {
-                      option.Some(im) -> im
-                      option.None -> {
-                        log.debug(
-                          "beacon.build",
-                          "No inner module qualifier for type field '"
-                            <> name
-                            <> "'",
-                        )
-                        ""
-                      }
-                    }
-                    #(n, inner_name, m, im)
-                  }
-                  _ -> {
-                    let m = case mod {
-                      option.Some(m) -> m
-                      option.None -> {
-                        log.debug(
-                          "beacon.build",
-                          "No module qualifier for type field '" <> name <> "'",
-                        )
-                        ""
-                      }
-                    }
-                    #(n, "", m, "")
-                  }
-                }
-              _ -> #("Unknown", "", "", "")
-            }
-            Ok(analyzer.TypeField(
-              name: name,
-              type_name: type_name,
-              inner_type: inner,
-              module: mod_val,
-              inner_module: inner_mod_val,
-            ))
-          }
-          _ -> Error(Nil)
-        }
-      })
-    _ -> []
   }
 }
 

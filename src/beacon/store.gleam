@@ -23,6 +23,7 @@ pub fn new(name: String) -> Store(value) {
 
 /// Get a value by key.
 pub fn get(store: Store(value), key: String) -> Result(value, Nil) {
+  log.debug("beacon.store", "get")
   state_manager.ets_get(store.manager, key)
 }
 
@@ -42,6 +43,7 @@ pub fn delete(store: Store(value), key: String) -> Nil {
 
 /// Count total entries.
 pub fn count(store: Store(value)) -> Int {
+  log.debug("beacon.store", "count")
   state_manager.ets_count(store.manager)
 }
 
@@ -67,6 +69,7 @@ pub fn new_list(name: String) -> ListStore(value) {
 
 /// Append a value. Auto-broadcasts to store-level watchers.
 pub fn append(store: ListStore(value), key: String, value: value) -> Nil {
+  log.debug("beacon.store", "append")
   list_store_append_ffi(store.table, key, value)
   pubsub.broadcast(store.topic, Nil)
 }
@@ -78,6 +81,7 @@ pub fn append_many(
   key: String,
   values: List(value),
 ) -> Nil {
+  log.debug("beacon.store", "append_many")
   list.each(values, fn(v) { list_store_append_ffi(store.table, key, v) })
   pubsub.broadcast(store.topic, Nil)
 }
@@ -91,6 +95,7 @@ pub fn append_notify(
   value: value,
   topic_prefix: String,
 ) -> Nil {
+  log.debug("beacon.store", "append_notify")
   list_store_append_ffi(store.table, key, value)
   pubsub.broadcast(store.topic, Nil)
   pubsub.broadcast(topic_prefix <> key, Nil)
@@ -98,11 +103,13 @@ pub fn append_notify(
 
 /// Get all values for a key.
 pub fn get_all(store: ListStore(value), key: String) -> List(value) {
+  log.debug("beacon.store", "get_all")
   list_store_get_all_ffi(store.table, key)
 }
 
 /// Delete all values for a key. Auto-broadcasts to store-level watchers.
 pub fn delete_all(store: ListStore(value), key: String) -> Nil {
+  log.debug("beacon.store", "delete_all")
   list_store_delete_ffi(store.table, key)
   pubsub.broadcast(store.topic, Nil)
 }
@@ -113,6 +120,7 @@ pub fn delete_all_notify(
   key: String,
   topic_prefix: String,
 ) -> Nil {
+  log.debug("beacon.store", "delete_all_notify")
   list_store_delete_ffi(store.table, key)
   pubsub.broadcast(store.topic, Nil)
   pubsub.broadcast(topic_prefix <> key, Nil)

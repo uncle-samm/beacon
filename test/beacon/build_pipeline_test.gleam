@@ -43,7 +43,7 @@ pub fn private_session_example_supports_app_with_server_bundle_test() {
   let assert False = analysis.has_local
   let assert True =
     list.any(analysis.server_fields, fn(f) { f.name == "signing_key" })
-  let assert True = build.can_build_enhanced_bundle(source, analysis)
+  let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
 pub fn auth_workspace_example_supports_app_with_server_bundle_test() {
@@ -56,7 +56,7 @@ pub fn auth_workspace_example_supports_app_with_server_bundle_test() {
     list.any(analysis.server_fields, fn(f) { f.name == "private_audit_key" })
   let assert False =
     list.any(analysis.model_fields, fn(f) { f.name == "private_audit_key" })
-  let assert True = build.can_build_enhanced_bundle(source, analysis)
+  let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
 pub fn counter_local_analyzes_correctly_test() {
@@ -81,7 +81,7 @@ pub fn local_first_form_analyzes_as_local_model_split_test() {
     list.any(analysis.msg_variants, fn(v) {
       v.name == "SubmitSearch" && v.affects_model
     })
-  let assert True = build.can_build_enhanced_bundle(source, analysis)
+  let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
 pub fn routed_workspace_app_supports_client_state_bundle_test() {
@@ -92,7 +92,7 @@ pub fn routed_workspace_app_supports_client_state_bundle_test() {
   let assert False = analysis.has_server
   let assert True =
     list.any(analysis.msg_variants, fn(v) { v.name == "RouteChanged" })
-  let assert True = build.can_build_enhanced_bundle(source, analysis)
+  let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
 pub fn routed_example_supports_imported_page_modules_test() {
@@ -111,7 +111,7 @@ pub fn routed_example_supports_imported_page_modules_test() {
     })
   let assert True =
     list.any(analysis.msg_variants, fn(v) { v.name == "RouteChanged" })
-  let assert True = build.can_build_enhanced_bundle(source, analysis)
+  let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
 pub fn routed_example_route_local_home_model_analyzes_test() {
@@ -179,7 +179,7 @@ pub fn route_server_workspace_route_servers_are_private_test() {
     list.any(analysis.custom_types, fn(ct) {
       ct.module == "settings" && ct.name == "Server"
     })
-  let assert True = build.can_build_enhanced_bundle(source, analysis)
+  let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
 pub fn routed_example_uses_explicit_imported_page_modules_test() {
@@ -230,6 +230,10 @@ pub fn domains_multi_file_analyzes_correctly_test() {
   let assert Ok(analysis) = analyzer.analyze_multi(app_source, externals)
   let assert True = list.length(analysis.custom_types) >= 1
   let assert True = list.length(analysis.model_fields) >= 1
+  let assert True =
+    list.any(analysis.enum_types, fn(et) {
+      et.module == "auth" && et.name == "Role"
+    })
 }
 
 pub fn domains_multi_file_supports_enhanced_bundle_test() {
@@ -243,7 +247,16 @@ pub fn domains_multi_file_supports_enhanced_bundle_test() {
       #("auth", "domains/auth", auth_src),
       #("items", "domains/items", items_src),
     ])
-  let assert True = build.can_build_enhanced_bundle(app_source, analysis)
+  let assert Ok(True) = build.can_build_enhanced_bundle(app_source, analysis)
+}
+
+pub fn effect_app_without_local_supports_client_renderer_test() {
+  let assert Ok(source) =
+    simplifile.read("examples/dashboard/src/dashboard.gleam")
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert False = analysis.has_local
+  let assert False = analysis.has_server
+  let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
 // === Idempotency Tests ===
@@ -371,7 +384,7 @@ pub fn update(model: Model, msg: Msg) -> Model { model }
 pub fn view(model: Model) { model }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
-  let assert True = build.can_build_enhanced_bundle(source, analysis)
+  let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
 pub fn enhanced_bundle_supported_for_app_with_server_view_test() {
@@ -386,7 +399,7 @@ pub fn update(model: Model, server: Server, msg: Msg) -> #(Model, Server) {
 pub fn view(model: Model) { model }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
-  let assert True = build.can_build_enhanced_bundle(source, analysis)
+  let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
 pub fn enhanced_bundle_skipped_for_model_only_multi_file_test() {
@@ -395,5 +408,5 @@ pub fn enhanced_bundle_skipped_for_model_only_multi_file_test() {
 pub type Model { Model(count: Int) }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
-  let assert False = build.can_build_enhanced_bundle(source, analysis)
+  let assert Ok(False) = build.can_build_enhanced_bundle(source, analysis)
 }

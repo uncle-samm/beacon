@@ -170,12 +170,15 @@ pub fn assert_clean_passed(r: SimReport) -> Nil {
 /// model_syncs. This proves the patch optimization is working — after the
 /// initial model_sync on join, subsequent updates use smaller patches.
 pub fn assert_patch_efficiency(r: SimReport) -> Nil {
-  case r.patches_received > 0 {
+  case r.events_sent > 0 {
     True -> {
-      let assert True = r.patches_received > r.model_syncs_received
+      let minimum_patches = r.events_sent * 8 / 10
+      let assert True = r.patches_received >= minimum_patches
       Nil
     }
-    // No patches means no events were sent — nothing to assert
-    False -> Nil
+    False -> {
+      let assert 0 = r.patches_received
+      Nil
+    }
   }
 }

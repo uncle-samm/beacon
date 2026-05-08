@@ -7,6 +7,7 @@ import beacon/sim/report
 import beacon/sim/scenario
 import beacon/sim/test_app
 import gleam/erlang/process
+import gleam/string
 
 // ===== Smoke Test =====
 
@@ -500,9 +501,8 @@ pub fn sim_patch_efficiency_test() {
   let m = metrics.collect(mt)
   // Connection must succeed
   let assert True = result.succeeded == 1
-  // 10 events sent with WaitForResponse should produce multiple patches.
-  // The exact count now varies with runtime batching and scheduler timing.
-  let assert True = m.patches_received >= 1
+  // 10 events sent with WaitForResponse should mostly use patches.
+  let assert True = m.patches_received >= 8
   // Wire: bytes should be tracked
   let assert True = m.bytes_received > 0
 
@@ -623,8 +623,8 @@ pub fn sim_state_correctness_test() {
   let m = metrics.collect(mt)
   // All 10 events were sent
   let assert True = m.events_sent == 10
-  // Patches must have been received (optimization working)
-  let assert True = m.patches_received > 0
+  // Patches must have been received for most updates.
+  let assert True = m.patches_received >= 8
 
   // Now open a fresh connection — model_sync should show the accumulated state
   let mt2 = metrics.new()
@@ -646,14 +646,12 @@ pub fn sim_state_correctness_test() {
       metrics: mt2,
     ))
 
-  let m2 = metrics.collect(mt2)
   // Verification connection must succeed
   let assert True = verify.succeeded == 1
-  // Must have received a model_sync with the accumulated state
-  let assert True = m2.model_syncs_received >= 1
-  // NOTE: Sim metrics don't expose message content, so we can't verify
-  // the count value here. CDP tests verify actual state correctness.
-  // This test verifies the protocol flow (model_sync delivered after events).
+  // The last response from the first connection must carry the final count.
+  let assert True =
+    string.contains(m.last_payload, "\\\"value\\\":10")
+    || string.contains(m.last_payload, "\"count\":10")
 
   metrics.destroy(mt)
   metrics.destroy(mt2)

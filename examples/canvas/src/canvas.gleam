@@ -10,11 +10,11 @@
 ///
 /// MODEL events (synced to server):
 ///   SetColor, ClearCanvas, StrokesUpdated
-
 import beacon
 import beacon/effect
 import beacon/element
 import beacon/html
+import beacon/log
 import beacon/pubsub
 import beacon/store
 import gleam/int
@@ -28,10 +28,7 @@ pub type Stroke {
 }
 
 pub type Model {
-  Model(
-    strokes: List(Stroke),
-    color: String,
-  )
+  Model(strokes: List(Stroke), color: String)
 }
 
 pub type Local {
@@ -69,36 +66,48 @@ pub fn init_local(_model: Model) -> Local {
 pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
   case msg {
     StartDrawing(coords) -> {
-      let #(x, y) = parse_coords(coords)
-      #(model, Local(..local, drawing: True, cursor_x: x, cursor_y: y))
-    }
-
-    MoveCursor(coords) -> {
-      let #(x, y) = parse_coords(coords)
-      case local.drawing {
-        True -> {
-          let stroke =
-            Stroke(
-              x1: local.cursor_x,
-              y1: local.cursor_y,
-              x2: x,
-              y2: y,
-              color: model.color,
-            )
-          #(
-            model,
-            Local(
-              ..local,
-              cursor_x: x,
-              cursor_y: y,
-              pending_strokes: [stroke, ..local.pending_strokes],
-            ),
-          )
+      case parse_coords(coords) {
+        Ok(#(x, y)) -> #(
+          model,
+          Local(..local, drawing: True, cursor_x: x, cursor_y: y),
+        )
+        Error(reason) -> {
+          log.warning("canvas", "Invalid start-drawing coordinates: " <> reason)
+          #(model, local)
         }
-        False -> #(model, Local(..local, cursor_x: x, cursor_y: y))
       }
     }
 
+    MoveCursor(coords) -> {
+      case parse_coords(coords) {
+        Ok(#(x, y)) -> {
+          case local.drawing {
+            True -> {
+              let stroke =
+                Stroke(
+                  x1: local.cursor_x,
+                  y1: local.cursor_y,
+                  x2: x,
+                  y2: y,
+                  color: model.color,
+                )
+              #(
+                model,
+                Local(..local, cursor_x: x, cursor_y: y, pending_strokes: [
+                  stroke,
+                  ..local.pending_strokes
+                ]),
+              )
+            }
+            False -> #(model, Local(..local, cursor_x: x, cursor_y: y))
+          }
+        }
+        Error(reason) -> {
+          log.warning("canvas", "Invalid cursor coordinates: " <> reason)
+          #(model, local)
+        }
+      }
+    }
     StopDrawing -> {
       // Commit pending strokes to model
       let committed =
@@ -163,9 +172,7 @@ fn make_on_update(
         let store_strokes = store.get_all(stroke_store, "canvas")
         case list.length(store_strokes) > list.length(model.strokes) {
           True ->
-            effect.from(fn(dispatch) {
-              dispatch(SetStrokes(store_strokes))
-            })
+            effect.from(fn(dispatch) { dispatch(SetStrokes(store_strokes)) })
           False -> effect.none()
         }
       }
@@ -194,7 +201,11 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
       ]),
       // Color picker
       html.div(
-        [html.style("margin-bottom:1rem;display:flex;gap:8px;align-items:center")],
+        [
+          html.style(
+            "margin-bottom:1rem;display:flex;gap:8px;align-items:center",
+          ),
+        ],
         [
           color_button("#000000", model.color),
           color_button("#ff0000", model.color),
@@ -230,35 +241,32 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
         list.map(all_strokes, render_stroke),
       ),
       // Status
-      html.div(
-        [html.style("margin-top:0.5rem;font-size:0.85rem;color:#999")],
-        [
-          html.text("Color: "),
-          element.el(
-            "span",
-            [
-              html.style(
-                "display:inline-block;width:16px;height:16px;background:"
-                <> model.color
-                <> ";border-radius:3px;vertical-align:middle",
-              ),
-            ],
-            [],
-          ),
-          html.text(
-            " | "
-            <> case local.drawing {
-              True ->
-                "Drawing at ("
-                <> int.to_string(local.cursor_x)
-                <> ","
-                <> int.to_string(local.cursor_y)
-                <> ")"
-              False -> "Click and drag to draw"
-            },
-          ),
-        ],
-      ),
+      html.div([html.style("margin-top:0.5rem;font-size:0.85rem;color:#999")], [
+        html.text("Color: "),
+        element.el(
+          "span",
+          [
+            html.style(
+              "display:inline-block;width:16px;height:16px;background:"
+              <> model.color
+              <> ";border-radius:3px;vertical-align:middle",
+            ),
+          ],
+          [],
+        ),
+        html.text(
+          " | "
+          <> case local.drawing {
+            True ->
+              "Drawing at ("
+              <> int.to_string(local.cursor_x)
+              <> ","
+              <> int.to_string(local.cursor_y)
+              <> ")"
+            False -> "Click and drag to draw"
+          },
+        ),
+      ]),
     ],
   )
 }
@@ -299,20 +307,20 @@ fn color_button(color: String, selected: String) -> beacon.Node(Msg) {
   )
 }
 
-fn parse_coords(coords: String) -> #(Int, Int) {
+fn parse_coords(coords: String) -> Result(#(Int, Int), String) {
   case string.split(coords, ",") {
     [x_str, y_str] -> {
-      let x = case int.parse(x_str) {
-        Ok(n) -> n
-        Error(_) -> 0
+      case int.parse(x_str), int.parse(y_str) {
+        Ok(x), Ok(y) -> Ok(#(x, y))
+        Error(_), Ok(_) -> Error("invalid x value `" <> x_str <> "`")
+        Ok(_), Error(_) -> Error("invalid y value `" <> y_str <> "`")
+        Error(_), Error(_) ->
+          Error(
+            "invalid x value `" <> x_str <> "` and y value `" <> y_str <> "`",
+          )
       }
-      let y = case int.parse(y_str) {
-        Ok(n) -> n
-        Error(_) -> 0
-      }
-      #(x, y)
     }
-    _ -> #(0, 0)
+    _ -> Error("expected `x,y`, got `" <> coords <> "`")
   }
 }
 

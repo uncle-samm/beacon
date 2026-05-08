@@ -11,14 +11,9 @@ pub fn check_no_changes_initially_test() {
   let assert False = check_changes(["src"])
 }
 
-pub fn native_watcher_check_test() {
-  // Should return a Bool without crashing
-  let available = native_available()
-  let assert True = available == True || available == False
+pub fn find_gleam_files_missing_dir_test() {
+  let assert [] = find_gleam_files("/tmp/beacon-dev-test-missing-dir")
 }
-
-@external(erlang, "beacon_dev_ffi", "native_watcher_available")
-fn native_available() -> Bool
 
 @external(erlang, "beacon_dev_ffi", "get_file_timestamps")
 fn get_timestamps(dirs: List(String)) -> List(#(String, Int))

@@ -2,10 +2,10 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import app
-import domains/auth
-import domains/items
-import gleam/dynamic/decode
+import domains/auth as auth
+import domains/items as items
 import gleam/json
+import gleam/dynamic/decode
 
 fn encode_auth_user(s: auth.User) -> json.Json {
   json.object([

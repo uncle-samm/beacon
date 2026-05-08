@@ -1,7 +1,7 @@
 import * as $dict from "../../gleam_stdlib/gleam/dict.mjs";
 import * as $int from "../../gleam_stdlib/gleam/int.mjs";
 import * as $string from "../../gleam_stdlib/gleam/string.mjs";
-import { pd_set, pd_get } from "../beacon_client_ffi.mjs";
+import { pd_set, pd_get, log } from "../beacon_client_ffi.mjs";
 import {
   Ok,
   Error,
@@ -9,7 +9,10 @@ import {
   Empty as $Empty,
   prepend as listPrepend,
   CustomType as $CustomType,
+  makeError,
 } from "../gleam.mjs";
+
+const FILEPATH = "src/beacon_client/handler.gleam";
 
 export class HandlerRegistry extends $CustomType {
   constructor(simple, parameterized, next_id) {
@@ -103,12 +106,27 @@ function pd_get_registry() {
 
 function pd_get_unsafe_registry() {
   let $ = pd_get(registry_key);
+  let registry;
   if ($ instanceof Ok) {
-    let r = $[0];
-    return r;
+    registry = $[0];
   } else {
-    return empty();
+    throw makeError(
+      "let_assert",
+      FILEPATH,
+      "beacon_client/handler",
+      124,
+      "pd_get_unsafe_registry",
+      "Pattern match failed, no pattern matched the value.",
+      {
+        value: $,
+        start: 3239,
+        end: 3285,
+        pattern_start: 3250,
+        pattern_end: 3262
+      }
+    )
   }
+  return registry;
 }
 
 /**
@@ -151,6 +169,7 @@ function pd_get_stack() {
     let stack = $[0];
     return stack;
   } else {
+    log("Render stack not initialized; using empty stack");
     return toList([]);
   }
 }

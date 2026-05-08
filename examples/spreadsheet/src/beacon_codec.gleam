@@ -2,8 +2,8 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import spreadsheet
-import gleam/dynamic/decode
 import gleam/json
+import gleam/dynamic/decode
 
 fn encode_cell(s: spreadsheet.Cell) -> json.Json {
   json.object([
@@ -30,10 +30,10 @@ pub fn encode_model(state: #(spreadsheet.Model, spreadsheet.Local)) -> String {
   let local = state.1
   json.object([
     #("cells", json.array(model.cells, encode_cell)),
-    #("selected_row", json.int(local.selected_row)),
-    #("selected_col", json.int(local.selected_col)),
-    #("editing", json.bool(local.editing)),
-    #("edit_buffer", json.string(local.edit_buffer)),
+    #("selected_row", json.int(model.selected_row)),
+    #("selected_col", json.int(model.selected_col)),
+    #("editing", json.bool(model.editing)),
+    #("edit_buffer", json.string(model.edit_buffer)),
   ])
   |> json.to_string
 }
@@ -46,7 +46,8 @@ pub fn decode_model(json_str: String) -> Result(#(spreadsheet.Model, spreadsheet
     use selected_col <- decode.field("selected_col", decode.int)
     use editing <- decode.field("editing", decode.bool)
     use edit_buffer <- decode.field("edit_buffer", decode.string)
-    decode.success(#(spreadsheet.Model(cells: cells), spreadsheet.Local(selected_row: selected_row, selected_col: selected_col, editing: editing, edit_buffer: edit_buffer)))
+
+    decode.success(#(spreadsheet.Model(cells: cells, selected_row: selected_row, selected_col: selected_col, editing: editing, edit_buffer: edit_buffer), spreadsheet.Local))
   }
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
@@ -67,7 +68,10 @@ pub fn substate_names() -> List(String) {
 pub fn encode_flat_fields(state: #(spreadsheet.Model, spreadsheet.Local)) -> String {
   let model = state.0
   json.object([
-
+    #("selected_row", json.int(model.selected_row)),
+    #("selected_col", json.int(model.selected_col)),
+    #("editing", json.bool(model.editing)),
+    #("edit_buffer", json.string(model.edit_buffer)),
   ])
   |> json.to_string
 }

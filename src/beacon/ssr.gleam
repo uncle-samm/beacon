@@ -358,8 +358,8 @@ fn build_html_document(
 }
 
 /// Choose the directory that contains Beacon client assets.
-/// Prefer the consuming app's `priv/static` when it has a manifest, otherwise
-/// use Beacon's own priv dir for repo/dependency installs.
+/// Prefer the consuming app's `priv/static` when it has a manifest; otherwise
+/// use Beacon's own packaged priv dir for repo/dependency installs.
 pub fn choose_client_assets_dir(
   has_local_manifest: Bool,
   local_dir: String,
@@ -376,8 +376,15 @@ pub fn client_assets_dir() -> String {
   case simplifile.is_file("priv/static/beacon_client.manifest") {
     Ok(True) ->
       choose_client_assets_dir(True, "priv/static", beacon_priv_path("static"))
-    _ ->
+    Ok(False) ->
       choose_client_assets_dir(False, "priv/static", beacon_priv_path("static"))
+    Error(err) -> {
+      log.error(
+        "beacon.ssr",
+        "Failed to inspect local client manifest: " <> string.inspect(err),
+      )
+      beacon_priv_path("static")
+    }
   }
 }
 
@@ -406,7 +413,10 @@ fn client_js_filename() -> String {
 pub fn beacon_priv_path(relative: String) -> String {
   case ffi_priv_dir() {
     Ok(dir) -> dir <> "/" <> relative
-    Error(_) -> "priv/" <> relative
+    Error(reason) -> {
+      log.error("beacon.ssr", "Failed to resolve Beacon priv dir: " <> reason)
+      "MISSING_BEACON_PRIV/" <> relative
+    }
   }
 }
 

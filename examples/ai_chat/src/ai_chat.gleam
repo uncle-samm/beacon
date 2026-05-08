@@ -3,21 +3,20 @@
 /// - Smooth character-by-character streaming (tokens buffered, dripped to client)
 /// - Multi-turn conversation with full history
 /// - effect.from for spawning async work that dispatches to the runtime
-
 import beacon
 import beacon/effect
 import beacon/html
 import beacon/log
 import envoy
+import gleam/erlang/process
+import gleam/list
+import gleam/string
 import glean/agent.{type Agent}
 import glean/error as glean_error
 import glean/message
 import glean/providers/openrouter
 import glean/run
 import glean/stream
-import gleam/erlang/process
-import gleam/list
-import gleam/string
 
 // --- Types ---
 
@@ -69,10 +68,7 @@ pub fn init() -> #(Model, effect.Effect(Msg)) {
 
 // --- Update ---
 
-pub fn update(
-  model: Model,
-  msg: Msg,
-) -> #(Model, effect.Effect(Msg)) {
+pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
   case msg {
     UpdateInput(text) -> #(Model(..model, input_text: text), effect.none())
 
@@ -85,7 +81,6 @@ pub fn update(
           let new_messages = list.append(model.messages, [user_msg])
           #(
             Model(
-              ..model,
               messages: new_messages,
               input_text: "",
               is_streaming: True,
@@ -103,8 +98,7 @@ pub fn update(
     )
 
     StreamDone -> {
-      let ai_msg =
-        ChatMessage(role: Assistant, content: model.streaming_text)
+      let ai_msg = ChatMessage(role: Assistant, content: model.streaming_text)
       #(
         Model(
           ..model,
@@ -143,10 +137,7 @@ fn start_streaming(messages: List(ChatMessage)) -> effect.Effect(Msg) {
         let char_subject = process.new_subject()
 
         // Spawn fetcher that sends token chunks to our subject
-        let _ =
-          process.spawn(fn() {
-            fetch_ai_stream(messages, char_subject)
-          })
+        let _ = process.spawn(fn() { fetch_ai_stream(messages, char_subject) })
 
         // Drip characters to the runtime
         drip_characters(char_subject, dispatch, "")
@@ -161,36 +152,41 @@ fn fetch_ai_stream(
   messages: List(ChatMessage),
   subject: process.Subject(String),
 ) -> Nil {
-  let api_key = case envoy.get("OPENROUTER_API_KEY") {
-    Ok(key) -> key
-    Error(_) -> ""
-  }
-
-  case string.is_empty(api_key) {
-    True -> {
+  case envoy.get("OPENROUTER_API_KEY") {
+    Error(_) -> {
+      log.warning("ai_chat", "OPENROUTER_API_KEY is missing")
       process.send(subject, "ERR:No API key. Set OPENROUTER_API_KEY.")
       Nil
     }
-    False -> {
-      let my_agent = build_agent(api_key)
-      let glean_messages = to_glean_messages(messages)
+    Ok(api_key) -> {
+      case string.is_empty(api_key) {
+        True -> {
+          log.warning("ai_chat", "OPENROUTER_API_KEY is empty")
+          process.send(subject, "ERR:No API key. Set OPENROUTER_API_KEY.")
+          Nil
+        }
+        False -> {
+          let my_agent = build_agent(api_key)
+          let glean_messages = to_glean_messages(messages)
 
-      case
-        run.stream_messages(my_agent, Nil, glean_messages, fn(event) {
-          case event {
-            stream.TextDelta(_, delta) -> process.send(subject, delta)
-            stream.StreamError(msg) -> {
-              log.error("ai_chat", "Stream error: " <> msg)
-              Nil
+          case
+            run.stream_messages(my_agent, Nil, glean_messages, fn(event) {
+              case event {
+                stream.TextDelta(_, delta) -> process.send(subject, delta)
+                stream.StreamError(msg) -> {
+                  log.error("ai_chat", "Stream error: " <> msg)
+                  Nil
+                }
+                _ -> log.debug("ai_chat", "Ignored non-text stream event")
+              }
+            })
+          {
+            Ok(_) -> process.send(subject, "")
+            Error(err) -> {
+              log.error("ai_chat", "AI error: " <> glean_error.to_string(err))
+              process.send(subject, "ERR:" <> glean_error.to_string(err))
             }
-            _ -> Nil
           }
-        })
-      {
-        Ok(_) -> process.send(subject, "")
-        Error(err) -> {
-          log.error("ai_chat", "AI error: " <> glean_error.to_string(err))
-          process.send(subject, "ERR:" <> glean_error.to_string(err))
         }
       }
     }
@@ -250,13 +246,20 @@ fn take_graphemes(s: String, n: Int) -> #(String, String) {
   take_graphemes_loop(s, n, "")
 }
 
-fn take_graphemes_loop(s: String, remaining: Int, acc: String) -> #(String, String) {
+fn take_graphemes_loop(
+  s: String,
+  remaining: Int,
+  acc: String,
+) -> #(String, String) {
   case remaining <= 0 {
     True -> #(acc, s)
     False ->
       case string.pop_grapheme(s) {
         Ok(#(ch, rest)) -> take_graphemes_loop(rest, remaining - 1, acc <> ch)
-        Error(_) -> #(acc, "")
+        Error(_) -> {
+          log.debug("ai_chat", "Reached end of string while taking graphemes")
+          #(acc, "")
+        }
       }
   }
 }
@@ -269,9 +272,7 @@ fn build_agent(api_key: String) -> Agent(Nil) {
   )
 }
 
-fn to_glean_messages(
-  messages: List(ChatMessage),
-) -> List(message.Message) {
+fn to_glean_messages(messages: List(ChatMessage)) -> List(message.Message) {
   list.map(messages, fn(m) {
     case m.role {
       User -> message.user(m.content)
@@ -366,10 +367,9 @@ fn view_message(msg: ChatMessage) -> beacon.Node(Msg) {
       ),
     ],
     [
-      html.div(
-        [html.style("font-size:0.75rem;color:#888;margin-bottom:2px")],
-        [html.text(label)],
-      ),
+      html.div([html.style("font-size:0.75rem;color:#888;margin-bottom:2px")], [
+        html.text(label),
+      ]),
       html.div(
         [
           html.style(
@@ -392,10 +392,9 @@ fn view_streaming(text: String) -> beacon.Node(Msg) {
       ),
     ],
     [
-      html.div(
-        [html.style("font-size:0.75rem;color:#888;margin-bottom:2px")],
-        [html.text("AI")],
-      ),
+      html.div([html.style("font-size:0.75rem;color:#888;margin-bottom:2px")], [
+        html.text("AI"),
+      ]),
       html.div(
         [
           html.style(

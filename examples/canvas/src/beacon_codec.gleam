@@ -2,8 +2,8 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import canvas
-import gleam/dynamic/decode
 import gleam/json
+import gleam/dynamic/decode
 
 fn encode_stroke(s: canvas.Stroke) -> json.Json {
   json.object([

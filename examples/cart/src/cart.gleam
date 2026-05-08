@@ -3,10 +3,10 @@
 /// - Multiple model fields change from one action (products + cart_items)
 /// - Multi-user shared product stock via store
 /// - Patch patterns: two arrays change per action
-
 import beacon
 import beacon/effect
 import beacon/html
+import beacon/log
 import beacon/pubsub
 import beacon/store
 import gleam/float
@@ -25,10 +25,7 @@ pub type CartItem {
 }
 
 pub type Model {
-  Model(
-    products: List(Product),
-    cart_items: List(CartItem),
-  )
+  Model(products: List(Product), cart_items: List(CartItem))
 }
 
 pub type Local {
@@ -80,7 +77,9 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
                     False -> p
                   }
                 })
-              let new_cart = case list.find(model.cart_items, fn(c) { c.product_id == id }) {
+              let new_cart = case
+                list.find(model.cart_items, fn(c) { c.product_id == id })
+              {
                 Ok(_) ->
                   list.map(model.cart_items, fn(c) {
                     case c.product_id == id {
@@ -100,10 +99,19 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
               }
               #(Model(products: new_products, cart_items: new_cart), local)
             }
-            Error(_) -> #(model, local)
+            Error(_) -> {
+              log.warning(
+                "cart",
+                "Product not found or out of stock: " <> id_str,
+              )
+              #(model, local)
+            }
           }
         }
-        Error(_) -> #(model, local)
+        Error(_) -> {
+          log.warning("cart", "Invalid product id for add: " <> id_str)
+          #(model, local)
+        }
       }
     }
 
@@ -123,10 +131,16 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
                 list.filter(model.cart_items, fn(c) { c.product_id != id })
               #(Model(products: new_products, cart_items: new_cart), local)
             }
-            Error(_) -> #(model, local)
+            Error(_) -> {
+              log.warning("cart", "Cart item not found: " <> id_str)
+              #(model, local)
+            }
           }
         }
-        Error(_) -> #(model, local)
+        Error(_) -> {
+          log.warning("cart", "Invalid product id for remove: " <> id_str)
+          #(model, local)
+        }
       }
     }
 
@@ -151,17 +165,30 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
                 })
               #(Model(products: new_products, cart_items: new_cart), local)
             }
-            Error(_) -> #(model, local)
+            Error(_) -> {
+              log.warning(
+                "cart",
+                "Product not found or out of stock: " <> id_str,
+              )
+              #(model, local)
+            }
           }
         }
-        Error(_) -> #(model, local)
+        Error(_) -> {
+          log.warning("cart", "Invalid product id for increment: " <> id_str)
+          #(model, local)
+        }
       }
     }
 
     DecrementQty(id_str) -> {
       case int.parse(id_str) {
         Ok(id) -> {
-          case list.find(model.cart_items, fn(c) { c.product_id == id && c.quantity > 1 }) {
+          case
+            list.find(model.cart_items, fn(c) {
+              c.product_id == id && c.quantity > 1
+            })
+          {
             Ok(_) -> {
               let new_products =
                 list.map(model.products, fn(p) {
@@ -185,7 +212,10 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
             }
           }
         }
-        Error(_) -> #(model, local)
+        Error(_) -> {
+          log.warning("cart", "Invalid product id for decrement: " <> id_str)
+          #(model, local)
+        }
       }
     }
 
@@ -234,7 +264,11 @@ pub fn view(model: Model, _local: Local) -> beacon.Node(Msg) {
   let total = subtotal + tax
 
   html.div(
-    [html.style("font-family:system-ui;max-width:800px;margin:2rem auto;padding:0 1rem")],
+    [
+      html.style(
+        "font-family:system-ui;max-width:800px;margin:2rem auto;padding:0 1rem",
+      ),
+    ],
     [
       html.h1([], [html.text("Shopping Cart")]),
       html.div(
@@ -258,12 +292,20 @@ pub fn view(model: Model, _local: Local) -> beacon.Node(Msg) {
                   html.div([], list.map(items, render_cart_item)),
                   // Totals
                   html.div(
-                    [html.style("border-top:2px solid #333;margin-top:1rem;padding-top:1rem")],
+                    [
+                      html.style(
+                        "border-top:2px solid #333;margin-top:1rem;padding-top:1rem",
+                      ),
+                    ],
                     [
                       total_row("Subtotal", subtotal),
                       total_row("Tax (10%)", tax),
                       html.div(
-                        [html.style("display:flex;justify-content:space-between;font-weight:bold;font-size:18px;margin-top:8px")],
+                        [
+                          html.style(
+                            "display:flex;justify-content:space-between;font-weight:bold;font-size:18px;margin-top:8px",
+                          ),
+                        ],
                         [
                           html.span([], [html.text("Total")]),
                           html.span([], [
@@ -284,13 +326,20 @@ pub fn view(model: Model, _local: Local) -> beacon.Node(Msg) {
 
 fn render_product(product: Product) -> beacon.Node(Msg) {
   html.div(
-    [html.style("display:flex;justify-content:space-between;align-items:center;padding:12px;border:1px solid #eee;border-radius:8px;margin-bottom:8px")],
+    [
+      html.style(
+        "display:flex;justify-content:space-between;align-items:center;padding:12px;border:1px solid #eee;border-radius:8px;margin-bottom:8px",
+      ),
+    ],
     [
       html.div([], [
         html.div([html.style("font-weight:500")], [html.text(product.name)]),
         html.div([html.style("color:#666;font-size:14px")], [
           html.text(
-            "$" <> int.to_string(product.price) <> " | Stock: " <> int.to_string(product.stock),
+            "$"
+            <> int.to_string(product.price)
+            <> " | Stock: "
+            <> int.to_string(product.stock),
           ),
         ]),
       ]),
@@ -299,7 +348,9 @@ fn render_product(product: Product) -> beacon.Node(Msg) {
           html.button(
             [
               beacon.on_click(AddToCart(int.to_string(product.id))),
-              html.style("padding:8px 16px;background:#4CAF50;color:white;border:none;border-radius:6px;cursor:pointer"),
+              html.style(
+                "padding:8px 16px;background:#4CAF50;color:white;border:none;border-radius:6px;cursor:pointer",
+              ),
             ],
             [html.text("Add")],
           )
@@ -316,7 +367,11 @@ fn render_cart_item(item: CartItem) -> beacon.Node(Msg) {
   let line_total = item.price * item.quantity
   let id_str = int.to_string(item.product_id)
   html.div(
-    [html.style("display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f0f0f0")],
+    [
+      html.style(
+        "display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f0f0f0",
+      ),
+    ],
     [
       html.div([], [
         html.span([html.style("font-weight:500")], [html.text(item.name)]),
@@ -328,7 +383,9 @@ fn render_cart_item(item: CartItem) -> beacon.Node(Msg) {
         html.button(
           [
             beacon.on_click(DecrementQty(id_str)),
-            html.style("width:28px;height:28px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:white"),
+            html.style(
+              "width:28px;height:28px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:white",
+            ),
           ],
           [html.text("-")],
         ),
@@ -338,17 +395,24 @@ fn render_cart_item(item: CartItem) -> beacon.Node(Msg) {
         html.button(
           [
             beacon.on_click(IncrementQty(id_str)),
-            html.style("width:28px;height:28px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:white"),
+            html.style(
+              "width:28px;height:28px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:white",
+            ),
           ],
           [html.text("+")],
         ),
-        html.span([html.style("min-width:60px;text-align:right;font-weight:500")], [
-          html.text("$" <> int.to_string(line_total)),
-        ]),
+        html.span(
+          [html.style("min-width:60px;text-align:right;font-weight:500")],
+          [
+            html.text("$" <> int.to_string(line_total)),
+          ],
+        ),
         html.button(
           [
             beacon.on_click(RemoveFromCart(id_str)),
-            html.style("background:none;border:none;color:#e57373;cursor:pointer;font-size:16px"),
+            html.style(
+              "background:none;border:none;color:#e57373;cursor:pointer;font-size:16px",
+            ),
           ],
           [html.text("x")],
         ),
@@ -359,7 +423,11 @@ fn render_cart_item(item: CartItem) -> beacon.Node(Msg) {
 
 fn total_row(label: String, amount: Int) -> beacon.Node(Msg) {
   html.div(
-    [html.style("display:flex;justify-content:space-between;color:#666;font-size:14px;margin-bottom:4px")],
+    [
+      html.style(
+        "display:flex;justify-content:space-between;color:#666;font-size:14px;margin-bottom:4px",
+      ),
+    ],
     [
       html.span([], [html.text(label)]),
       html.span([], [html.text("$" <> int.to_string(amount))]),
@@ -379,7 +447,7 @@ pub fn start() {
   // Seed store with initial products if empty
   case store.get_all(product_store, "products") {
     [] -> store.append_many(product_store, "products", default_products())
-    _ -> Nil
+    _ -> log.debug("cart", "Product store already seeded")
   }
 
   let init_from_store = fn() {

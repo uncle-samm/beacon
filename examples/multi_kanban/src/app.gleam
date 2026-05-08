@@ -1,20 +1,15 @@
 /// Multi-file Kanban — demonstrates external enum + record types from domain module.
 /// Card and Column types live in domains/board.gleam.
-
 import beacon
 import beacon/html
+import beacon/log
 import domains/board
 import gleam/int
 import gleam/list
 import gleam/string
 
 pub type Model {
-  Model(
-    cards: List(board.Card),
-    next_id: Int,
-    input: String,
-    dragging_id: Int,
-  )
+  Model(cards: List(board.Card), next_id: Int, input: String, dragging_id: Int)
 }
 
 pub type Msg {
@@ -61,7 +56,10 @@ pub fn update(model: Model, msg: Msg) -> Model {
     StartDrag(id_str) ->
       case int.parse(id_str) {
         Ok(id) -> Model(..model, dragging_id: id)
-        Error(_) -> model
+        Error(_) -> {
+          log.warning("multi_kanban", "Invalid card id for drag: " <> id_str)
+          model
+        }
       }
     DropOnColumn(col_str) ->
       case model.dragging_id >= 0 {
@@ -224,9 +222,7 @@ fn render_card(card: board.Card) -> beacon.Node(Msg) {
       html.button(
         [
           beacon.on_click(DeleteCard(card.id)),
-          html.style(
-            "background:none;border:none;color:#bbb;cursor:pointer",
-          ),
+          html.style("background:none;border:none;color:#bbb;cursor:pointer"),
         ],
         [html.text("x")],
       ),

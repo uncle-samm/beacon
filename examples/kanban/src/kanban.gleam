@@ -4,10 +4,10 @@
 /// - Dynamic PubSub subscriptions
 /// - Cards moving between columns (Todo/Doing/Done)
 /// - Pure update + on_update pattern (store calls separated from update logic)
-
 import beacon
 import beacon/effect
 import beacon/html
+import beacon/log
 import beacon/pubsub
 import beacon/store
 import gleam/int
@@ -132,7 +132,10 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
     StartDrag(id_str) -> {
       case int.parse(id_str) {
         Ok(id) -> #(Model(..model, dragging_id: id), local)
-        Error(_) -> #(model, local)
+        Error(_) -> {
+          log.warning("kanban", "Invalid card id for drag: " <> id_str)
+          #(model, local)
+        }
       }
     }
 
@@ -162,8 +165,10 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
 
     BoardUpdated -> #(model, local)
 
-    SetCards(cards, next_id) ->
-      #(Model(..model, cards: cards, next_id: next_id), local)
+    SetCards(cards, next_id) -> #(
+      Model(..model, cards: cards, next_id: next_id),
+      local,
+    )
   }
 }
 
@@ -186,12 +191,14 @@ fn make_on_update(
         // Read authoritative card list from shared store
         effect.from(fn(dispatch) {
           let cards = store.get_all(card_store, "cards")
-          let next_id = case list.fold(cards, 0, fn(max, c) {
-            case c.id > max {
-              True -> c.id
-              False -> max
-            }
-          }) {
+          let next_id = case
+            list.fold(cards, 0, fn(max, c) {
+              case c.id > max {
+                True -> c.id
+                False -> max
+              }
+            })
+          {
             0 -> 5
             max -> max + 1
           }
@@ -271,7 +278,11 @@ fn render_column(model: Model, col: Column) -> beacon.Node(Msg) {
     ],
     [
       html.h3(
-        [html.style("margin:0 0 1rem 0;color:#555;font-size:0.9rem;text-transform:uppercase;letter-spacing:0.5px")],
+        [
+          html.style(
+            "margin:0 0 1rem 0;color:#555;font-size:0.9rem;text-transform:uppercase;letter-spacing:0.5px",
+          ),
+        ],
         [
           html.text(
             column_label(col)
@@ -336,18 +347,20 @@ pub fn start() {
       ]
       store.append_many(card_store, "cards", initial_cards)
     }
-    _ -> Nil
+    _ -> log.debug("kanban", "Card store already seeded")
   }
 
   // Init reads from shared store — new sessions see existing cards
   let init_from_store = fn() {
     let cards = store.get_all(card_store, "cards")
-    let next_id = case list.fold(cards, 0, fn(max, c) {
-      case c.id > max {
-        True -> c.id
-        False -> max
-      }
-    }) {
+    let next_id = case
+      list.fold(cards, 0, fn(max, c) {
+        case c.id > max {
+          True -> c.id
+          False -> max
+        }
+      })
+    {
       0 -> 5
       max_id -> max_id + 1
     }
@@ -361,4 +374,3 @@ pub fn start() {
   |> beacon.on_notify(fn(_topic) { BoardUpdated })
   |> beacon.start(8080)
 }
-

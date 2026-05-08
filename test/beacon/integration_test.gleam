@@ -82,18 +82,17 @@ pub fn http_get_root_returns_200_with_ssr_html_test() {
   let assert True = string.contains(body, "Integration Test")
 }
 
-pub fn http_get_beacon_js_returns_javascript_test() {
+pub fn http_get_beacon_js_returns_runtime_javascript_test() {
   start_httpc()
   let port = 12_000 + unique_port_offset()
   let assert Ok(_app) = application.start(test_app_config(port))
   process.sleep(100)
 
-  let assert Ok(#(status, _headers, _body)) =
+  let assert Ok(#(status, _headers, body)) =
     http_get("http://localhost:" <> int.to_string(port) <> "/beacon_client.js")
-  // beacon_client.js is only available after build step.
-  // In test environment without build, server returns 404 (file not found).
-  // Accepting either 200 (built) or 404 (not built) — but NOT 500.
-  let assert True = status == 200 || status == 404
+  let assert 200 = status
+  let assert True = string.contains(body, "beacon")
+  let assert True = string.contains(body, "WebSocket")
 }
 
 pub fn http_get_has_security_headers_test() {
@@ -107,6 +106,58 @@ pub fn http_get_has_security_headers_test() {
   // secure_headers middleware should have added these
   let assert True = has_header(headers, "x-content-type-options", "nosniff")
   let assert True = has_header(headers, "x-frame-options", "SAMEORIGIN")
+}
+
+pub fn http_pre_upgrade_rejects_too_many_headers_test() {
+  start_httpc()
+  let port = 23_000 + unique_port_offset()
+  let limits =
+    transport.SecurityLimits(
+      ..transport.default_security_limits(),
+      max_http_headers: 2,
+    )
+  let assert Ok(_app) =
+    application.start(
+      application.AppConfig(..test_app_config(port), security_limits: limits),
+    )
+  process.sleep(100)
+
+  let result =
+    http_request(
+      "GET",
+      "http://localhost:" <> int.to_string(port) <> "/",
+      [
+        #("x-one", "1"),
+        #("x-two", "2"),
+        #("x-three", "3"),
+      ],
+      "",
+    )
+  let assert Error(_) = result
+}
+
+pub fn http_pre_upgrade_rejects_large_headers_test() {
+  start_httpc()
+  let port = 24_000 + unique_port_offset()
+  let limits =
+    transport.SecurityLimits(
+      ..transport.default_security_limits(),
+      max_http_header_bytes: 32,
+    )
+  let assert Ok(_app) =
+    application.start(
+      application.AppConfig(..test_app_config(port), security_limits: limits),
+    )
+  process.sleep(100)
+
+  let result =
+    http_request(
+      "GET",
+      "http://localhost:" <> int.to_string(port) <> "/",
+      [#("x-large", string.repeat("x", 128))],
+      "",
+    )
+  let assert Error(_) = result
 }
 
 // ===== 22.1: Real WebSocket Stress Test =====
@@ -391,6 +442,14 @@ fn start_httpc() -> Nil
 @external(erlang, "beacon_http_client_ffi", "http_get")
 fn http_get(
   url: String,
+) -> Result(#(Int, List(#(String, String)), String), String)
+
+@external(erlang, "beacon_http_client_ffi", "http_request")
+fn http_request(
+  method: String,
+  url: String,
+  headers: List(#(String, String)),
+  body: String,
 ) -> Result(#(Int, List(#(String, String)), String), String)
 
 pub type TcpSocket

@@ -2,9 +2,9 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import app
-import domains/task
-import gleam/dynamic/decode
+import domains/task as task
 import gleam/json
+import gleam/dynamic/decode
 
 fn encode_task_todoitem(s: task.TodoItem) -> json.Json {
   json.object([

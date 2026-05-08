@@ -44,7 +44,24 @@ PYTHONUNBUFFERED=1 .venv/bin/python test_all_cdp.py --canonical --viewport mobil
 For a narrower loop, use `make browser-canonical-desktop`,
 `make browser-canonical-mobile`, or set `BEACON_CDP_VIEWPORTS`.
 
-CI should run the same command after `gleam build`, `gleam test`, and
+The canonical target intentionally runs the contract examples only. To exercise
+every example covered by `test_all_cdp.py`, run the full matrix:
+
+```sh
+make browser-all
+```
+
+For a narrower full-matrix loop, use `make browser-all-desktop`,
+`make browser-all-mobile`, or pass an example name through the script:
+
+```sh
+PYTHONUNBUFFERED=1 .venv/bin/python test_all_cdp.py canvas --viewport desktop
+```
+
+CDP example startup is part of the assertion surface. If an attempted example
+server exits or fails to become ready before timeout, the browser run fails.
+
+CI should run `make browser-canonical` after `gleam build`, `gleam test`, and
 `gleam run -m beacon/lint`. Set `CHROME_BIN`, `CDP_PORT`, or `PYTHON_BIN`
 explicitly when the CI image does not expose the defaults.
 
@@ -70,13 +87,16 @@ following guarantees:
 `counter`, `counter_local`, `local_first_form`, `private_session`, `routed`,
 `routed_workspace`, `route_server_workspace`, and `auth_workspace` slices. The
 browser harness runs through the project-local `.venv` and
-`requirements-dev.txt`.
+`requirements-dev.txt`. `make browser-all` removes the canonical filter and
+runs every example slice implemented in the harness.
 
 The permanent harness now asserts:
 
 - DOM mutation buckets stay under a fixed threshold instead of only checking final text.
 - `layout-shift` entries stay below the accepted cumulative threshold.
 - Mobile canonical runs have no horizontal overflow at DOM stability checkpoints.
+- Browser startup failures, console errors, runtime exceptions, and early
+  hydration errors are captured as test failures.
 - Local-only events send zero model WebSocket events.
 - Model events receive `patch` or `model_sync` frames and do not receive post-update
   HTML `mount` frames.
@@ -121,8 +141,8 @@ make browser-canonical-mobile
 
 Results:
 
-- `desktop`: 188 passed, 0 failed, 15 skipped
-- `mobile`: 196 passed, 0 failed, 15 skipped
+- `desktop`: 227 passed, 0 failed, 15 skipped
+- `mobile`: 235 passed, 0 failed, 15 skipped
 
 Latest route-history/reconnect canonical runs:
 
@@ -135,6 +155,17 @@ Results:
 
 - `desktop`: 227 passed, 0 failed, 15 skipped
 - `mobile`: 235 passed, 0 failed, 15 skipped
+
+Latest all-example desktop run:
+
+```sh
+make browser-all-desktop
+```
+
+Result: 361 passed, 0 failed. This full run also verifies the older example
+slices that are not part of the canonical contract matrix: Kanban, Canvas,
+Snake, Chat, Dashboard, Pong, Triple Counter, Todo, Cart, Spreadsheet, AI Chat,
+middleware, and explicit multi-file domain examples.
 
 These runs cover the full canonical matrix with DOM mutation bucket checks,
 cumulative layout-shift checks, parsed WebSocket frame assertions, Local-only

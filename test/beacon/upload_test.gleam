@@ -113,18 +113,11 @@ pub fn parse_multipart_binary_safe_test() {
   >>
   let content_type = "multipart/form-data; boundary=" <> boundary
   let assert Ok(files) = upload.parse_multipart(body, content_type)
-  let assert True = length(files) > 0
-}
-
-fn length(l: List(a)) -> Int {
-  do_length(l, 0)
-}
-
-fn do_length(l: List(a), acc: Int) -> Int {
-  case l {
-    [] -> acc
-    [_, ..rest] -> do_length(rest, acc + 1)
-  }
+  let assert [file] = files
+  let assert "test.png" = file.filename
+  let assert "image/png" = file.content_type
+  let assert 8 = file.size
+  let assert <<137, 80, 78, 71, 13, 10, 26, 10>> = file.data
 }
 
 @external(erlang, "beacon_test_ffi", "string_contains")

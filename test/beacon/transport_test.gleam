@@ -1,4 +1,6 @@
 import beacon/transport
+import beacon/transport/ws
+import gleam/bit_array
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
@@ -306,3 +308,37 @@ pub fn encode_decode_roundtrip_consistency_test() {
     Nil
   })
 }
+
+// --- WebSocket frame edge cases ---
+
+pub fn ws_decode_incomplete_frame_test() {
+  let assert Error(_) = ws.decode_frame(<<129, 5, 0, 0>>)
+}
+
+pub fn ws_decode_rejects_unmasked_client_frame_test() {
+  let assert Error(_) = ws.decode_frame(<<129, 2, "hi":utf8>>)
+}
+
+pub fn ws_decode_text_ping_pong_close_and_unknown_opcode_test() {
+  let assert Ok(#(ws.TextFrame("hi"), <<>>)) =
+    ws.decode_frame(masked_ws_frame(1, <<"hi":utf8>>))
+  let assert Ok(#(ws.CloseFrame, <<>>)) =
+    ws.decode_frame(masked_ws_frame(8, <<>>))
+  let assert Ok(#(ws.PingFrame(ping), <<>>)) =
+    ws.decode_frame(masked_ws_frame(9, <<"p":utf8>>))
+  let assert Ok("p") = bit_array.to_string(ping)
+  let assert Ok(#(ws.PongFrame(pong), <<>>)) =
+    ws.decode_frame(masked_ws_frame(10, <<"q":utf8>>))
+  let assert Ok("q") = bit_array.to_string(pong)
+  let assert Ok(#(ws.BinaryFrame(binary), <<>>)) =
+    ws.decode_frame(masked_ws_frame(3, <<1, 2, 3>>))
+  let assert 3 = bit_array.byte_size(binary)
+}
+
+pub fn ws_decode_invalid_utf8_text_closes_frame_test() {
+  let assert Ok(#(ws.CloseFrame, <<>>)) =
+    ws.decode_frame(masked_ws_frame(1, <<255, 254>>))
+}
+
+@external(erlang, "beacon_test_ffi", "masked_ws_frame")
+fn masked_ws_frame(opcode: Int, payload: BitArray) -> BitArray

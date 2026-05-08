@@ -2,8 +2,8 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import dashboard
-import gleam/dynamic/decode
 import gleam/json
+import gleam/dynamic/decode
 
 
 

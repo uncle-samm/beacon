@@ -2,8 +2,8 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import todo_app
-import gleam/dynamic/decode
 import gleam/json
+import gleam/dynamic/decode
 
 fn encode_todo(s: todo_app.Todo) -> json.Json {
   json.object([

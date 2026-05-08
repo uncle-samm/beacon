@@ -156,10 +156,11 @@ fn pd_get_registry() -> HandlerRegistry(msg) {
 }
 
 fn pd_get_unsafe_registry() -> HandlerRegistry(msg) {
-  case pd_get(registry_key) {
-    Ok(r) -> r
-    Error(Nil) -> empty()
-  }
+  // INVARIANT: start_render always installs a registry before view rendering
+  // can call register_* or finish_render. Missing state means render-cycle
+  // corruption and must fail loudly.
+  let assert Ok(registry) = pd_get(registry_key)
+  registry
 }
 
 fn pd_set_raw_registry(value: a) -> Nil {
@@ -169,7 +170,13 @@ fn pd_set_raw_registry(value: a) -> Nil {
 fn pd_get_stack() -> List(a) {
   case pd_get(stack_key) {
     Ok(stack) -> stack
-    Error(Nil) -> []
+    Error(Nil) -> {
+      log.debug(
+        "beacon.handler",
+        "Render stack not initialized; using empty stack",
+      )
+      []
+    }
   }
 }
 

@@ -571,7 +571,11 @@ fn handle_message(
                 transport_subject,
                 transport.SendError(reason: err_str),
               )
-            Error(Nil) -> Nil
+            Error(Nil) ->
+              log.warning(
+                "beacon.runtime",
+                "Cannot send decode error to missing connection " <> conn_id,
+              )
           }
           actor.continue(state)
         }

@@ -106,16 +106,36 @@ def configure_viewport():
 ws = None
 pending_responses = {}
 cdp_events = []
+browser_errors = []
 
 def record_cdp_message(data):
     if "method" in data:
         cdp_events.append(data)
+        method = data.get("method")
+        if method == "Runtime.exceptionThrown":
+            details = data.get("params", {}).get("exceptionDetails", {})
+            text = details.get("text", "Runtime exception")
+            exception = details.get("exception", {})
+            description = exception.get("description") or exception.get("value") or text
+            browser_errors.append(str(description))
+        elif method == "Log.entryAdded":
+            entry = data.get("params", {}).get("entry", {})
+            if entry.get("level") == "error":
+                browser_errors.append(str(entry.get("text", "Browser log entry")))
 
-def cdp(method, params=None, timeout=8):
+def cdp(method, params=None, timeout=8, retry=True):
     global MID
+    if ws is None:
+        reconnect_cdp()
     MID += 1
     my_id = MID
-    ws.send(json.dumps({"id": my_id, "method": method, "params": params or {}}))
+    try:
+        ws.send(json.dumps({"id": my_id, "method": method, "params": params or {}}))
+    except websocket.WebSocketConnectionClosedException:
+        if not retry:
+            raise
+        reconnect_cdp()
+        return cdp(method, params, timeout, retry=False)
     if my_id in pending_responses:
         return pending_responses.pop(my_id)
     deadline = time.time() + timeout
@@ -131,6 +151,22 @@ def cdp(method, params=None, timeout=8):
         except:
             break
     return None
+
+def reconnect_cdp():
+    global ws, pending_responses, DOM_MONITOR_INSTALLED
+    try:
+        if ws is not None:
+            ws.close()
+    except:
+        pass
+    ws = websocket.create_connection(get_tab(), timeout=10, suppress_origin=True)
+    pending_responses = {}
+    DOM_MONITOR_INSTALLED = False
+    cdp("Runtime.enable", retry=False)
+    cdp("Log.enable", retry=False)
+    cdp("Network.enable", retry=False)
+    cdp("Page.enable", retry=False)
+    configure_viewport()
 
 def evl(expr):
     r = cdp("Runtime.evaluate", {"expression": expr})
@@ -156,6 +192,11 @@ def clear_cdp_events():
     global cdp_events
     drain()
     cdp_events = []
+
+def clear_browser_errors():
+    global browser_errors
+    browser_errors = []
+    evl('window.__e=[]; "ok"')
 
 def websocket_payloads():
     drain()
@@ -230,6 +271,7 @@ def check_local_ws_quiet(msg):
 
 def navigate(path="/"):
     drain()
+    clear_browser_errors()
     install_dom_monitor()
     cdp("Network.setCacheDisabled", {"cacheDisabled": True})
     cdp("Page.navigate", {"url": f"http://localhost:{BEACON_PORT}{path}"})
@@ -241,7 +283,7 @@ def navigate(path="/"):
         if len(str(t)) > 5 and str(ws_state) == "1":
             break
     drain()
-    evl('window.__e=[]; const o=console.error; console.error=function(...a){window.__e.push(a.join(" ")); o.apply(console,a)}; "ok"')
+    evl('window.__e = window.__e || []; "ok"')
 
 def text():
     return evl('document.getElementById("beacon-app").textContent')
@@ -278,10 +320,17 @@ def type_input(sel, value):
     drain()
 
 def errors():
-    return str(evl("window.__e.length"))
+    dom_errors = evl("window.__e ? window.__e.length : 0")
+    try:
+        dom_count = int(str(dom_errors))
+    except:
+        dom_count = 1
+    return str(dom_count + len(browser_errors))
 
 def error_list():
-    return evl("window.__e.join('; ') || 'none'")
+    dom_list = evl("window.__e ? window.__e.join('; ') : ''")
+    all_errors = [e for e in [str(dom_list)] if e and e != "none"] + browser_errors
+    return "; ".join(all_errors) if all_errors else "none"
 
 def wait_for_js(predicate_expr, timeout_seconds=8, interval_seconds=0.25):
     deadline = time.time() + timeout_seconds
@@ -343,6 +392,18 @@ def install_dom_monitor():
     script = r"""
 (() => {
   window.__BEACON_ENABLE_TEST_HOOKS = true;
+  window.__e = [];
+  const previousConsoleError = console.error;
+  console.error = function(...args) {
+    window.__e.push(args.map((arg) => {
+      try {
+        return typeof arg === "string" ? arg : JSON.stringify(arg);
+      } catch (_) {
+        return String(arg);
+      }
+    }).join(" "));
+    previousConsoleError.apply(console, args);
+  };
 
   function freshMonitor() {
     return {
@@ -499,8 +560,10 @@ def start_example(name, module=None):
         if server_proc.poll() is not None:
             rest = server_proc.stdout.read().decode("utf-8", errors="replace")
             print(f"  * Server died: {rest[-300:]}")
+            check(False, f"{name}: server starts")
             return False
     print("  * Server timeout")
+    check(False, f"{name}: server starts before timeout")
     return False
 
 def stop_server():
@@ -537,10 +600,7 @@ print(f"Viewport: {VIEWPORT}")
 if VERBOSE:
     print("Verbose: ON")
 print()
-ws = websocket.create_connection(get_tab(), timeout=10, suppress_origin=True)
-cdp("Network.enable")
-cdp("Page.enable")
-configure_viewport()
+reconnect_cdp()
 
 # == 1. Counter ==
 print("-- 1: Counter --")
@@ -837,11 +897,20 @@ if start_example("pong"):
     has_score = bool(re.search(r'[1-9]', t.split("P1")[0])) if "P1" in t else False
     check(has_score or "Pause" in t, f"Game running (score or pause visible)")
     # Pause
-    click_by_text("Pause")
-    time.sleep(0.5); drain()
+    evl('''
+    (function() {
+      var buttons = Array.from(document.querySelectorAll("button"));
+      var pause = buttons.find(function(b) { return b.textContent.trim() === "Pause"; });
+      if (pause) pause.click();
+      return pause ? "pause-clicked" : "missing-pause";
+    })()
+    ''')
+    wait_for_js('"Start" in document.getElementById("beacon-app").textContent', timeout_seconds=3)
+    drain()
     t = text()
     check("Start" in t, "Pause -> Start")
     # Frozen when paused
+    time.sleep(1); drain()
     h1 = html()
     time.sleep(1); drain()
     h2 = html()
@@ -1034,15 +1103,7 @@ if start_example("spreadsheet"):
     })()
     ''')
     time.sleep(0.5); drain()
-    # Press Enter to confirm via keydown
-    evl('''
-    (function() {
-      var inp = document.querySelector("[data-beacon-event-keydown]");
-      if (!inp) return "no-keydown";
-      inp.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true}));
-      return "entered";
-    })()
-    ''')
+    click_by_text("Save")
     time.sleep(3); drain()
     t = text()
     check("CellData" in t, f"Cell value saved (typed={typed})")
@@ -1092,11 +1153,13 @@ if start_example("middleware_demo", module="app"):
     time.sleep(1); drain()
     health_body = evl('window.__health || "pending"')
     check("ok" in str(health_body), f"Health endpoint returns ok ({health_body})")
+    check(errors() == "0", f"No errors before expected admin rejection ({error_list()})")
     # /admin should be blocked without X-Admin header
     evl('fetch("/admin/secret").then(r=>{window.__admin_status=r.status}); "fetching"')
     time.sleep(1); drain()
     admin_status = evl('window.__admin_status || 0')
     check(str(admin_status) == "403", f"Admin blocked without header (status={admin_status})")
+    clear_browser_errors()
     check(errors() == "0", f"Zero errors ({error_list()})")
 stop_server(); print()
 

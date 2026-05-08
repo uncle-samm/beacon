@@ -481,13 +481,6 @@ function morphInnerHTML(container, html) {
       restored = container.querySelector(`[name="${safeName}"]`) ||
                  container.querySelector(`[data-beacon-event-input="${safeName}"]`);
     }
-    if (!restored && focused.type) {
-      // Fallback: find by type and placeholder
-      const placeholder = focused.getAttribute("placeholder");
-      if (placeholder) {
-        restored = container.querySelector(`${focusedTag}[placeholder="${CSS.escape(placeholder)}"]`);
-      }
-    }
     if (restored) {
       if (restored !== document.activeElement) {
         restored.focus();
@@ -1000,6 +993,7 @@ function setupNavigation() {
 // === Exports for Gleam FFI ===
 export function query_selector(sel) { const el = document.querySelector(sel); return el ? { type: "Ok", 0: el } : { type: "Error", 0: undefined }; }
 export function log(msg) { console.log("[beacon]", msg); return undefined; }
+export function log_error(msg) { console.error("[beacon]", msg); return undefined; }
 
 // === Auto-boot ===
 // When loaded as a script tag, auto-boot: find the app root, set up navigation, connect WS.

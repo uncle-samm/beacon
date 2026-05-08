@@ -23,8 +23,11 @@ pub fn main() {
   case native_watcher_available() {
     True -> {
       log.info("beacon.dev", "Using native file watcher (fswatch/inotifywait)")
-      let _ = start_native_watcher(watch_dirs)
-      native_watch_loop(watch_dirs)
+      case start_native_watcher(watch_dirs) {
+        Ok(Nil) -> native_watch_loop(watch_dirs)
+        Error(reason) ->
+          log.error("beacon.dev", "Failed to start native watcher: " <> reason)
+      }
     }
     False -> {
       log.info(
@@ -45,7 +48,14 @@ fn native_watch_loop(dirs: List(String)) -> Nil {
       log.info("beacon.dev", "File change detected (native), recompiling...")
       handle_recompile()
       // Restart watcher for next change
-      let _ = start_native_watcher(dirs)
+      case start_native_watcher(dirs) {
+        Ok(Nil) -> Nil
+        Error(reason) ->
+          log.error(
+            "beacon.dev",
+            "Failed to restart native watcher: " <> reason,
+          )
+      }
       Nil
     }
     False -> Nil

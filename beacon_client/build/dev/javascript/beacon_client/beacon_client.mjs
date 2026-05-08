@@ -6,6 +6,7 @@ import {
   ws_send,
   ws_connect as connect_ws,
   log,
+  log_error,
 } from "./beacon_client_ffi.mjs";
 import { Ok, CustomType as $CustomType } from "./gleam.mjs";
 
@@ -73,7 +74,7 @@ function morph_app_root(html) {
     let el = $[0];
     return morph_app_root_ffi(el, html);
   } else {
-    return undefined;
+    return log_error("Missing required #beacon-app root; cannot render");
   }
 }
 

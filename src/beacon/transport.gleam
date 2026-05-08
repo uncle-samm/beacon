@@ -420,7 +420,7 @@ fn send_ws_message(state: ConnectionState, msg: ServerMessage) -> Nil {
 /// Used for rate limiting window calculations.
 const one_second_native = 1_000_000_000
 
-/// Maximum heartbeats per second. Heartbeats beyond this are silently dropped
+/// Maximum heartbeats per second. Heartbeats beyond this are rejected and logged
 /// (no ack sent) to prevent heartbeat flooding.
 const max_heartbeats_per_second = 2
 
@@ -851,7 +851,10 @@ fn start_ws_connection(
 /// SECURITY: Origin validation is the primary CSRF defense for WebSocket connections.
 fn check_origin(req: Request(Connection)) -> Result(Nil, String) {
   case request.get_header(req, "origin") {
-    Error(Nil) -> Ok(Nil)
+    Error(Nil) -> {
+      log.debug("beacon.transport", "No Origin header on WebSocket upgrade")
+      Ok(Nil)
+    }
     Ok(origin) -> {
       let request_host = case request.get_header(req, "host") {
         Ok(h) -> h

@@ -20,7 +20,7 @@ pub type BeaconError {
   RenderError(reason: String)
 
   /// A route matching or code generation error.
-  RouterError(reason: String)
+  RouteError(reason: String)
 
   /// An effect failed to execute.
   EffectError(reason: String)
@@ -41,7 +41,7 @@ pub fn to_string(error: BeaconError) -> String {
     RuntimeError(reason) -> "RuntimeError: " <> reason
     DiffError(reason) -> "DiffError: " <> reason
     RenderError(reason) -> "RenderError: " <> reason
-    RouterError(reason) -> "RouterError: " <> reason
+    RouteError(reason) -> "RouteError: " <> reason
     EffectError(reason) -> "EffectError: " <> reason
     SessionError(reason) -> "SessionError: " <> reason
     ConfigError(reason) -> "ConfigError: " <> reason

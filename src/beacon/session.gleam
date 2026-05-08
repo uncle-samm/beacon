@@ -24,6 +24,7 @@ pub type SessionTable
 
 /// Create a new session store.
 pub fn new_store(name: String) -> SessionStore {
+  log.info("beacon.session", "Creating session store")
   SessionStore(table: session_ets_new(name))
 }
 
@@ -45,6 +46,7 @@ pub fn generate_id() -> String {
 
 /// Get a session by ID.
 pub fn get(store: SessionStore, id: String) -> Option(Session) {
+  log.debug("beacon.session", "Get session")
   case session_ets_get(store.table, id) {
     Ok(session) -> Some(session)
     Error(Nil) -> None
@@ -58,6 +60,7 @@ pub fn set(
   key: String,
   value: String,
 ) -> Session {
+  log.debug("beacon.session", "Set session value")
   let new_data = dict.insert(session.data, key, value)
   let updated = Session(..session, data: new_data)
   session_ets_put(store.table, session.id, updated)
@@ -66,6 +69,7 @@ pub fn set(
 
 /// Get a value from a session.
 pub fn get_value(session: Session, key: String) -> Option(String) {
+  log.debug("beacon.session", "Get session value")
   case dict.get(session.data, key) {
     Ok(value) -> Some(value)
     Error(Nil) -> None

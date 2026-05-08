@@ -117,7 +117,8 @@ pub fn resolve_transitive_external_sources_recurses_through_user_modules_test() 
     simplifile.write(enums_path, "pub type AgentType { Codex Gemini }\n")
 
   let assert Ok(app_source) = simplifile.read(app_path)
-  let sources = build.resolve_transitive_external_sources(app_source, src_root)
+  let assert Ok(sources) =
+    build.resolve_transitive_external_sources(app_source, src_root)
   let module_paths = list.map(sources, fn(s) { s.1 })
   let assert True = list.contains(module_paths, "types/models")
   let assert True = list.contains(module_paths, "types/enums")
@@ -141,7 +142,8 @@ pub fn update(model: Model, msg: Msg) -> Model { model }
 pub fn view(model: Model) { model }
 "
 
-  let sources = build.resolve_transitive_framework_sources([source], ".")
+  let assert Ok(sources) =
+    build.resolve_transitive_framework_sources([source], ".")
   let module_paths = list.map(sources, fn(s) { s.1 })
   let assert True = list.contains(module_paths, "beacon/application")
   let assert True = list.contains(module_paths, "beacon/route")

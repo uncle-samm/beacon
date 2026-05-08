@@ -542,9 +542,41 @@ pub fn analyze_multi(
         }
       }
 
+      // Check external sources for Local type (multi-file apps may keep Local
+      // in a separate client-visible module).
+      let #(has_local, local_fields) = case analysis.has_local {
+        True -> #(True, analysis.local_fields)
+        False -> {
+          let ext_local =
+            list.find_map(external_sources, fn(ext) {
+              let #(_alias, _module_path, ext_source) = ext
+              case glance.module(ext_source) {
+                Error(_) -> Error(Nil)
+                Ok(ext_module) -> {
+                  case
+                    list.find(ext_module.custom_types, fn(def) {
+                      def.definition.name == "Local"
+                      && def.definition.publicity == glance.Public
+                    })
+                  {
+                    Ok(def) -> Ok(extract_fields(def.definition))
+                    Error(Nil) -> Error(Nil)
+                  }
+                }
+              }
+            })
+          case ext_local {
+            Ok(fields) -> #(True, fields)
+            Error(Nil) -> #(False, [])
+          }
+        }
+      }
+
       Ok(
         Analysis(
           ..analysis,
+          has_local: has_local,
+          local_fields: local_fields,
           has_server: has_server,
           server_module: server_module_alias,
           server_type_name: server_type_name,
@@ -997,6 +1029,7 @@ fn is_safe_import(module_path: String) -> Bool {
       || module_path == "beacon/html"
       || module_path == "beacon/element"
       || module_path == "beacon/route"
+      || module_path == "beacon/log"
       // gleam stdlib — all pure (except erlang/otp, caught above)
       || string.starts_with(module_path, "gleam/")
       // User domain modules — assumed pure (will be validated individually)
@@ -1011,11 +1044,14 @@ fn is_known_server_import(module_path: String) -> Bool {
   || string.starts_with(module_path, "gleam/http")
   || module_path == "mist"
   || string.starts_with(module_path, "mist/")
+  || module_path == "envoy"
+  || string.starts_with(module_path, "glean/")
   || {
     string.starts_with(module_path, "beacon/")
     && module_path != "beacon/html"
     && module_path != "beacon/element"
     && module_path != "beacon/route"
+    && module_path != "beacon/log"
   }
 }
 

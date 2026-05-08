@@ -24,6 +24,7 @@ pub type SimMetrics {
     patches_received: Int,
     model_syncs_received: Int,
     mounts_received: Int,
+    last_payload: String,
   )
 }
 
@@ -40,6 +41,11 @@ pub fn increment(table: MetricsTable, key: String) -> Nil {
 /// Atomically increment a counter by N.
 pub fn increment_by(table: MetricsTable, key: String, amount: Int) -> Nil {
   increment_by_ffi(table, key, amount)
+}
+
+/// Store the latest received wire payload for state correctness assertions.
+pub fn record_payload(table: MetricsTable, payload: String) -> Nil {
+  record_payload_ffi(table, payload)
 }
 
 /// Record a latency sample in microseconds.
@@ -77,6 +83,7 @@ pub fn collect(table: MetricsTable) -> SimMetrics {
     patches,
     syncs,
     mounts,
+    last_payload,
   ) = collect_ffi(table)
   SimMetrics(
     events_sent: sent,
@@ -91,6 +98,7 @@ pub fn collect(table: MetricsTable) -> SimMetrics {
     patches_received: patches,
     model_syncs_received: syncs,
     mounts_received: mounts,
+    last_payload: last_payload,
   )
 }
 
@@ -135,10 +143,13 @@ fn increment_by_ffi(table: MetricsTable, key: String, amount: Int) -> Nil
 @external(erlang, "beacon_sim_ffi", "record_latency")
 fn record_latency_ffi(table: MetricsTable, latency_us: Int) -> Nil
 
+@external(erlang, "beacon_sim_ffi", "record_payload")
+fn record_payload_ffi(table: MetricsTable, payload: String) -> Nil
+
 @external(erlang, "beacon_sim_ffi", "collect")
 fn collect_ffi(
   table: MetricsTable,
-) -> #(Int, Int, Int, Int, Int, Int, List(Int), Int, Int, Int, Int, Int)
+) -> #(Int, Int, Int, Int, Int, Int, List(Int), Int, Int, Int, Int, Int, String)
 
 @external(erlang, "beacon_sim_ffi", "destroy")
 fn destroy_ffi(table: MetricsTable) -> Nil

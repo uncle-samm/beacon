@@ -3,6 +3,7 @@ import beacon
 import beacon/api
 import beacon/auth
 import beacon/effect
+import beacon/log
 import beacon/route
 import beacon/session
 import beacon/transport/http as transport_http
@@ -216,7 +217,32 @@ fn init_from_request(
           ),
         )
       }
-      Error(_) -> #(app.Model(..app.init(), route: route), app.init_server())
+      Error(auth.MissingSessionCookie) -> #(
+        app.Model(..app.init(), route: route),
+        app.init_server(),
+      )
+      Error(auth.InvalidSession) -> {
+        log.warning("auth_workspace", "Invalid session during request init")
+        #(app.Model(..app.init(), route: route), app.init_server())
+      }
+      Error(auth.MissingUser) -> {
+        log.warning(
+          "auth_workspace",
+          "Session missing user during request init",
+        )
+        #(app.Model(..app.init(), route: route), app.init_server())
+      }
+      Error(auth.MissingCsrfToken) -> {
+        log.warning(
+          "auth_workspace",
+          "Session missing CSRF during request init",
+        )
+        #(app.Model(..app.init(), route: route), app.init_server())
+      }
+      Error(auth.InvalidCsrfToken) -> {
+        log.warning("auth_workspace", "Invalid CSRF during request init")
+        #(app.Model(..app.init(), route: route), app.init_server())
+      }
     }
   }
 }

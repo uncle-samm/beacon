@@ -5,10 +5,10 @@
 /// - Derived values in view (items left counter, NOT stored in model)
 /// - Multi-user via shared store
 /// - Patch patterns: append (add), replace (toggle/delete)
-
 import beacon
 import beacon/effect
 import beacon/html
+import beacon/log
 import beacon/pubsub
 import beacon/store
 import gleam/int
@@ -22,11 +22,7 @@ pub type Todo {
 }
 
 pub type Model {
-  Model(
-    todos: List(Todo),
-    input_text: String,
-    next_id: Int,
-  )
+  Model(todos: List(Todo), input_text: String, next_id: Int)
 }
 
 pub type Local {
@@ -96,7 +92,10 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
             })
           #(Model(..model, todos: new_todos), local)
         }
-        Error(_) -> #(model, local)
+        Error(_) -> {
+          log.warning("todo_app", "Invalid todo id for toggle: " <> id_str)
+          #(model, local)
+        }
       }
     }
 
@@ -106,7 +105,10 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
           let new_todos = list.filter(model.todos, fn(t) { t.id != id })
           #(Model(..model, todos: new_todos), local)
         }
-        Error(_) -> #(model, local)
+        Error(_) -> {
+          log.warning("todo_app", "Invalid todo id for delete: " <> id_str)
+          #(model, local)
+        }
       }
     }
 
@@ -118,12 +120,14 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
     TodosUpdated -> #(model, local)
 
     SetTodos(todos) -> {
-      let next_id = case list.fold(todos, 0, fn(max, t) {
-        case t.id > max {
-          True -> t.id
-          False -> max
-        }
-      }) {
+      let next_id = case
+        list.fold(todos, 0, fn(max, t) {
+          case t.id > max {
+            True -> t.id
+            False -> max
+          }
+        })
+      {
         0 -> model.next_id
         max -> max + 1
       }
@@ -161,8 +165,7 @@ fn make_on_update(
       TodosUpdated -> {
         let store_todos = store.get_all(todo_store, "todos")
         case list.length(store_todos) != list.length(model.todos) {
-          True ->
-            effect.from(fn(dispatch) { dispatch(SetTodos(store_todos)) })
+          True -> effect.from(fn(dispatch) { dispatch(SetTodos(store_todos)) })
           False -> effect.none()
         }
       }
@@ -213,29 +216,30 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
         ),
       ]),
       // Filter buttons
-      html.div(
-        [html.style("display:flex;gap:8px;margin-bottom:1rem")],
-        [
-          filter_button("all", "All", local.filter),
-          filter_button("active", "Active", local.filter),
-          filter_button("completed", "Completed", local.filter),
-        ],
-      ),
+      html.div([html.style("display:flex;gap:8px;margin-bottom:1rem")], [
+        filter_button("all", "All", local.filter),
+        filter_button("active", "Active", local.filter),
+        filter_button("completed", "Completed", local.filter),
+      ]),
       // Todo list
-      html.div(
-        [],
-        list.map(filtered_todos, fn(t) { render_todo(t) }),
-      ),
+      html.div([], list.map(filtered_todos, fn(t) { render_todo(t) })),
       // Footer
       html.div(
-        [html.style("display:flex;justify-content:space-between;margin-top:1rem;padding-top:0.5rem;border-top:1px solid #eee;color:#666;font-size:14px")],
+        [
+          html.style(
+            "display:flex;justify-content:space-between;margin-top:1rem;padding-top:0.5rem;border-top:1px solid #eee;color:#666;font-size:14px",
+          ),
+        ],
         [
           html.span([], [
             html.text(
-              int.to_string(active_count) <> " item" <> case active_count {
+              int.to_string(active_count)
+              <> " item"
+              <> case active_count {
                 1 -> ""
                 _ -> "s"
-              } <> " left",
+              }
+              <> " left",
             ),
           ]),
           case has_completed {
@@ -263,15 +267,22 @@ fn render_todo(item: Todo) -> beacon.Node(Msg) {
     False -> "color:#333"
   }
   html.div(
-    [html.style("display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #f0f0f0")],
+    [
+      html.style(
+        "display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #f0f0f0",
+      ),
+    ],
     [
       html.button(
         [
           beacon.on_click(ToggleTodo(int.to_string(item.id))),
-          html.style("width:24px;height:24px;border:2px solid #ccc;border-radius:50%;cursor:pointer;background:" <> case item.completed {
-            True -> "#4CAF50"
-            False -> "white"
-          }),
+          html.style(
+            "width:24px;height:24px;border:2px solid #ccc;border-radius:50%;cursor:pointer;background:"
+            <> case item.completed {
+              True -> "#4CAF50"
+              False -> "white"
+            },
+          ),
         ],
         [],
       ),
@@ -281,7 +292,9 @@ fn render_todo(item: Todo) -> beacon.Node(Msg) {
       html.button(
         [
           beacon.on_click(DeleteTodo(int.to_string(item.id))),
-          html.style("background:none;border:none;color:#e57373;cursor:pointer;font-size:18px"),
+          html.style(
+            "background:none;border:none;color:#e57373;cursor:pointer;font-size:18px",
+          ),
         ],
         [html.text("x")],
       ),
@@ -302,7 +315,8 @@ fn filter_button(
     [
       beacon.on_click(SetFilter(value)),
       html.style(
-        "padding:6px 16px;border:1px solid;border-radius:4px;cursor:pointer;" <> bg,
+        "padding:6px 16px;border:1px solid;border-radius:4px;cursor:pointer;"
+        <> bg,
       ),
     ],
     [html.text(label)],

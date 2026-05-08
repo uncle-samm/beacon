@@ -244,7 +244,10 @@ pub fn compress() -> Middleware {
   ) -> Response(ResponseBody) {
     let accepts_gzip = case request.get_header(req, "accept-encoding") {
       Ok(val) -> string.contains(val, "gzip")
-      Error(Nil) -> False
+      Error(Nil) -> {
+        log.debug("beacon.middleware", "No Accept-Encoding header")
+        False
+      }
     }
     let resp = next(req)
     case accepts_gzip {

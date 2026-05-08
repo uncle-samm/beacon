@@ -463,6 +463,66 @@ pub fn view(model: Model) { model }
   let assert False = string.contains(extracted, "import beacon/effect")
 }
 
+pub fn keeps_client_safe_log_import_in_extraction_test() {
+  let source =
+    "import beacon/html
+import beacon/log
+
+pub type Model {
+  Model(count: Int)
+}
+
+pub type Msg {
+  BadInput(String)
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    BadInput(value) -> {
+      log.warning(\"example\", \"bad input: \" <> value)
+      model
+    }
+  }
+}
+
+pub fn view(model: Model) {
+  html.div([], [])
+}
+"
+  let assert Ok(Nil) = analyzer.validate_purity(source)
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert True = string.contains(extracted, "import beacon/log")
+  let assert True = string.contains(extracted, "log.warning")
+}
+
+pub fn strips_known_server_only_package_imports_from_client_source_test() {
+  let source =
+    "import beacon/html
+import envoy
+import glean/run
+
+pub type Model {
+  Model(prompt: String)
+}
+
+pub type Msg {
+  Submit
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  model
+}
+
+pub fn view(model: Model) {
+  html.div([], [])
+}
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert True = string.contains(extracted, "import beacon/html")
+  let assert False = string.contains(extracted, "import envoy")
+  let assert False = string.contains(extracted, "import glean/run")
+}
+
 pub fn strips_route_local_server_from_extracted_client_source_test() {
   let source =
     "import beacon

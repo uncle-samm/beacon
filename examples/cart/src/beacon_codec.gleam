@@ -2,8 +2,8 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import cart
-import gleam/dynamic/decode
 import gleam/json
+import gleam/dynamic/decode
 
 fn encode_product(s: cart.Product) -> json.Json {
   json.object([
@@ -84,10 +84,7 @@ pub fn substate_names() -> List(String) {
   ["products", "cart_items"]
 }
 
-pub fn encode_flat_fields(state: #(cart.Model, cart.Local)) -> String {
-  let model = state.0
-  json.object([
-
-  ])
+pub fn encode_flat_fields(_state: #(cart.Model, cart.Local)) -> String {
+  json.object([])
   |> json.to_string
 }

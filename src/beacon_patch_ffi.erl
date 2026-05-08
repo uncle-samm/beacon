@@ -186,12 +186,19 @@ merge_ops_json(OpsList) ->
     iolist_to_binary(json:encode(AllOps)).
 
 %% Count the number of operations in a JSON ops string.
-%% Returns the length of the decoded array, or 0 on error.
--spec count_ops(binary()) -> non_neg_integer().
+%% Returns {error, Reason} when the JSON is malformed or not an array.
+-spec count_ops(binary()) -> {ok, non_neg_integer()} | {error, binary()}.
 count_ops(OpsJson) ->
     try
         Ops = json:decode(OpsJson),
-        length(Ops)
+        case is_list(Ops) of
+            true -> {ok, length(Ops)};
+            false -> {error, <<"Patch ops JSON must decode to an array">>}
+        end
     catch
-        _:_ -> 0
+        _Class:Reason ->
+            ReasonBin = unicode:characters_to_binary(
+                io_lib:format("Patch op count failed: ~p", [Reason])
+            ),
+            {error, ReasonBin}
     end.

@@ -149,7 +149,7 @@ fn morph_app_root_ffi(container: a, html: String) -> Nil
 fn morph_app_root(html: String) -> Nil {
   case query_selector("#beacon-app") {
     Ok(el) -> morph_app_root_ffi(el, html)
-    Error(_) -> Nil
+    Error(_) -> log_error("Missing required #beacon-app root; cannot render")
   }
 }
 
@@ -164,6 +164,9 @@ fn connect_ws(url: String) -> Nil
 
 @external(javascript, "./beacon_client_ffi.mjs", "log")
 fn log(msg: String) -> Nil
+
+@external(javascript, "./beacon_client_ffi.mjs", "log_error")
+fn log_error(msg: String) -> Nil
 
 fn attach_events() -> Nil {
   // Event delegation handled by the FFI layer

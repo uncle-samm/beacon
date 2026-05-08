@@ -2,8 +2,8 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import ai_chat
-import gleam/dynamic/decode
 import gleam/json
+import gleam/dynamic/decode
 
 fn encode_chatmessage(s: ai_chat.ChatMessage) -> json.Json {
   json.object([

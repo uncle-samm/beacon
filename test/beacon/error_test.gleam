@@ -30,10 +30,10 @@ pub fn render_error_to_string_test() {
   let assert "RenderError: element_to_string failed" = result
 }
 
-pub fn router_error_to_string_test() {
-  let err = error.RouterError("no route matched /unknown")
+pub fn route_error_to_string_test() {
+  let err = error.RouteError("no route matched /unknown")
   let result = error.to_string(err)
-  let assert "RouterError: no route matched /unknown" = result
+  let assert "RouteError: no route matched /unknown" = result
 }
 
 pub fn effect_error_to_string_test() {

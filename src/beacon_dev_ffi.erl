@@ -143,14 +143,22 @@ start_native_watcher(Dirs) ->
     Cmd = case os:type() of
         {unix, darwin} ->
             "fswatch -1 --include '\\.gleam$' --exclude '.*' " ++ DirStr;
-        {unix, linux} ->
-            "inotifywait -r -e modify,create,delete --include '\\.gleam$' " ++ DirStr;
-        _ ->
-            "sleep 999999"  %% Fallback: never triggers
-    end,
-    Port = open_port({spawn, Cmd}, [stream, exit_status, binary]),
-    erlang:put(beacon_native_watcher_port, Port),
-    {ok, nil}.
+	    {unix, linux} ->
+	        "inotifywait -r -e modify,create,delete --include '\\.gleam$' " ++ DirStr;
+	    Other ->
+	        {unsupported, Other}
+	end,
+	case Cmd of
+	    {unsupported, OtherOs} ->
+	        Reason = unicode:characters_to_binary(
+	            io_lib:format("native watcher unsupported for os:type()=~p", [OtherOs])
+	        ),
+	        {error, Reason};
+	    Command ->
+	        Port = open_port({spawn, Command}, [stream, exit_status, binary]),
+	        erlang:put(beacon_native_watcher_port, Port),
+	        {ok, nil}
+	end.
 
 %% Poll the native watcher — returns true if a change was detected.
 %% Non-blocking: checks if the port has sent any data.

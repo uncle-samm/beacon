@@ -472,6 +472,7 @@ fn execute_action(
 fn track_response_type(mt: MetricsTable, payload: String) -> Nil {
   let bytes = string.byte_size(payload)
   metrics.increment_by(mt, "bytes_received", bytes)
+  metrics.record_payload(mt, payload)
   case string.contains(payload, "\"type\":\"patch\"") {
     True -> {
       metrics.increment(mt, "patches_received")

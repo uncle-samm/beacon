@@ -2,6 +2,7 @@
 ///
 /// Parses the `Cookie` header from requests and sets `Set-Cookie` headers
 /// on responses. Follows RFC 6265 (HTTP State Management Mechanism).
+import beacon/log
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
 import gleam/int
@@ -46,7 +47,10 @@ pub fn default_options() -> CookieOptions {
 /// ```
 pub fn parse(req: Request(body)) -> List(#(String, String)) {
   case request.get_header(req, "cookie") {
-    Error(Nil) -> []
+    Error(Nil) -> {
+      log.debug("beacon.cookie", "No Cookie header present")
+      []
+    }
     Ok(cookie_header) -> parse_cookie_header(cookie_header)
   }
 }

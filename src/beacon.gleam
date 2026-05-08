@@ -965,24 +965,60 @@ fn auto_build_client_js() -> Result(Nil, error.BeaconError) {
     True -> Ok(Nil)
     False -> {
       log.info("beacon", "Building client JS...")
-      let _ = simplifile.delete("priv/static/beacon_client.manifest")
-      // Analyze once, generate codec + try enhanced bundle separately
-      build.auto_build()
-      // Compile codec (if generated) + hot-reload
-      let _ = build.run_gleam_build()
-      hot_reload_codec()
       case simplifile.is_file("priv/static/beacon_client.manifest") {
-        Ok(True) -> Ok(Nil)
-        Ok(False) | Error(_) -> {
-          let err =
-            error.ConfigError(
-              reason: "Client-state bundle was not generated. Beacon requires SSR first render plus a generated client renderer/model codec after mount. Move Model, Msg, update, and view into a supported client-visible shape or fix the build/codegen error above.",
-            )
-          log.error("beacon", error.to_string(err))
-          Error(err)
+        Ok(False) -> Ok(Nil)
+        Ok(True) -> {
+          case simplifile.delete("priv/static/beacon_client.manifest") {
+            Ok(Nil) -> Ok(Nil)
+            Error(err) ->
+              Error(error.ConfigError(
+                reason: "Failed to delete stale client manifest: "
+                <> string.inspect(err),
+              ))
+          }
         }
+        Error(err) ->
+          Error(error.ConfigError(
+            reason: "Failed to inspect client manifest: " <> string.inspect(err),
+          ))
       }
+      |> result_then(fn(_) {
+        // Analyze once, generate codec + try enhanced bundle separately
+        case build.auto_build() {
+          Error(reason) -> {
+            let err = error.ConfigError(reason: reason)
+            log.error("beacon", error.to_string(err))
+            Error(err)
+          }
+          Ok(Nil) -> {
+            // Compile codec (if generated) + hot-reload
+            let _ = build.run_gleam_build()
+            hot_reload_codec()
+            case simplifile.is_file("priv/static/beacon_client.manifest") {
+              Ok(True) -> Ok(Nil)
+              Ok(False) | Error(_) -> {
+                let err =
+                  error.ConfigError(
+                    reason: "Client-state bundle was not generated. Beacon requires SSR first render plus a generated client renderer/model codec after mount. Move Model, Msg, update, and view into a supported client-visible shape or fix the build/codegen error above.",
+                  )
+                log.error("beacon", error.to_string(err))
+                Error(err)
+              }
+            }
+          }
+        }
+      })
     }
+  }
+}
+
+fn result_then(
+  result: Result(a, error.BeaconError),
+  next: fn(a) -> Result(b, error.BeaconError),
+) -> Result(b, error.BeaconError) {
+  case result {
+    Ok(value) -> next(value)
+    Error(err) -> Error(err)
   }
 }
 

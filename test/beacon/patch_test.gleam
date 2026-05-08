@@ -75,6 +75,26 @@ pub fn diff_field_removed_test() {
   ops |> string.contains("/name") |> should.be_true
 }
 
+pub fn count_ops_rejects_malformed_json_test() {
+  log.configure()
+  let assert Error(reason) = patch.count_ops("not json")
+  reason |> string.contains("Patch op count failed") |> should.be_true
+}
+
+pub fn count_ops_requires_json_array_test() {
+  log.configure()
+  let assert Error(reason) = patch.count_ops("{\"op\":\"replace\"}")
+  reason |> string.contains("must decode to an array") |> should.be_true
+}
+
+pub fn count_ops_counts_array_items_test() {
+  log.configure()
+  let assert Ok(2) =
+    patch.count_ops(
+      "[{\"op\":\"replace\",\"path\":\"/count\",\"value\":1},{\"op\":\"remove\",\"path\":\"/name\"}]",
+    )
+}
+
 pub fn apply_replace_op_test() {
   log.configure()
   let model = "{\"count\":0}"

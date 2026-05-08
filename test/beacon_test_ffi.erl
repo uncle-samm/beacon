@@ -1,5 +1,5 @@
 -module(beacon_test_ffi).
--export([unique_ref/0, pd_put/2, pd_get/1, string_contains/2, do_crash/0, ensure_dir/1, suppress_logs/0, string_index_of/2, system_time_seconds/0]).
+-export([unique_ref/0, pd_put/2, pd_get/1, string_contains/2, do_crash/0, ensure_dir/1, suppress_logs/0, string_index_of/2, system_time_seconds/0, masked_ws_frame/2]).
 
 %% Returns a unique binary string.
 unique_ref() ->
@@ -49,3 +49,16 @@ string_index_of(Haystack, Needle) ->
 %% Get current system time in seconds (Unix timestamp).
 system_time_seconds() ->
     erlang:system_time(second).
+
+%% Build a masked client WebSocket frame for direct ws.decode_frame tests.
+masked_ws_frame(Opcode, Payload) ->
+    Len = byte_size(Payload),
+    Mask = <<0, 0, 0, 0>>,
+    if
+        Len < 126 ->
+            <<1:1, 0:3, Opcode:4, 1:1, Len:7, Mask/binary, Payload/binary>>;
+        Len < 65536 ->
+            <<1:1, 0:3, Opcode:4, 1:1, 126:7, Len:16, Mask/binary, Payload/binary>>;
+        true ->
+            <<1:1, 0:3, Opcode:4, 1:1, 127:7, Len:64, Mask/binary, Payload/binary>>
+    end.

@@ -8,10 +8,89 @@
 ## Current Status
 
 **Active Milestone:** 97 — Browser Matrix Expansion
-**Last Completed:** 94 — Permanent Browser Conformance Harness
+**Last Completed:** 99 — Test Quality Hardening
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (703 tests passed, 0 failures)
+**Test Status:** GREEN (715 tests passed, 0 failures)
 **Linter:** PASSING (zero violations)
+
+### Milestone 99: Test Quality Hardening ✅
+> Remove false confidence from unit, sim, integration, and CDP coverage.
+
+- [x] Make CDP startup failures fail the run instead of silently skipping attempted examples
+- [x] Capture early browser runtime, console, and log errors from document start
+- [x] Add `make browser-all*` for full current-example browser coverage
+- [x] Strengthen weak unit/integration tests for uploads, dev watcher behavior,
+      `/beacon_client.js`, HTTP pre-upgrade limits, and WebSocket frames
+- [x] Strengthen sim assertions for patch efficiency and final payload state
+- [x] Fix stale route error terminology (`RouteError`)
+- [x] Fix old example/browser failures exposed by the stricter harness
+
+**Notes:**
+- `test_all_cdp.py` now installs its console/error hooks at document start,
+  records CDP `Runtime.exceptionThrown` and error-level `Log.entryAdded` events,
+  reconnects CDP if the debugger socket closes, and treats attempted server
+  startup death/timeouts as failures.
+- Added `scripts/run_all_cdp.sh` plus `make browser-all`,
+  `make browser-all-desktop`, and `make browser-all-mobile`. The canonical
+  target remains the fast contract matrix; the all target runs every current
+  browser slice.
+- Added direct WebSocket frame edge tests, behavioral HTTP pre-upgrade limit
+  tests, exact multipart binary assertions, non-tautological dev watcher tests,
+  stricter sim patch thresholds, and sim payload content verification.
+- Client-bundle generation now supports client-safe `beacon/log` imports through
+  a JS log shim, supports non-Local effect apps that only need client rendering,
+  strips known server-only package imports from client bundles, and emits nested
+  imported enum encoders/decoders.
+- Fixed examples that the honest all-browser pass exposed: `pong` now uses a
+  pure update plus `on_update` tick effects, `triple_counter` moved store writes
+  out of the client-visible update, and `spreadsheet` persists edited cell state
+  through server-authoritative model updates.
+- Verification: `gleam build`, `gleam test` (715 passed, 0 failures),
+  `gleam run -m beacon/lint`.
+- Verification: `make browser-all-desktop` — 361 passed, 0 failed.
+- Verification: `make browser-canonical-mobile` — 235 passed, 0 failed, 15
+  skipped.
+
+### Milestone 98: TigerStyle Hardening Pass ✅
+> Remove remaining silent fallbacks and weak error paths from build/runtime/FFI
+> boundaries while keeping the canonical browser matrix green.
+
+- [x] Replace patch op count FFI fallback with structured malformed-JSON errors
+- [x] Propagate build/client-bundle file, parse, delete, and compile failures
+- [x] Stop deriving client Local shape through a duplicate string fallback
+- [x] Log missing runtime/client/root/transport conditions instead of discarding
+- [x] Remove unsupported dev watcher and SSR priv-dir fallbacks
+- [x] Add logs to store/session and example unhappy paths
+- [x] Add regression tests for patch op counting errors
+- [x] Rebuild generated example client bundles after runtime/client changes
+- [x] Run mandatory Gleam checks and canonical browser matrix
+
+**Notes:**
+- `src/beacon_patch_ffi.erl` now returns `{ok, Count}` or `{error, Reason}`.
+  `beacon/patch.count_ops` exposes that as `Result(Int, String)`, and tests
+  cover malformed JSON, non-array JSON, and valid array counting.
+- Build analysis and enhanced-bundle generation now propagate read/list/delete,
+  parse, and compile failures through `Result` instead of using empty lists,
+  `False`, or `Nil` as hidden failure states.
+- Multi-file `Local` inference now comes from the analyzer result, including
+  public imported `Local` types, instead of a separate source-string scan.
+- Empty flat-field codec generation now emits `json.object([])` directly, so
+  all-substate apps do not generate unused bindings or ignored expressions.
+- Runtime/client/handler paths now log missing transport subjects, missing app
+  roots, and unexpected handler stack states. Registry process dictionary lookups
+  use documented invariants instead of silent empty registries.
+- Dev watcher startup reports unsupported OS and native watcher failures
+  explicitly. SSR asset resolution no longer falls back to a CWD-relative
+  `priv` path when OTP cannot resolve the application priv directory.
+- Example unhappy paths now log invalid IDs, invalid coordinates, invalid
+  spreadsheet cell keys, missing spreadsheet cells, and ignored AI stream
+  events instead of collapsing to default state without context.
+- Verification: `gleam build`, `gleam test` (706 passed, 0 failures),
+  `gleam run -m beacon/lint`.
+- Verification: `gleam build` in `examples/ai_chat`, `examples/canvas`,
+  `examples/spreadsheet`, and `examples/multi_kanban` with zero warnings.
+- Verification: `make browser-canonical` — desktop 227 passed, 0 failed, 15
+  skipped; mobile 235 passed, 0 failed, 15 skipped.
 
 ### Milestone 97: Browser Matrix Expansion 🚧
 > Extend permanent browser coverage beyond the canonical desktop happy path.

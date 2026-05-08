@@ -68,6 +68,24 @@ Scenarios: `counter(n)`, `connect_disconnect()`, `malformed()`, `flood(n)`, `dra
 
 ## Example and CDP Tests (Browser)
 
-End-to-end tests via Chrome DevTools Protocol. Start the app, use a CDP client to open the page, click buttons, and assert DOM content. See `test_cdp.sh` and `test_cdp_counter.py`.
+End-to-end tests run through Chrome DevTools Protocol. The repeatable entrypoints are:
+
+```sh
+make browser-canonical  # contract examples, desktop + mobile
+make browser-all        # every example slice in test_all_cdp.py
+```
+
+Use `make browser-canonical-desktop`, `make browser-canonical-mobile`,
+`make browser-all-desktop`, or `make browser-all-mobile` for a narrower
+viewport loop. You can also run one example directly:
+
+```sh
+PYTHONUNBUFFERED=1 .venv/bin/python test_all_cdp.py auth_workspace --viewport desktop
+```
+
+The harness starts the app, opens the page, clicks controls, asserts DOM
+content, records WebSocket frame types, tracks DOM mutation buckets, catches
+console/runtime errors from document start, and fails when an attempted example
+server dies or times out.
 
 Examples should double as integration coverage for counter, local-only state, server-state privacy, multi-file apps, routed apps, auth/API/cookie flow, and large model/patch behavior.
