@@ -19,6 +19,7 @@ import beacon/pubsub
 import beacon/store
 import gleam/int
 import gleam/list
+import gleam/result
 import gleam/string
 
 // --- Types ---
@@ -43,7 +44,7 @@ pub type Local {
 pub type Msg {
   StartDrawing(String)
   MoveCursor(String)
-  StopDrawing
+  StopDrawing(String)
   SetColor(String)
   ClearCanvas
   StrokesUpdated
@@ -108,14 +109,24 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
         }
       }
     }
-    StopDrawing -> {
-      // Commit pending strokes to model
-      let committed =
-        list.append(model.strokes, list.reverse(local.pending_strokes))
-      #(
-        Model(..model, strokes: committed),
-        Local(..local, drawing: False, pending_strokes: []),
-      )
+    StopDrawing(coords) -> {
+      case parse_stroke_trail(coords, model.color) {
+        Ok(trail_strokes) -> {
+          let committed_strokes = case local.pending_strokes {
+            [] -> trail_strokes
+            pending -> list.reverse(pending)
+          }
+          let committed = list.append(model.strokes, committed_strokes)
+          #(
+            Model(..model, strokes: committed),
+            Local(..local, drawing: False, pending_strokes: []),
+          )
+        }
+        Error(reason) -> {
+          log.warning("canvas", "Invalid stop-drawing coordinates: " <> reason)
+          #(model, Local(..local, drawing: False, pending_strokes: []))
+        }
+      }
     }
 
     SetColor(c) -> #(Model(..model, color: c), local)
@@ -142,7 +153,7 @@ fn make_on_update(
   fn(state: #(Model, Local), msg: Msg) -> effect.Effect(Msg) {
     let #(_model, _local) = state
     case msg {
-      StopDrawing -> {
+      StopDrawing(_) -> {
         let #(model, _local) = state
         // Only append NEW strokes to the store (not the full list).
         // Compare store length vs model length to find the delta.
@@ -321,6 +332,61 @@ fn parse_coords(coords: String) -> Result(#(Int, Int), String) {
       }
     }
     _ -> Error("expected `x,y`, got `" <> coords <> "`")
+  }
+}
+
+fn parse_stroke_trail(
+  coords: String,
+  color: String,
+) -> Result(List(Stroke), String) {
+  string.split(coords, ";")
+  |> parse_points([])
+  |> result.map(strokes_from_points(_, color))
+}
+
+fn parse_points(
+  chunks: List(String),
+  parsed: List(#(Int, Int)),
+) -> Result(List(#(Int, Int)), String) {
+  case chunks {
+    [] -> Ok(list.reverse(parsed))
+    [chunk, ..rest] -> {
+      case parse_coords(chunk) {
+        Ok(point) -> parse_points(rest, [point, ..parsed])
+        Error(reason) -> Error(reason)
+      }
+    }
+  }
+}
+
+fn strokes_from_points(points: List(#(Int, Int)), color: String) -> List(Stroke) {
+  case points {
+    [first, second, ..rest] ->
+      strokes_from_points_loop(first, [second, ..rest], color, [])
+    _ -> []
+  }
+}
+
+fn strokes_from_points_loop(
+  previous: #(Int, Int),
+  points: List(#(Int, Int)),
+  color: String,
+  strokes: List(Stroke),
+) -> List(Stroke) {
+  case points {
+    [] -> list.reverse(strokes)
+    [point, ..rest] -> {
+      let #(x1, y1) = previous
+      let #(x2, y2) = point
+      let next_strokes = case x1 == x2 && y1 == y2 {
+        True -> strokes
+        False -> [
+          Stroke(x1: x1, y1: y1, x2: x2, y2: y2, color: color),
+          ..strokes
+        ]
+      }
+      strokes_from_points_loop(point, rest, color, next_strokes)
+    }
   }
 }
 

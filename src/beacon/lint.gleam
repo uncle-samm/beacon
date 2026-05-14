@@ -8,6 +8,7 @@
 /// 4. No degraded-path phrases in shipped source
 ///
 /// Reference: CLAUDE.md engineering principles, TigerBeetle approach.
+import beacon/build/analyzer
 import beacon/log
 import glance
 import gleam/int
@@ -38,15 +39,16 @@ pub fn lint_directory(dir: String) -> List(Violation) {
       let violations =
         list.flat_map(entries, fn(entry) {
           let path = dir <> "/" <> entry
-          case simplifile.is_directory(path) {
-            Ok(True) -> lint_directory(path)
-            Ok(False) -> {
+          case should_skip_entry(entry), simplifile.is_directory(path) {
+            True, _ -> []
+            False, Ok(True) -> lint_directory(path)
+            False, Ok(False) -> {
               case string.ends_with(entry, ".gleam") {
                 True -> lint_file(path)
                 False -> []
               }
             }
-            Error(err) -> {
+            False, Error(err) -> {
               log.warning(
                 "beacon.lint",
                 "Cannot stat " <> path <> ": " <> string.inspect(err),
@@ -65,6 +67,93 @@ pub fn lint_directory(dir: String) -> List(Violation) {
       []
     }
   }
+}
+
+/// Lint Markdown documentation for stale public model language.
+/// `docs/PROGRESS.md` is historical by design and is intentionally excluded.
+pub fn lint_docs_directory(dir: String) -> List(Violation) {
+  log.info("beacon.lint", "Linting docs directory: " <> dir)
+  case simplifile.read_directory(dir) {
+    Ok(entries) ->
+      list.flat_map(entries, fn(entry) {
+        let path = dir <> "/" <> entry
+        case should_skip_entry(entry), simplifile.is_directory(path) {
+          True, _ -> []
+          False, Ok(True) -> lint_docs_directory(path)
+          False, Ok(False) -> {
+            case string.ends_with(entry, ".md") && entry != "PROGRESS.md" {
+              True -> lint_doc_file(path)
+              False -> []
+            }
+          }
+          False, Error(err) -> {
+            log.warning(
+              "beacon.lint",
+              "Cannot stat docs path " <> path <> ": " <> string.inspect(err),
+            )
+            []
+          }
+        }
+      })
+    Error(err) -> {
+      log.warning(
+        "beacon.lint",
+        "Cannot read docs directory " <> dir <> ": " <> string.inspect(err),
+      )
+      []
+    }
+  }
+}
+
+fn lint_doc_file(path: String) -> List(Violation) {
+  case simplifile.read(path) {
+    Ok(source) -> lint_doc_source(path, source)
+    Error(err) -> {
+      log.warning(
+        "beacon.lint",
+        "Cannot read docs file " <> path <> ": " <> string.inspect(err),
+      )
+      []
+    }
+  }
+}
+
+pub fn lint_doc_source(
+  file_path: String,
+  source: String,
+) -> List(Violation) {
+  let forbidden = [
+    "FILE_BASED_ROUTING",
+    "file-" <> "based routing",
+    "file based routing",
+    "route files",
+    "RouterBuilder",
+    "start_" <> "router",
+    "beacon." <> "router",
+    "runtime" <> "-only",
+    "HTML morph",
+  ]
+  list.filter_map(forbidden, fn(phrase) {
+    case string.contains(source, phrase) {
+      True ->
+        Ok(Violation(
+          file: file_path,
+          location: "text",
+          rule: "stale-docs-model",
+          message: "Found stale Beacon routing/rendering phrase `"
+            <> phrase
+            <> "`. Docs must describe generated contracts and explicit route_pages.",
+        ))
+      False -> Error(Nil)
+    }
+  })
+}
+
+fn should_skip_entry(entry: String) -> Bool {
+  entry == "build"
+  || entry == ".venv"
+  || entry == "node_modules"
+  || entry == "priv"
 }
 
 /// Lint a single Gleam source file.
@@ -86,9 +175,16 @@ pub fn lint_source(file_path: String, source: String) -> List(Violation) {
       let logging_violations = check_public_functions_log(file_path, module)
       let degraded_path_violations =
         check_no_degraded_path_phrases(file_path, source)
+      let update_contract_violations =
+        check_client_update_contract(file_path, source)
+      let deprecated_route_violations =
+        check_deprecated_route_api(file_path, source)
       list.append(
-        list.append(todo_violations, logging_violations),
-        degraded_path_violations,
+        list.append(
+          list.append(todo_violations, logging_violations),
+          degraded_path_violations,
+        ),
+        list.append(update_contract_violations, deprecated_route_violations),
       )
     }
     Error(err) -> {
@@ -98,6 +194,84 @@ pub fn lint_source(file_path: String, source: String) -> List(Violation) {
       )
       []
     }
+  }
+}
+
+fn check_deprecated_route_api(
+  file_path: String,
+  source: String,
+) -> List(Violation) {
+  let is_example = string.starts_with(file_path, "examples/")
+  case is_example {
+    False -> []
+    True -> {
+      let deprecated = [
+        "beacon." <> "routes(",
+        "beacon." <> "on_route_change(",
+        "start_" <> "router",
+        "routes" <> "_" <> "dir",
+      ]
+      list.filter_map(deprecated, fn(phrase) {
+        case string.contains(source, phrase) {
+          True ->
+            Ok(Violation(
+              file: file_path,
+              location: "text",
+              rule: "deprecated-route-api",
+              message: "Found deprecated route API `"
+                <> phrase
+                <> "`. Use explicit route_pages with imported page modules.",
+            ))
+          False -> Error(Nil)
+        }
+      })
+    }
+  }
+}
+
+/// Check app/example code for client-visible update hazards.
+fn check_client_update_contract(
+  file_path: String,
+  source: String,
+) -> List(Violation) {
+  let is_app_code =
+    string.starts_with(file_path, "examples/")
+    || string.contains(file_path, "/examples/")
+    || string.starts_with(file_path, "src/beacon/examples/")
+  case is_app_code || string.contains(source, "pub type Msg") {
+    False -> []
+    True -> {
+      analyzer.client_update_purity_errors(source)
+      |> list.map(fn(err) {
+        Violation(
+          file: file_path,
+          location: "module",
+          rule: "client-update-purity",
+          message: client_update_error_message(err),
+        )
+      })
+    }
+  }
+}
+
+fn client_update_error_message(err: analyzer.PurityError) -> String {
+  case err {
+    analyzer.UpdateSideEffect(call) ->
+      "Client-visible update calls `"
+      <> call
+      <> "`; move this to on_update."
+    analyzer.CapturedUpdateFactory(name) ->
+      "Client-visible "
+      <> name
+      <> "(...) captures server state; use pure update plus on_update."
+    analyzer.ServerImport(module_path) ->
+      "Client-visible module imports server-only `"
+      <> module_path
+      <> "`."
+    analyzer.ErlangExternal(function_name) ->
+      "Client-visible function `"
+      <> function_name
+      <> "` uses Erlang FFI; move this to on_update."
   }
 }
 
@@ -160,7 +334,8 @@ fn check_no_degraded_path_phrases(
     "HTML morphing " <> "only",
     "beacon." <> "router",
     "start_" <> "router",
-    "router_" <> "routes_dir",
+    "router_" <> "routes" <> "_" <> "dir",
+    "routes" <> "_" <> "dir",
     "file-" <> "based routing",
   ]
   list.filter_map(forbidden, fn(phrase) {
@@ -395,7 +570,11 @@ pub fn violation_to_string(v: Violation) -> String {
 pub fn main() {
   log.configure()
   log.info("beacon.lint", "Starting lint check")
-  let violations = lint_directory("src")
+  let violations =
+    list.append(
+      list.append(lint_directory("src"), lint_directory("examples")),
+      lint_docs_directory("docs"),
+    )
   log.info(
     "beacon.lint",
     "Found " <> int.to_string(list.length(violations)) <> " violation(s)",

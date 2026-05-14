@@ -34,14 +34,13 @@ import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
 import gleam/int
-import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 import simplifile
 
 // ===== Event Helpers =====
-// These register handlers in the per-render registry.
-// No decode_event needed — the runtime resolves automatically.
+// These register client-side handler metadata. Generated encode_msg/decode_event
+// carries the typed event contract to the server.
 
 /// Attach a click handler that sends the given message.
 /// ```gleam
@@ -73,6 +72,20 @@ pub fn on_submit(msg: msg) -> Attr {
   element.EventAttr(event_name: "submit", handler_id: id, debounce_ms: None)
 }
 
+/// Attach a submit handler that receives a live browser snapshot.
+///
+/// The callback receives the submitted form's current fields as a JSON string.
+/// Use this when a submit message depends on current Local/draft input values;
+/// do not close over server-side Local in `on_submit(Save(local.draft))`.
+pub fn on_submit_local(callback: fn(String) -> msg) -> Attr {
+  let id = handler.register_parameterized(callback)
+  element.EventAttr(
+    event_name: "submit-local",
+    handler_id: id,
+    debounce_ms: None,
+  )
+}
+
 /// Attach a change handler with value extraction.
 pub fn on_change(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
@@ -97,9 +110,9 @@ pub fn on_mousedown(callback: fn(String) -> msg) -> Attr {
   element.EventAttr(event_name: "mousedown", handler_id: id, debounce_ms: None)
 }
 
-/// Attach a mouseup handler.
-pub fn on_mouseup(msg: msg) -> Attr {
-  let id = handler.register_simple(msg)
+/// Attach a mouseup handler that receives x,y coordinates as "x,y".
+pub fn on_mouseup(callback: fn(String) -> msg) -> Attr {
+  let id = handler.register_parameterized(callback)
   element.EventAttr(event_name: "mouseup", handler_id: id, debounce_ms: None)
 }
 
@@ -588,25 +601,10 @@ pub fn model_encoder(
   AppBuilder(..builder, serialize_model: option.Some(encoder))
 }
 
-/// Register URL route patterns for the app.
-/// Patterns can include dynamic segments with `:param`.
-/// ```gleam
-/// beacon.app(init, update, view)
-/// |> beacon.routes(["/", "/blog", "/blog/:slug"])
-/// |> beacon.on_route_change(OnRouteChange)
-/// |> beacon.start(8080)
-/// ```
-pub fn routes(
-  builder: AppBuilder(model, msg),
-  patterns: List(String),
-) -> AppBuilder(model, msg) {
-  AppBuilder(..builder, route_patterns: list.map(patterns, route.pattern))
-}
-
 /// Register an explicit page manifest for the app.
 ///
-/// This is the preferred route declaration API. Each `route.page` entry owns
-/// the URL pattern and the message to send when the route is entered.
+/// This is the route declaration API. Each `route.page` entry owns the URL
+/// pattern and the message to send when the route is entered.
 ///
 /// ```gleam
 /// beacon.app(init, update, view)
@@ -634,15 +632,6 @@ pub fn route_pages(
       msg
     }),
   )
-}
-
-/// Set the callback that produces a Msg when the URL route changes.
-/// This is called on initial page load and on client-side navigation.
-pub fn on_route_change(
-  builder: AppBuilder(model, msg),
-  handler: fn(route.Route) -> msg,
-) -> AppBuilder(model, msg) {
-  AppBuilder(..builder, on_route_change: Some(handler))
 }
 
 /// Set the callback that runs before a client-side route transition is applied.
@@ -873,57 +862,70 @@ fn start_validated(
   case auto_build_client_js() {
     Error(err) -> Error(err)
     Ok(Nil) -> {
-      // If on_update_effect is set, chain it after the base update
-      let wrapped_update = case builder.on_update_effect {
-        None -> base_update
-        Some(on_update_fn) -> fn(model, msg) {
-          let #(new_model, base_effect) = base_update(model, msg)
-          let extra_effect = on_update_fn(new_model, msg)
-          #(new_model, effect.batch([base_effect, extra_effect]))
+      hot_reload_codec()
+      case runtime.verify_generated_contract() {
+        Error(err) -> {
+          log.error("beacon", error.to_string(err))
+          Error(err)
         }
-      }
-      let config =
-        application.AppConfig(
-          port: port,
-          init: wrapped_init,
-          update: wrapped_update,
-          view: builder.view,
-          decode_event: None,
-          secret_key: builder.secret_key,
-          title: builder.title,
-          serialize_model: builder.serialize_model,
-          deserialize_model: builder.deserialize_model,
-          middlewares: builder.middlewares,
-          static_dir: builder.static_dir,
-          route_patterns: builder.route_patterns,
-          on_route_change: builder.on_route_change,
-          on_route_leave: builder.on_route_leave,
-          dynamic_subscriptions: builder.dynamic_subscriptions,
-          on_notify: builder.on_notify,
-          on_notification: builder.on_notification,
-          security_limits: builder.security_limits,
-          head_html: builder.head_html,
-          api_handler: builder.api_handler,
-          ws_auth: builder.ws_auth,
-          init_from_request: case builder.ws_init {
-            Some(ws_init_fn) ->
-              Some(fn(req) { #(ws_init_fn(req), effect.none()) })
-            None -> None
-          },
-          dev_mode: False,
-        )
-      case application.start(config) {
-        Ok(_app) -> {
-          log.info(
-            "beacon",
-            "Running at http://localhost:" <> int.to_string(port),
-          )
-          application.wait_forever()
-          Ok(Nil)
-        }
-        Error(err) -> Error(err)
+        Ok(Nil) ->
+          start_with_verified_contract(builder, port, wrapped_init, base_update)
       }
     }
+  }
+}
+
+fn start_with_verified_contract(
+  builder: AppBuilder(model, msg),
+  port: Int,
+  wrapped_init: fn() -> #(model, effect.Effect(msg)),
+  base_update: fn(model, msg) -> #(model, effect.Effect(msg)),
+) -> Result(Nil, error.BeaconError) {
+  // If on_update_effect is set, chain it after the base update
+  let wrapped_update = case builder.on_update_effect {
+    None -> base_update
+    Some(on_update_fn) -> fn(model, msg) {
+      let #(new_model, base_effect) = base_update(model, msg)
+      let extra_effect = on_update_fn(new_model, msg)
+      #(new_model, effect.batch([base_effect, extra_effect]))
+    }
+  }
+  let config =
+    application.AppConfig(
+      port: port,
+      init: wrapped_init,
+      update: wrapped_update,
+      view: builder.view,
+      decode_event: None,
+      secret_key: builder.secret_key,
+      title: builder.title,
+      serialize_model: builder.serialize_model,
+      deserialize_model: builder.deserialize_model,
+      middlewares: builder.middlewares,
+      static_dir: builder.static_dir,
+      route_patterns: builder.route_patterns,
+      on_route_change: builder.on_route_change,
+      on_route_leave: builder.on_route_leave,
+      dynamic_subscriptions: builder.dynamic_subscriptions,
+      on_notify: builder.on_notify,
+      on_notification: builder.on_notification,
+      security_limits: builder.security_limits,
+      head_html: builder.head_html,
+      api_handler: builder.api_handler,
+      ws_auth: builder.ws_auth,
+      init_from_request: case builder.ws_init {
+        Some(ws_init_fn) -> Some(fn(req) { #(ws_init_fn(req), effect.none()) })
+        None -> None
+      },
+      dev_mode: False,
+    )
+  case application.start(config) {
+    Ok(_app) -> {
+      log.info("beacon", "Running at http://localhost:" <> int.to_string(port))
+      application.wait_forever()
+      Ok(Nil)
+    }
+    Error(err) -> Error(err)
   }
 }
 

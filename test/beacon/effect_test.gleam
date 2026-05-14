@@ -1,5 +1,6 @@
 import beacon/effect
 import gleam/erlang/process
+import gleam/list
 
 fn perform(effect_: effect.Effect(a), dispatch: fn(a) -> Nil) -> Nil {
   effect.perform(effect_, dispatch, fn(_, _, _) { Nil })
@@ -107,6 +108,15 @@ pub fn after_dispatches_once_test() {
   let assert Ok(42) = process.receive(subject, 200)
   // Should NOT receive again
   let assert Error(Nil) = process.receive(subject, 150)
+}
+
+pub fn perform_tracked_returns_spawned_effect_process_test() {
+  let eff = effect.after(1000, fn() { 42 })
+  let pids = effect.perform_tracked(eff, fn(_) { Nil }, fn(_, _, _) { Nil })
+  let assert True = list.length(pids) == 1
+  let assert Ok(pid) = list.first(pids)
+  let assert True = process.is_alive(pid)
+  list.each(pids, fn(pid) { process.kill(pid) })
 }
 
 pub fn keyed_effect_dispatches_through_keyed_channel_test() {

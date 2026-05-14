@@ -332,8 +332,7 @@ fn execute_action(
             Ok(_) -> {
               metrics.increment(mt, "events_sent")
               metrics.increment_by(mt, "bytes_sent", msg_bytes)
-              let latency = metrics.now_us() - t0
-              metrics.record_latency(mt, latency)
+              metrics.mark_event_send_start(t0)
               Ok(Some(s))
             }
             Error(reason) -> {
@@ -352,6 +351,7 @@ fn execute_action(
           case ws_recv(s, timeout_ms) {
             Ok(payload) -> {
               metrics.increment(mt, "events_acked")
+              record_round_trip_latency(mt)
               track_response_type(mt, payload)
               Ok(Some(s))
             }
@@ -368,6 +368,7 @@ fn execute_action(
           case ws_recv(s, timeout_ms) {
             Ok(payload) -> {
               metrics.increment(mt, "events_acked")
+              record_round_trip_latency(mt)
               track_response_type(mt, payload)
               case string.contains(payload, "\"type\":\"patch\"") {
                 True -> Ok(Some(s))
@@ -388,6 +389,7 @@ fn execute_action(
           case ws_recv(s, timeout_ms) {
             Ok(payload) -> {
               metrics.increment(mt, "events_acked")
+              record_round_trip_latency(mt)
               track_response_type(mt, payload)
               case string.contains(payload, "\"type\":\"model_sync\"") {
                 True -> Ok(Some(s))
@@ -410,6 +412,7 @@ fn execute_action(
           case ws_recv(s, timeout_ms) {
             Ok(payload) -> {
               metrics.increment(mt, "events_acked")
+              record_round_trip_latency(mt)
               track_response_type(mt, payload)
               case string.contains(payload, expected) {
                 True -> Ok(Some(s))
@@ -493,6 +496,14 @@ fn track_response_type(mt: MetricsTable, payload: String) -> Nil {
             False -> Nil
           }
       }
+  }
+}
+
+fn record_round_trip_latency(mt: MetricsTable) -> Nil {
+  let sent_at = metrics.take_event_send_start()
+  case sent_at > 0 {
+    True -> metrics.record_latency(mt, metrics.now_us() - sent_at)
+    False -> Nil
   }
 }
 

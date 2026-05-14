@@ -67,6 +67,8 @@ pub type ClientMessage {
   ClientJoin(token: String, path: String)
   /// Client navigated to a new URL path (SPA navigation).
   ClientNavigate(path: String)
+  /// Client requests a full authoritative model sync without remounting HTML.
+  ClientRequestSync
   /// Batch of events: LOCAL events replayed + MODEL event at the end.
   /// Sent when a MODEL event fires after LOCAL events accumulated state.
   ClientEventBatch(events: List(ClientMessage))
@@ -110,6 +112,8 @@ pub type InternalMessage {
   SendNavigate(path: String)
   /// Send hard navigation to the client (full page reload).
   SendHardNavigate(path: String)
+  /// Close the connection because the server has detected sustained pressure.
+  CloseForBackpressure(reason: String)
   // --- TCP/WebSocket events (internal to transport layer) ---
   /// Raw TCP data received — needs WebSocket frame decoding.
   ReceivedTcpData(data: BitArray)
@@ -202,7 +206,10 @@ pub type TransportConfig {
     /// The factory receives the HTTP request so ws_init can read cookies/headers.
     runtime_factory: Option(
       fn(ConnectionId, process.Subject(InternalMessage), Request(Connection)) ->
-        #(fn(ConnectionId, ClientMessage) -> Nil, fn(ConnectionId) -> Nil),
+        Result(
+          #(fn(ConnectionId, ClientMessage) -> Nil, fn(ConnectionId) -> Nil),
+          String,
+        ),
     ),
     /// Optional: WebSocket authentication function.
     /// If set, runs before upgrade — returns Ok to allow, Error to reject with 401.
@@ -337,6 +344,7 @@ fn client_message_decoder() -> decode.Decoder(ClientMessage) {
       use path <- decode.field("path", decode.string)
       decode.success(ClientNavigate(path: path))
     }
+    "request_sync" -> decode.success(ClientRequestSync)
     "event_batch" -> {
       // Decode array of events — each follows the "event" format
       let event_decoder = {
@@ -393,6 +401,7 @@ fn client_message_type(msg: ClientMessage) -> String {
     ClientHeartbeat -> "heartbeat"
     ClientJoin(..) -> "join"
     ClientNavigate(path: path) -> "navigate:" <> path
+    ClientRequestSync -> "request_sync"
     ClientEventBatch(..) -> "event_batch"
   }
 }
@@ -620,6 +629,8 @@ type FrameResult {
   FrameContinue(ConnectionState, BitArray)
   /// Close frame received — connection should be closed.
   FrameClose(ConnectionState)
+  /// Protocol violation — close immediately instead of buffering forever.
+  FrameProtocolError(ConnectionState, String)
 }
 
 /// Process all complete frames in the buffer.
@@ -650,9 +661,16 @@ fn process_frames(state: ConnectionState, buffer: BitArray) -> FrameResult {
       // Ignore pong frames
       process_frames(state, rest)
     }
-    Error(_) -> {
+    Error("incomplete") -> {
       // Incomplete frame — keep buffer for next read
       FrameContinue(state, buffer)
+    }
+    Error(reason) -> {
+      log.warning(
+        "beacon.transport",
+        "WebSocket protocol error from " <> state.id <> ": " <> reason,
+      )
+      FrameProtocolError(state, reason)
     }
   }
 }
@@ -741,6 +759,28 @@ fn ws_loop_inner(
               server.close(close_state.socket)
               cleanup_connection(close_state)
             }
+            FrameProtocolError(error_state, reason) -> {
+              case server.send_close_frame(error_state.socket) {
+                Ok(Nil) -> Nil
+                Error(send_reason) ->
+                  log.warning(
+                    "beacon.transport",
+                    "Failed to send close frame after protocol error for "
+                      <> error_state.id
+                      <> ": "
+                      <> send_reason,
+                  )
+              }
+              log.warning(
+                "beacon.transport",
+                "Closing connection "
+                  <> error_state.id
+                  <> " after WebSocket protocol error: "
+                  <> reason,
+              )
+              server.close(error_state.socket)
+              cleanup_connection(error_state)
+            }
           }
         }
       }
@@ -790,6 +830,26 @@ fn ws_loop_inner(
       send_ws_message(state, ServerHardNavigate(path: path))
       ws_loop_inner(state, selector)
     }
+    CloseForBackpressure(reason) -> {
+      log.warning(
+        "beacon.transport",
+        "Closing slow connection " <> state.id <> ": " <> reason,
+      )
+      send_ws_message(state, ServerError(reason: reason))
+      case server.send_close_frame(state.socket) {
+        Ok(Nil) -> Nil
+        Error(send_reason) ->
+          log.warning(
+            "beacon.transport",
+            "Failed to send close frame to slow connection "
+              <> state.id
+              <> ": "
+              <> send_reason,
+          )
+      }
+      server.close(state.socket)
+      cleanup_connection(state)
+    }
   }
 }
 
@@ -809,51 +869,84 @@ fn start_ws_connection(
 
   // Use runtime_factory if available (per-connection runtimes)
   // Otherwise use shared callbacks
-  let #(conn_on_event, conn_on_close) = case config.runtime_factory {
+  let handlers = case config.runtime_factory {
     Some(factory) -> {
-      let #(evt_handler, close_handler) = factory(conn_id, subject, req)
-      #(evt_handler, close_handler)
+      factory(conn_id, subject, req)
     }
     None -> {
       config.on_connect(conn_id, subject)
-      #(config.on_event, config.on_disconnect)
+      Ok(#(config.on_event, config.on_disconnect))
     }
   }
 
-  let state =
-    ConnectionState(
-      id: conn_id,
-      socket: socket,
-      on_event: conn_on_event,
-      on_close: conn_on_close,
-      event_count: 0,
-      rate_window_start: 0,
-      security_limits: config.security_limits,
-      heartbeat_count: 0,
-      heartbeat_window_start: 0,
-      buffer: <<>>,
-    )
+  case handlers {
+    Ok(#(conn_on_event, conn_on_close)) -> {
+      let state =
+        ConnectionState(
+          id: conn_id,
+          socket: socket,
+          on_event: conn_on_event,
+          on_close: conn_on_close,
+          event_count: 0,
+          rate_window_start: 0,
+          security_limits: config.security_limits,
+          heartbeat_count: 0,
+          heartbeat_window_start: 0,
+          buffer: <<>>,
+        )
 
-  pubsub.subscribe("beacon:patches:" <> conn_id)
+      pubsub.subscribe("beacon:patches:" <> conn_id)
 
-  // Start receiving TCP data
-  server.set_active_once(socket)
+      // Start receiving TCP data
+      server.set_active_once(socket)
 
-  // Enter the receive loop — never returns
-  ws_loop(state, subject)
+      // Enter the receive loop — never returns
+      ws_loop(state, subject)
+    }
+    Error(reason) -> {
+      log.error(
+        "beacon.transport",
+        "Closing WebSocket after runtime startup failure for "
+          <> conn_id
+          <> ": "
+          <> reason,
+      )
+      case server.send_close_frame(socket) {
+        Ok(Nil) -> Nil
+        Error(send_reason) ->
+          log.warning(
+            "beacon.transport",
+            "Failed to send close frame after startup failure for "
+              <> conn_id
+              <> ": "
+              <> send_reason,
+          )
+      }
+      server.close(socket)
+      let conn_count = connection_tracker_decrement()
+      log.debug(
+        "beacon.transport",
+        "Global connections after failed startup close: "
+          <> int.to_string(conn_count),
+      )
+    }
+  }
 }
 
 // --- WebSocket Upgrade Validation ---
 
-/// Check that the Origin header (if present) matches the server's host.
+/// Check that the Origin header matches the server's host.
 /// This prevents cross-site WebSocket hijacking (CSWSH).
 ///
 /// SECURITY: Origin validation is the primary CSRF defense for WebSocket connections.
 fn check_origin(req: Request(Connection)) -> Result(Nil, String) {
   case request.get_header(req, "origin") {
     Error(Nil) -> {
-      log.debug("beacon.transport", "No Origin header on WebSocket upgrade")
-      Ok(Nil)
+      log.warning(
+        "beacon.transport",
+        "Missing Origin header on WebSocket upgrade",
+      )
+      Error("Missing Origin header")
     }
     Ok(origin) -> {
       let request_host = case request.get_header(req, "host") {
@@ -1011,7 +1104,7 @@ fn route_framework_request(
   req: Request(Connection),
 ) -> response.Response(ResponseBody) {
   case request.path_segments(req) {
-    ["beacon_client.js"] -> serve_client_js()
+    ["beacon_client.js"] -> serve_client_js(req)
     ["health"] -> {
       response.new(200)
       |> response.set_header("content-type", "application/json")
@@ -1025,7 +1118,7 @@ fn route_framework_request(
       {
         True -> {
           let name = string.drop_start(path, 1)
-          serve_hashed_client_js(name)
+          serve_hashed_client_js(name, req)
         }
         False -> {
           case config.static_config {
@@ -1219,11 +1312,11 @@ fn get_client_js_filename() -> String {
   }
 }
 
-fn serve_client_js() -> response.Response(ResponseBody) {
+fn serve_client_js(req: Request(Connection)) -> response.Response(ResponseBody) {
   let assets_dir = ssr.client_assets_dir()
   let manifest_path = assets_dir <> "/beacon_client.manifest"
   case simplifile.read(manifest_path) {
-    Ok(name) -> serve_js_file(assets_dir <> "/" <> string.trim(name))
+    Ok(name) -> serve_js_file(assets_dir <> "/" <> string.trim(name), req)
     Error(err) -> {
       log.error(
         "beacon.transport",
@@ -1241,23 +1334,45 @@ fn serve_client_js() -> response.Response(ResponseBody) {
   }
 }
 
-fn serve_hashed_client_js(name: String) -> response.Response(ResponseBody) {
-  serve_js_file(ssr.client_assets_dir() <> "/" <> name)
+fn serve_hashed_client_js(
+  name: String,
+  req: Request(Connection),
+) -> response.Response(ResponseBody) {
+  serve_js_file(ssr.client_assets_dir() <> "/" <> name, req)
 }
 
-fn serve_js_file(path: String) -> response.Response(ResponseBody) {
+fn serve_js_file(
+  path: String,
+  req: Request(Connection),
+) -> response.Response(ResponseBody) {
   case simplifile.read(path) {
     Ok(contents) -> {
-      response.new(200)
-      |> response.set_header(
-        "content-type",
-        "application/javascript; charset=utf-8",
-      )
-      |> response.set_header(
-        "cache-control",
-        "public, max-age=31536000, immutable",
-      )
-      |> response.set_body(Bytes(bytes_tree.from_string(contents)))
+      let base_response =
+        response.new(200)
+        |> response.set_header(
+          "content-type",
+          "application/javascript; charset=utf-8",
+        )
+        |> response.set_header(
+          "cache-control",
+          "public, max-age=31536000, immutable",
+        )
+        |> response.set_header("vary", "accept-encoding")
+      let accepts_gzip = case request.get_header(req, "accept-encoding") {
+        Ok(header) -> string.contains(string.lowercase(header), "gzip")
+        Error(Nil) -> False
+      }
+      case accepts_gzip {
+        True ->
+          base_response
+          |> response.set_header("content-encoding", "gzip")
+          |> response.set_body(Bytes(bytes_tree.from_bit_array(gzip_compress(
+            bit_array.from_string(contents),
+          ))))
+        False ->
+          base_response
+          |> response.set_body(Bytes(bytes_tree.from_string(contents)))
+      }
     }
     Error(err) -> {
       log.error(
@@ -1276,6 +1391,9 @@ fn serve_js_file(path: String) -> response.Response(ResponseBody) {
     }
   }
 }
+
+@external(erlang, "zlib", "gzip")
+fn gzip_compress(data: BitArray) -> BitArray
 
 // --- Server Start ---
 

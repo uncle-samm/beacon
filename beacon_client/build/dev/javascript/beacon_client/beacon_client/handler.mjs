@@ -1,6 +1,7 @@
+import * as $json from "../../gleam_json/gleam/json.mjs";
 import * as $dict from "../../gleam_stdlib/gleam/dict.mjs";
+import * as $decode from "../../gleam_stdlib/gleam/dynamic/decode.mjs";
 import * as $int from "../../gleam_stdlib/gleam/int.mjs";
-import * as $string from "../../gleam_stdlib/gleam/string.mjs";
 import { pd_set, pd_get, log } from "../beacon_client_ffi.mjs";
 import {
   Ok,
@@ -46,28 +47,16 @@ export function empty() {
 }
 
 function extract_value(data) {
-  let $ = $string.split(data, "\"value\":\"");
-  if ($ instanceof $Empty) {
-    return "";
+  let decoder = $decode.field(
+    "value",
+    $decode.string,
+    (value) => { return $decode.success(value); },
+  );
+  let $ = $json.parse(data, decoder);
+  if ($ instanceof Ok) {
+    return $;
   } else {
-    let $1 = $.tail;
-    if ($1 instanceof $Empty) {
-      return "";
-    } else {
-      let $2 = $1.tail;
-      if ($2 instanceof $Empty) {
-        let rest = $1.head;
-        let $3 = $string.split(rest, "\"");
-        if ($3 instanceof $Empty) {
-          return "";
-        } else {
-          let value = $3.head;
-          return value;
-        }
-      } else {
-        return "";
-      }
-    }
+    return new Error("Event data missing string `value` field");
   }
 }
 
@@ -82,8 +71,13 @@ export function resolve(registry, handler_id, event_data) {
     let $1 = $dict.get(registry.parameterized, handler_id);
     if ($1 instanceof Ok) {
       let callback = $1[0];
-      let value = extract_value(event_data);
-      return new Ok(callback(value));
+      let $2 = extract_value(event_data);
+      if ($2 instanceof Ok) {
+        let value = $2[0];
+        return new Ok(callback(value));
+      } else {
+        return $2;
+      }
     } else {
       return new Error("Unknown handler: " + handler_id);
     }
@@ -114,15 +108,15 @@ function pd_get_unsafe_registry() {
       "let_assert",
       FILEPATH,
       "beacon_client/handler",
-      124,
+      126,
       "pd_get_unsafe_registry",
       "Pattern match failed, no pattern matched the value.",
       {
         value: $,
-        start: 3239,
-        end: 3285,
-        pattern_start: 3250,
-        pattern_end: 3262
+        start: 3403,
+        end: 3449,
+        pattern_start: 3414,
+        pattern_end: 3426
       }
     )
   }

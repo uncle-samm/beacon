@@ -286,6 +286,12 @@ pub fn decode_client_event_batch_empty_test() {
   let assert 0 = list.length(events)
 }
 
+pub fn decode_client_request_sync_test() {
+  let raw = "{\"type\":\"request_sync\"}"
+  let assert Ok(transport.ClientRequestSync) =
+    transport.decode_client_message(raw)
+}
+
 // --- Round-trip test ---
 
 pub fn encode_decode_roundtrip_consistency_test() {
@@ -312,11 +318,13 @@ pub fn encode_decode_roundtrip_consistency_test() {
 // --- WebSocket frame edge cases ---
 
 pub fn ws_decode_incomplete_frame_test() {
-  let assert Error(_) = ws.decode_frame(<<129, 5, 0, 0>>)
+  let assert Error(_) =
+    ws.decode_frame(<<129:size(8), 5:size(8), 0:size(8), 0:size(8)>>)
 }
 
 pub fn ws_decode_rejects_unmasked_client_frame_test() {
-  let assert Error(_) = ws.decode_frame(<<129, 2, "hi":utf8>>)
+  let assert Error("protocol_violation_unmasked") =
+    ws.decode_frame(<<129:size(8), 2:size(8), "hi":utf8>>)
 }
 
 pub fn ws_decode_text_ping_pong_close_and_unknown_opcode_test() {

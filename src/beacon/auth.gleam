@@ -1,5 +1,6 @@
 /// Auth helpers — login, logout, session-bound authentication.
 /// Works with the session store and middleware context.
+import beacon/api
 import beacon/cookie
 import beacon/log
 import beacon/middleware
@@ -9,6 +10,7 @@ import gleam/bytes_tree
 import gleam/http
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
+import gleam/json as json_builder
 import gleam/option.{type Option, None, Some}
 
 pub const default_session_cookie_name = "beacon_session"
@@ -132,6 +134,32 @@ pub fn login_response(
   )
 }
 
+/// Log in a user and return a standard JSON response.
+///
+/// The response body is `{"ok":true,"csrf":"..."}` and the session ID is
+/// sent only as an HttpOnly cookie.
+pub fn login_json_response(
+  store: session.SessionStore,
+  user_id: String,
+  config: SessionConfig,
+) -> LoginResult {
+  let login = create_login(store, user_id)
+  let resp =
+    api.json_value(
+      200,
+      json_builder.object([
+        #("ok", json_builder.bool(True)),
+        #("csrf", json_builder.string(login.csrf_token)),
+      ]),
+    )
+    |> with_session_cookie(login.session, config)
+  LoginResult(
+    session: login.session,
+    csrf_token: login.csrf_token,
+    response: resp,
+  )
+}
+
 /// Log out — destroys the session.
 pub fn logout(store: session.SessionStore, session_id: String) -> Nil {
   session.delete(store, session_id)
@@ -223,6 +251,47 @@ pub fn ws_session_auth(
   }
 }
 
+/// Alias for the common WebSocket protection hook.
+pub fn protect_ws(
+  store: session.SessionStore,
+  config: SessionConfig,
+) -> fn(Request(Connection)) -> Result(Nil, String) {
+  ws_session_auth(store, config)
+}
+
+/// Request-aware initializer for apps whose initial model depends on auth.
+///
+/// Use with `beacon.ws_init` when SSR should render the authenticated state on
+/// the first response. Invalid sessions are logged and treated as guests.
+pub fn init_from_session(
+  store: session.SessionStore,
+  config: SessionConfig,
+  guest_init: fn(Request(Connection)) -> model,
+  authenticated_init: fn(Request(Connection), session.Session, String) -> model,
+) -> fn(Request(Connection)) -> model {
+  fn(req: Request(Connection)) {
+    case session_from_request(req, store, config) {
+      Ok(sess) -> {
+        case current_user(sess) {
+          Ok(user_id) -> authenticated_init(req, sess, user_id)
+          Error(Nil) -> {
+            log.warning("beacon.auth", "Session missing user during init")
+            guest_init(req)
+          }
+        }
+      }
+      Error(MissingSessionCookie) -> guest_init(req)
+      Error(err) -> {
+        log.warning(
+          "beacon.auth",
+          "Rejected session during init: " <> error_to_string(err),
+        )
+        guest_init(req)
+      }
+    }
+  }
+}
+
 /// Wrap an API route handler with session + current-user validation.
 pub fn authenticated(
   store: session.SessionStore,
@@ -241,6 +310,16 @@ pub fn authenticated(
       Error(_) -> unauthorized_response()
     }
   }
+}
+
+/// Alias for the common authenticated API route wrapper.
+pub fn protect_api(
+  store: session.SessionStore,
+  config: SessionConfig,
+  handler: fn(Request(Connection), session.Session, String) ->
+    Response(ResponseBody),
+) -> fn(Request(Connection)) -> Response(ResponseBody) {
+  authenticated(store, config, handler)
 }
 
 /// Wrap a state-changing API route with session, user, and CSRF validation.
@@ -262,6 +341,90 @@ pub fn csrf_authenticated(
       Error(_) -> unauthorized_response()
     }
   }
+}
+
+/// Alias for the common authenticated + CSRF API route wrapper.
+pub fn protect_api_with_csrf(
+  store: session.SessionStore,
+  config: SessionConfig,
+  handler: fn(Request(Connection), session.Session, String) ->
+    Response(ResponseBody),
+) -> fn(Request(Connection)) -> Response(ResponseBody) {
+  csrf_authenticated(store, config, handler)
+}
+
+/// Standard login route.
+///
+/// `authenticate` receives the request so the app can read form, JSON, or
+/// headers. Return `Ok(user_id)` to create the session; return `Error(reason)`
+/// to reject the login with `401`.
+pub fn login_route(
+  path: String,
+  store: session.SessionStore,
+  config: SessionConfig,
+  authenticate: fn(Request(Connection)) -> Result(String, String),
+) -> api.Route {
+  api.post(path, fn(req) {
+    case authenticate(req) {
+      Ok(user_id) -> login_json_response(store, user_id, config).response
+      Error(reason) -> {
+        log.warning("beacon.auth", "Login route rejected request")
+        api.text(401, reason)
+      }
+    }
+  })
+}
+
+/// Standard current-user route.
+pub fn current_user_route(
+  path: String,
+  store: session.SessionStore,
+  config: SessionConfig,
+) -> api.Route {
+  api.get(
+    path,
+    authenticated(store, config, fn(_req, _sess, user_id) {
+      api.json_value(
+        200,
+        json_builder.object([#("user", json_builder.string(user_id))]),
+      )
+    }),
+  )
+}
+
+/// Standard logout route.
+pub fn logout_route(
+  path: String,
+  store: session.SessionStore,
+  config: SessionConfig,
+) -> api.Route {
+  api.post(
+    path,
+    csrf_authenticated(store, config, fn(_req, sess, _user_id) {
+      logout_response(
+        store,
+        sess,
+        api.json_value(
+          200,
+          json_builder.object([#("ok", json_builder.bool(True))]),
+        ),
+        config,
+      )
+    }),
+  )
+}
+
+/// Standard `/api/login`, `/api/me`, and `/api/logout` route handler.
+pub fn session_routes(
+  store: session.SessionStore,
+  config: SessionConfig,
+  authenticate: fn(Request(Connection)) -> Result(String, String),
+) -> fn(Request(Connection)) -> Option(Response(ResponseBody)) {
+  api.routes([
+    login_route("/api/login", store, config, authenticate),
+    current_user_route("/api/me", store, config),
+    logout_route("/api/logout", store, config),
+  ])
 }
 
 /// Convert a high-level auth error into a stable text reason.

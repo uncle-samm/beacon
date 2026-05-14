@@ -2,6 +2,7 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import spreadsheet
+import beacon/element
 import gleam/json
 import gleam/dynamic/decode
 
@@ -38,6 +39,14 @@ pub fn encode_model(state: #(spreadsheet.Model, spreadsheet.Local)) -> String {
   |> json.to_string
 }
 
+/// Render the model with the same generated server contract used for SSR.
+pub fn render_model(state: #(spreadsheet.Model, spreadsheet.Local)) -> String {
+  let model = state.0
+  let local = state.1
+  spreadsheet.view(model, local)
+  |> element.to_string
+}
+
 /// Decode a #(Model, Local) from JSON string (for applying client patches).
 pub fn decode_model(json_str: String) -> Result(#(spreadsheet.Model, spreadsheet.Local), String) {
   let state_decoder = {
@@ -52,6 +61,102 @@ pub fn decode_model(json_str: String) -> Result(#(spreadsheet.Model, spreadsheet
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
     Error(_) -> Error("Failed to decode model+local")
+  }
+}
+
+/// Decode the generated client event contract. Live event decoding never
+/// renders the server view or reads the handler registry.
+pub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result(spreadsheet.Msg, String) {
+  let envelope_decoder = {
+    use msg_json <- decode.field("__beacon_msg", decode.string)
+    decode.success(msg_json)
+  }
+  case json.parse(data, envelope_decoder) {
+    Ok(msg_json) -> decode_msg(msg_json)
+    Error(_) -> Error("Client event missing generated Beacon message envelope")
+  }
+}
+
+
+fn decode_msg(json_str: String) -> Result(spreadsheet.Msg, String) {
+  let tag_decoder = {
+    use tag <- decode.field("tag", decode.string)
+    decode.success(tag)
+  }
+  case json.parse(json_str, tag_decoder) {
+    Ok(tag) -> {
+      case tag {
+    "SelectCell" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(spreadsheet.SelectCell(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SelectCell")
+      }
+    }
+    "StartEdit" -> {
+      let msg_decoder = {
+      decode.success(spreadsheet.StartEdit)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag StartEdit")
+      }
+    }
+    "UpdateBuffer" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(spreadsheet.UpdateBuffer(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag UpdateBuffer")
+      }
+    }
+    "ConfirmEdit" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(spreadsheet.ConfirmEdit(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag ConfirmEdit")
+      }
+    }
+    "CancelEdit" -> {
+      let msg_decoder = {
+      decode.success(spreadsheet.CancelEdit)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag CancelEdit")
+      }
+    }
+    "CellsUpdated" -> {
+      let msg_decoder = {
+      decode.success(spreadsheet.CellsUpdated)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag CellsUpdated")
+      }
+    }
+    "SetCells" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.list(server_decode_cell()))
+      decode.success(spreadsheet.SetCells(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SetCells")
+      }
+    }
+        _ -> Error("Unknown generated Beacon message tag " <> tag)
+      }
+    }
+    Error(_) -> Error("Generated Beacon message payload missing tag")
   }
 }
 

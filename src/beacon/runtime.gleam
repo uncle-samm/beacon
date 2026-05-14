@@ -7,7 +7,6 @@ import beacon/cookie
 import beacon/effect.{type Effect}
 import beacon/element.{type Node}
 import beacon/error
-import beacon/handler.{type HandlerRegistry}
 import beacon/log
 import beacon/notification.{type Notification, Notification}
 import beacon/patch
@@ -36,7 +35,7 @@ pub type CachedModelState {
 }
 
 import gleam/dict.{type Dict}
-import gleam/erlang/process.{type Subject}
+import gleam/erlang/process.{type Pid, type Subject}
 import gleam/int
 import gleam/json
 import gleam/list
@@ -52,7 +51,7 @@ pub type RuntimeMessage(msg) {
   )
   /// A client disconnected — remove their transport subject.
   ClientDisconnected(conn_id: transport.ConnectionId)
-  /// A client sent a join request — send them the initial mount.
+  /// A client sent a join request — send them the authoritative model state.
   /// Includes session token for potential state recovery and the
   /// URL path the client connected from (for initial route dispatch).
   ClientJoined(conn_id: transport.ConnectionId, token: String, path: String)
@@ -75,6 +74,8 @@ pub type RuntimeMessage(msg) {
   )
   /// A client navigated to a new URL path.
   ClientNavigated(conn_id: transport.ConnectionId, path: String)
+  /// Client requested a full model sync without a remount.
+  ClientSyncRequested(conn_id: transport.ConnectionId)
   /// Set the listener subject for dynamic subscription management.
   SetListenerSubject(
     listener: Subject(ListenerCommand),
@@ -95,16 +96,12 @@ pub type RuntimeState(model, msg) {
     model: model,
     /// The update function: model + message → new model + effects.
     update: fn(model, msg) -> #(model, Effect(msg)),
-    /// The view function: model → Node tree.
-    view: fn(model) -> Node(msg),
     /// Function to decode client events into user messages.
-    /// If None, the handler registry is used instead (automatic decoding).
+    /// Required for live events. Generated clients provide this through
+    /// beacon_codec.decode_event/4; server view rendering is not an event decoder.
     decode_event: Option(
       fn(String, String, String, String) -> Result(msg, error.BeaconError),
     ),
-    /// Handler registry from the last view render.
-    /// Used for automatic event decoding when decode_event is None.
-    handler_registry: Option(HandlerRegistry(msg)),
     /// Currently connected clients: conn_id → transport subject.
     connections: Dict(
       transport.ConnectionId,
@@ -142,6 +139,8 @@ pub type RuntimeState(model, msg) {
     /// Cached serialized model state for diffing.
     /// Tracks per-substate JSON when available, or full model JSON.
     cached_model: CachedModelState,
+    /// Framework-owned effect processes, such as effect.every timers.
+    effect_processes: List(Pid),
   )
 }
 
@@ -155,7 +154,7 @@ pub type RuntimeConfig(model, msg) {
     /// The view function.
     view: fn(model) -> Node(msg),
     /// Decode client events into user messages.
-    /// If None, the handler registry (from on_click/on_input) is used automatically.
+    /// If None, beacon_codec.decode_event/4 must be generated and compiled.
     decode_event: Option(
       fn(String, String, String, String) -> Result(msg, error.BeaconError),
     ),
@@ -199,16 +198,27 @@ pub fn start(
   config: RuntimeConfig(model, msg),
 ) -> Result(Subject(RuntimeMessage(msg)), error.BeaconError) {
   let #(initial_model, initial_effects) = config.init()
+  let event_decoder = case config.decode_event {
+    Some(decoder) -> Some(decoder)
+    None -> discover_event_decoder()
+  }
 
-  let result =
-    actor.new_with_initialiser(5000, fn(subject) {
+  case event_decoder {
+    None -> {
+      let reason =
+        "Missing event decoder. Beacon live apps must provide decode_event or run beacon/build so beacon_codec.decode_event/4 is generated; server-side view rendering is not used for event decoding."
+      log.error("beacon.runtime", reason)
+      Error(error.ConfigError(reason: reason))
+    }
+    Some(event_decoder) -> {
+      let result =
+        actor.new_with_initialiser(5000, fn(subject) {
+      let initial_effect_processes = run_effects(initial_effects, subject)
       let state =
         RuntimeState(
           model: initial_model,
           update: config.update,
-          view: config.view,
-          decode_event: config.decode_event,
-          handler_registry: None,
+          decode_event: Some(event_decoder),
           connections: dict.new(),
           self: subject,
           event_clock: 0,
@@ -228,10 +238,9 @@ pub fn start(
           on_notify: config.on_notify,
           on_notification: config.on_notification,
           cached_model: FullModelCache(json: None),
+          effect_processes: initial_effect_processes,
         )
       log.info("beacon.runtime", "Runtime initialising")
-      // Execute initial effects
-      run_effects(initial_effects, subject)
 
       actor.initialised(state)
       |> actor.returning(subject)
@@ -240,7 +249,7 @@ pub fn start(
     |> actor.on_message(handle_message)
     |> actor.start
 
-  case result {
+      case result {
     Ok(started) -> {
       log.info("beacon.runtime", "Runtime actor started successfully")
       let subject = started.data
@@ -297,6 +306,8 @@ pub fn start(
       )
       Error(error.RuntimeError(reason: "Runtime init process exited"))
     }
+      }
+  }
   }
 }
 
@@ -375,117 +386,118 @@ fn handle_message(
         }
         _, _ -> #(model_to_use, effect.none())
       }
-      // Render view to plain HTML for initial mount (SSR hydration)
-      handler.start_render()
-      let current_vdom = model_to_use |> state.view
-      let view_registry = handler.finish_render()
       log.debug(
         "beacon.runtime",
-        "Mount render registry: "
-          <> int.to_string(handler.registry_size(view_registry))
-          <> " handlers",
+        "Join uses generated event contract; server handler registry is absent",
       )
-      let mount_html = element.to_string(current_vdom)
       case dict.get(state.connections, conn_id) {
-        Ok(subject) -> {
-          // Send SSR HTML for immediate display
-          process.send(subject, transport.SendMount(payload: mount_html))
-          // Send model JSON — client takes over rendering from here
-          let mount_serializer = case discover_model_encoder() {
-            Some(f) -> Some(f)
-            None -> state.serialize_model
-          }
-          case mount_serializer {
-            Some(serialize) -> {
-              let model_json = serialize(model_to_use)
-              // Check model size before sending to client
-              case check_model_size(model_json, "join_model_sync") {
-                True -> {
-                  process.send(
-                    subject,
-                    transport.SendModelSync(
-                      model_json: model_json,
-                      version: state.event_clock,
-                      ack_clock: state.event_clock,
-                    ),
-                  )
-                  // Cache the sent model JSON for future patch diffing
-                  log.debug(
-                    "beacon.runtime",
-                    "Sent mount + model_sync to " <> conn_id,
-                  )
+            Ok(subject) -> {
+              // Send model JSON — client hydrates the existing SSR DOM from here.
+              let mount_serializer = case discover_model_encoder() {
+                Some(f) -> Some(f)
+                None -> state.serialize_model
+              }
+              case mount_serializer {
+                Some(serialize) -> {
+                  let model_json = serialize(model_to_use)
+                  // Check model size before sending to client
+                  case check_model_size(model_json, "join_model_sync") {
+                    True -> {
+                      send_to_connection(
+                        conn_id,
+                        subject,
+                        transport.SendModelSync(
+                          model_json: model_json,
+                          version: state.event_clock,
+                          ack_clock: state.event_clock,
+                        ),
+                      )
+                      // Cache the sent model JSON for future patch diffing
+                      log.debug(
+                        "beacon.runtime",
+                        "Sent join model_sync to " <> conn_id,
+                      )
+                    }
+                    False -> {
+                      log.error(
+                        "beacon.runtime",
+                        "Model too large to send on join for "
+                          <> conn_id
+                          <> " — client will not receive model_sync",
+                      )
+                    }
+                  }
+                  // Update model state and cache JSON even if too large; the
+                  // cache is needed for future patch diffing.
+                  let final_state =
+                    RuntimeState(
+                      ..state,
+                      model: model_to_use,
+                      current_route: matched_route,
+                      cached_model: FullModelCache(json: Some(model_json)),
+                    )
+                  let effect_processes =
+                    run_effects_with_context(
+                      route_effects,
+                      final_state.self,
+                      option.Some(conn_id),
+                      final_state.connections,
+                    )
+                  actor.continue(track_effect_processes(
+                    final_state,
+                    effect_processes,
+                  ))
                 }
-                False -> {
-                  log.error(
+                None -> {
+                  log.warning(
                     "beacon.runtime",
-                    "Model too large to send on join for "
-                      <> conn_id
-                      <> " — client will not receive model_sync",
+                    "No model encoder available during mount — client won't receive model_sync. "
+                      <> "Ensure beacon_codec.gleam is generated and compiled.",
                   )
+                  let final_state =
+                    RuntimeState(
+                      ..state,
+                      model: model_to_use,
+                      current_route: matched_route,
+                    )
+                  let effect_processes =
+                    run_effects_with_context(
+                      route_effects,
+                      final_state.self,
+                      option.Some(conn_id),
+                      final_state.connections,
+                    )
+                  actor.continue(track_effect_processes(
+                    final_state,
+                    effect_processes,
+                  ))
                 }
               }
-              // Update model state, cache handler registry, store last_model_json
-              // (cache even if too large — needed for future patch diffing)
-              let final_state =
-                RuntimeState(
-                  ..state,
-                  model: model_to_use,
-                  handler_registry: Some(view_registry),
-                  current_route: matched_route,
-                  cached_model: FullModelCache(json: Some(model_json)),
-                )
-              run_effects_with_context(
-                route_effects,
-                final_state.self,
-                option.Some(conn_id),
-                final_state.connections,
-              )
-              actor.continue(final_state)
             }
-            None -> {
+            Error(Nil) -> {
               log.warning(
                 "beacon.runtime",
-                "No model encoder available during mount — client won't receive model_sync. "
-                  <> "Ensure beacon_codec.gleam is generated and compiled.",
+                "Client " <> conn_id <> " not found in connections for join",
               )
               let final_state =
                 RuntimeState(
                   ..state,
                   model: model_to_use,
-                  handler_registry: Some(view_registry),
                   current_route: matched_route,
                 )
-              run_effects_with_context(
-                route_effects,
-                final_state.self,
-                option.Some(conn_id),
-                final_state.connections,
-              )
-              actor.continue(final_state)
+              let effect_processes =
+                run_effects_with_context(
+                  route_effects,
+                  final_state.self,
+                  option.None,
+                  final_state.connections,
+                )
+              actor.continue(track_effect_processes(
+                final_state,
+                effect_processes,
+              ))
             }
           }
-        }
-        Error(Nil) -> {
-          log.warning(
-            "beacon.runtime",
-            "Client " <> conn_id <> " not found in connections for join",
-          )
-          let final_state =
-            RuntimeState(
-              ..state,
-              model: model_to_use,
-              handler_registry: Some(view_registry),
-              current_route: matched_route,
-            )
-          run_effects_with_context(
-            route_effects,
-            final_state.self,
-            option.None,
-            final_state.connections,
-          )
-          actor.continue(final_state)
-        }
-      }
     }
 
     ClientEventReceived(
@@ -522,32 +534,13 @@ fn handle_message(
               <> " because server update is authoritative",
           )
       }
-      let resolve_result = case state.handler_registry {
-        Some(registry) -> {
-          log.debug(
-            "beacon.runtime",
-            "Resolving "
-              <> handler_id
-              <> " in registry with "
-              <> int.to_string(handler.registry_size(registry))
-              <> " handlers",
-          )
-          handler.resolve(registry, handler_id, event_data)
-        }
-        None -> Error(error.RuntimeError(reason: "No handler registry"))
-      }
-      let resolve_result = case resolve_result {
-        Ok(msg) -> Ok(msg)
-        Error(_) -> {
-          case state.decode_event {
-            Some(decode_fn) ->
-              decode_fn(event_name, handler_id, event_data, target_path)
-            None ->
-              Error(error.RuntimeError(
-                reason: "Unknown handler: " <> handler_id,
-              ))
-          }
-        }
+      let resolve_result = case state.decode_event {
+        Some(decode_fn) ->
+          decode_fn(event_name, handler_id, event_data, target_path)
+        None ->
+          Error(error.RuntimeError(
+            reason: "Missing event decoder for handler: " <> handler_id,
+          ))
       }
       case resolve_result {
         Ok(msg) -> {
@@ -614,21 +607,12 @@ fn handle_message(
                   <> " because server update is authoritative",
               )
           }
-          let resolve_result = case acc_state.handler_registry {
-            Some(registry) -> handler.resolve(registry, handler_id, event_data)
-            None -> Error(error.RuntimeError(reason: "No handler registry"))
-          }
-          let resolve_result = case resolve_result {
-            Ok(msg) -> Ok(msg)
-            Error(_) ->
-              case acc_state.decode_event {
-                Some(decode_fn) ->
-                  decode_fn(event_name, handler_id, event_data, "")
-                None ->
-                  Error(error.RuntimeError(
-                    reason: "Unknown handler: " <> handler_id,
-                  ))
-              }
+          let resolve_result = case acc_state.decode_event {
+            Some(decode_fn) -> decode_fn(event_name, handler_id, event_data, "")
+            None ->
+              Error(error.RuntimeError(
+                reason: "Missing event decoder for handler: " <> handler_id,
+              ))
           }
           case resolve_result {
             Ok(msg) -> {
@@ -687,6 +671,15 @@ fn handle_message(
       }
     }
 
+    ClientSyncRequested(conn_id) -> {
+      log.warning(
+        "beacon.runtime",
+        "Client requested full model sync: " <> conn_id,
+      )
+      send_model_sync_to_connection(state, conn_id, "client_request_sync")
+      actor.continue(state)
+    }
+
     SetListenerSubject(listener, initial_subs) -> {
       log.debug("beacon.runtime", "Listener subject registered")
       actor.continue(
@@ -727,6 +720,8 @@ fn handle_message(
 
     Shutdown -> {
       log.info("beacon.runtime", "Runtime shutting down")
+      stop_listener(state.listener_subject)
+      stop_effect_processes(state.effect_processes)
       actor.stop()
     }
   }
@@ -753,21 +748,6 @@ fn run_update_for(
   let #(new_model, effects) = state.update(state.model, msg)
   log.debug("beacon.runtime", "Model updated")
 
-  // Render view to refresh the handler registry. Live updates are state-over-the-wire;
-  // the server does not send post-mount HTML.
-  handler.start_render()
-  let new_registry = case rescue(fn() { new_model |> state.view }) {
-    Ok(_vdom) -> handler.finish_render()
-    Error(reason) -> {
-      log.error("beacon.runtime", "View rendering failed: " <> reason)
-      let _ = handler.finish_render()
-      case state.handler_registry {
-        Some(r) -> r
-        None -> handler.finish_render()
-      }
-    }
-  }
-
   // State-over-the-wire: send model JSON to all clients (as patches when possible).
   let serializer = case discover_model_encoder() {
     Some(f) -> Some(f)
@@ -783,12 +763,7 @@ fn run_update_for(
     }
     None -> None
   }
-  let broadcast_state =
-    RuntimeState(
-      ..state,
-      model: new_model,
-      handler_registry: Some(new_registry),
-    )
+  let broadcast_state = RuntimeState(..state, model: new_model)
   let new_cached = case new_model_json {
     Some(_) ->
       broadcast_with_substates(broadcast_state, new_model, new_model_json)
@@ -798,22 +773,29 @@ fn run_update_for(
         "No model encoder available after update — live state update cannot be sent",
       )
       let _ =
-        dict.each(broadcast_state.connections, fn(_conn_id, subject) {
-          process.send(
-            subject,
-            transport.SendError(reason: "Model encoder missing"),
-          )
-        })
+        send_error_to_connections(
+          broadcast_state.connections,
+          "Model encoder missing",
+        )
       broadcast_state.cached_model
     }
   }
   let new_state = RuntimeState(..broadcast_state, cached_model: new_cached)
 
   // Execute effects — pass connection context for targeted sends
-  run_effects_with_context(effects, state.self, conn_id, state.connections)
+  let effect_processes =
+    run_effects_with_context(
+      effects,
+      state.self,
+      conn_id,
+      state.connections,
+    )
 
   // Diff dynamic subscriptions after model change
-  update_dynamic_subscriptions(new_state)
+  update_dynamic_subscriptions(track_effect_processes(
+    new_state,
+    effect_processes,
+  ))
 }
 
 /// After an update, diff dynamic subscriptions and apply changes.
@@ -862,13 +844,13 @@ fn run_update_only(
   conn_id: option.Option(transport.ConnectionId),
 ) -> RuntimeState(model, msg) {
   let #(new_model, effects) = state.update(state.model, msg)
-  run_effects_with_context(effects, state.self, conn_id, state.connections)
-  RuntimeState(..state, model: new_model)
+  let effect_processes =
+    run_effects_with_context(effects, state.self, conn_id, state.connections)
+  track_effect_processes(
+    RuntimeState(..state, model: new_model),
+    effect_processes,
+  )
 }
-
-/// Safely execute a function, catching crashes.
-@external(erlang, "beacon_runtime_ffi", "rescue")
-fn rescue(f: fn() -> a) -> Result(a, String)
 
 /// Auto-discover a model encoder from the beacon_codec module.
 /// The build tool generates beacon_codec.gleam with encode_model/1.
@@ -891,6 +873,66 @@ fn discover_model_encoder() -> Option(fn(model) -> String) {
 
 @external(erlang, "beacon_runtime_ffi", "try_load_codec_encoder")
 fn try_load_codec_encoder() -> Result(fn(model) -> String, Nil)
+
+/// Verify that the generated server contract is compiled and discoverable.
+/// Public Beacon apps call this before binding a port so stale/missing codegen
+/// fails at startup instead of at the first WebSocket event.
+pub fn verify_generated_contract() -> Result(Nil, error.BeaconError) {
+  log.info("beacon.runtime", "Verifying generated Beacon contract")
+  case try_load_codec_encoder() {
+    Error(_) ->
+      Error(error.ConfigError(
+        reason: "Generated contract missing beacon_codec.encode_model/1",
+      ))
+    Ok(_) ->
+      case try_load_codec_event_decoder() {
+        Error(_) ->
+          Error(error.ConfigError(
+            reason: "Generated contract missing beacon_codec.decode_event/4",
+          ))
+        Ok(_) ->
+          case try_load_codec_renderer() {
+            Error(_) ->
+              Error(error.ConfigError(
+                reason: "Generated contract missing beacon_codec.render_model/1",
+              ))
+            Ok(_) -> Ok(Nil)
+          }
+      }
+  }
+}
+
+fn discover_event_decoder() -> Option(
+  fn(String, String, String, String) -> Result(msg, error.BeaconError),
+) {
+  case try_load_codec_event_decoder() {
+    Ok(decoder) -> {
+      log.info(
+        "beacon.runtime",
+        "Auto-discovered event decoder from beacon_codec",
+      )
+      Some(fn(name, handler_id, data, target_path) {
+        case decoder(name, handler_id, data, target_path) {
+          Ok(msg) -> Ok(msg)
+          Error(reason) -> Error(error.CodecError(reason: reason, raw: data))
+        }
+      })
+    }
+    Error(_) -> {
+      log.debug("beacon.runtime", "No beacon_codec event decoder available")
+      None
+    }
+  }
+}
+
+@external(erlang, "beacon_runtime_ffi", "try_load_codec_event_decoder")
+fn try_load_codec_event_decoder() -> Result(
+  fn(String, String, String, String) -> Result(msg, String),
+  Nil,
+)
+
+@external(erlang, "beacon_runtime_ffi", "try_load_codec_renderer")
+fn try_load_codec_renderer() -> Result(fn(model) -> String, Nil)
 
 /// Try per-substate broadcast, otherwise use full-model diffing.
 /// Returns the new CachedModelState to store for future diffs.
@@ -998,8 +1040,9 @@ fn broadcast_with_substates(
           // Merge multiple ops JSON arrays into one
           let merged = merge_ops_json(all_op_strings)
           log.debug("beacon.runtime", "Substates: broadcasting merged patch")
-          dict.each(state.connections, fn(_conn_id, subject) {
-            process.send(
+          dict.each(state.connections, fn(conn_id, subject) {
+            send_to_connection(
+              conn_id,
               subject,
               transport.SendPatch(
                 ops_json: merged,
@@ -1120,8 +1163,9 @@ fn broadcast_model_sync_with_json(
                     "beacon.runtime",
                     "Broadcasting patch to all clients",
                   )
-                  dict.each(state.connections, fn(_conn_id, subject) {
-                    process.send(
+                  dict.each(state.connections, fn(conn_id, subject) {
+                    send_to_connection(
+                      conn_id,
                       subject,
                       transport.SendPatch(
                         ops_json: ops_json,
@@ -1138,8 +1182,9 @@ fn broadcast_model_sync_with_json(
                 "beacon.runtime",
                 "No previous model, sending full model_sync",
               )
-              dict.each(state.connections, fn(_conn_id, subject) {
-                process.send(
+              dict.each(state.connections, fn(conn_id, subject) {
+                send_to_connection(
+                  conn_id,
                   subject,
                   transport.SendModelSync(
                     model_json: model_json,
@@ -1159,8 +1204,9 @@ fn broadcast_model_sync_with_json(
         "No model encoder available — live state update cannot be sent",
       )
       let _ =
-        dict.each(state.connections, fn(_conn_id, subject) {
-          process.send(
+        dict.each(state.connections, fn(conn_id, subject) {
+          send_to_connection(
+            conn_id,
             subject,
             transport.SendError(reason: "Model encoder missing"),
           )
@@ -1183,7 +1229,10 @@ fn try_load_flat_encoder() -> Result(fn(model) -> String, Nil)
 
 /// Execute effects by providing a dispatch function that sends messages
 /// back to the runtime actor.
-fn run_effects(effects: Effect(msg), self: Subject(RuntimeMessage(msg))) -> Nil {
+fn run_effects(
+  effects: Effect(msg),
+  self: Subject(RuntimeMessage(msg)),
+) -> List(Pid) {
   run_effects_with_context(effects, self, option.None, dict.new())
 }
 
@@ -1193,9 +1242,9 @@ fn run_effects_with_context(
   self: Subject(RuntimeMessage(msg)),
   conn_id: option.Option(transport.ConnectionId),
   connections: Dict(transport.ConnectionId, Subject(transport.InternalMessage)),
-) -> Nil {
+) -> List(Pid) {
   case effect.is_none(effects) {
-    True -> Nil
+    True -> []
     False -> {
       log.debug("beacon.runtime", "Executing effects")
       // Store connection context so redirect can target the right client
@@ -1229,8 +1278,143 @@ fn run_effects_with_context(
           EffectDispatchedKeyed(key: key, generation: generation, message: msg),
         )
       }
-      effect.perform(effects, dispatch, dispatch_keyed)
+      effect.perform_tracked(effects, dispatch, dispatch_keyed)
     }
+  }
+}
+
+fn track_effect_processes(
+  state: RuntimeState(model, msg),
+  new_processes: List(Pid),
+) -> RuntimeState(model, msg) {
+  let live_existing =
+    list.filter(state.effect_processes, fn(pid) { process.is_alive(pid) })
+  RuntimeState(
+    ..state,
+    effect_processes: list.append(new_processes, live_existing),
+  )
+}
+
+fn stop_effect_processes(processes: List(Pid)) -> Nil {
+  let live_processes = list.filter(processes, fn(pid) { process.is_alive(pid) })
+  case list.length(live_processes) {
+    0 -> Nil
+    count ->
+      log.info(
+        "beacon.runtime",
+        "Stopping " <> int.to_string(count) <> " effect processes",
+      )
+  }
+  list.each(live_processes, fn(pid) { process.kill(pid) })
+}
+
+fn stop_listener(listener: Option(Subject(ListenerCommand))) -> Nil {
+  case listener {
+    Some(subject) -> process.send(subject, ShutdownListener)
+    None -> Nil
+  }
+}
+
+fn send_error_to_connections(
+  connections: Dict(transport.ConnectionId, Subject(transport.InternalMessage)),
+  reason: String,
+) -> Nil {
+  dict.each(connections, fn(conn_id, subject) {
+    send_to_connection(conn_id, subject, transport.SendError(reason: reason))
+  })
+}
+
+const max_outbound_mailbox_messages = 1000
+
+fn send_to_connection(
+  conn_id: transport.ConnectionId,
+  subject: Subject(transport.InternalMessage),
+  message: transport.InternalMessage,
+) -> Nil {
+  case process.subject_owner(subject) {
+    Ok(pid) -> {
+      let queue_len = process_message_queue_len(pid)
+      case queue_len > max_outbound_mailbox_messages {
+        True -> {
+          log.warning(
+            "beacon.runtime",
+            "Connection "
+              <> conn_id
+              <> " outbound mailbox exceeded "
+              <> int.to_string(max_outbound_mailbox_messages)
+              <> " messages ("
+              <> int.to_string(queue_len)
+              <> "); closing slow client",
+          )
+          process.send(
+            subject,
+            transport.CloseForBackpressure(
+              reason: "Connection is too far behind; reconnect to resync",
+            ),
+          )
+        }
+        False -> process.send(subject, message)
+      }
+    }
+    Error(Nil) -> {
+      log.warning(
+        "beacon.runtime",
+        "Cannot send to connection " <> conn_id <> ": subject has no owner",
+      )
+      Nil
+    }
+  }
+}
+
+@external(erlang, "beacon_runtime_ffi", "message_queue_len")
+fn process_message_queue_len(pid: Pid) -> Int
+
+fn send_model_sync_to_connection(
+  state: RuntimeState(model, msg),
+  conn_id: transport.ConnectionId,
+  context: String,
+) -> Nil {
+  case dict.get(state.connections, conn_id) {
+    Ok(subject) -> {
+      let serializer = case discover_model_encoder() {
+        Some(f) -> Some(f)
+        None -> state.serialize_model
+      }
+      case serializer {
+        Some(serialize) -> {
+          let model_json = serialize(state.model)
+          case check_model_size(model_json, context) {
+            True ->
+              send_to_connection(
+                conn_id,
+                subject,
+                transport.SendModelSync(
+                  model_json: model_json,
+                  version: state.event_clock,
+                  ack_clock: state.event_clock,
+                ),
+              )
+            False ->
+              send_to_connection(
+                conn_id,
+                subject,
+                transport.SendError(reason: "Model too large to sync"),
+              )
+          }
+        }
+        None ->
+          send_to_connection(
+            conn_id,
+            subject,
+            transport.SendError(reason: "Model encoder missing"),
+          )
+      }
+    }
+    Error(Nil) ->
+      log.warning(
+        "beacon.runtime",
+        "Cannot sync missing connection " <> conn_id,
+      )
   }
 }
 
@@ -1290,6 +1474,9 @@ pub fn connect_transport_with_ssr(
         }
         transport.ClientNavigate(path) -> {
           process.send(runtime, ClientNavigated(conn_id: conn_id, path: path))
+        }
+        transport.ClientRequestSync -> {
+          process.send(runtime, ClientSyncRequested(conn_id: conn_id))
         }
         transport.ClientEventBatch(events) -> {
           // Atomic batch: all events processed, single render at end.
@@ -1443,6 +1630,8 @@ fn forward_client_message_with_request(
         runtime_subject,
         ClientNavigated(conn_id: conn_id, path: path),
       )
+    transport.ClientRequestSync ->
+      process.send(runtime_subject, ClientSyncRequested(conn_id: conn_id))
     transport.ClientEventBatch(events) -> {
       let event_tuples =
         list.filter_map(events, fn(evt) {
@@ -1514,18 +1703,14 @@ pub fn connect_transport_per_connection(
         {
           Ok(#(on_event, shutdown)) -> {
             let on_disconnect = fn(_cid: transport.ConnectionId) { shutdown() }
-            #(on_event, on_disconnect)
+            Ok(#(on_event, on_disconnect))
           }
           Error(err) -> {
             log.error(
               "beacon.runtime",
               "Failed to start per-connection runtime: " <> error.to_string(err),
             )
-            // Return no-op handlers
-            #(
-              fn(_: transport.ConnectionId, _: transport.ClientMessage) { Nil },
-              fn(_: transport.ConnectionId) { Nil },
-            )
+            Error(error.to_string(err))
           }
         }
       },
@@ -1596,6 +1781,7 @@ fn start_pubsub_listener(
         command_subject,
         on_notify,
         on_notification,
+        topics,
       )
     })
   // INVARIANT: The listener process was just spawned and MUST send its
@@ -1612,6 +1798,7 @@ fn listener_loop(
   command_subject: Subject(ListenerCommand),
   on_notify: Option(fn(String) -> msg),
   on_notification: Option(fn(Notification) -> msg),
+  subscriptions: List(String),
 ) -> Nil {
   case receive_with_commands(command_subject, 60_000) {
     CommandReceived(SubscribeTo(topic)) -> {
@@ -1622,6 +1809,10 @@ fn listener_loop(
         command_subject,
         on_notify,
         on_notification,
+        case list.contains(subscriptions, topic) {
+          True -> subscriptions
+          False -> [topic, ..subscriptions]
+        },
       )
     }
     CommandReceived(UnsubscribeFrom(topic)) -> {
@@ -1632,10 +1823,15 @@ fn listener_loop(
         command_subject,
         on_notify,
         on_notification,
+        list.filter(subscriptions, fn(existing) { existing != topic }),
       )
     }
     CommandReceived(ShutdownListener) -> {
       log.info("beacon.subscription", "Listener shutting down")
+      list.each(subscriptions, fn(topic) {
+        log.debug("beacon.subscription", "Unsubscribing on shutdown: " <> topic)
+        pubsub.unsubscribe(topic)
+      })
       Nil
     }
     NotificationReceived(topic, payload) -> {
@@ -1662,6 +1858,7 @@ fn listener_loop(
         command_subject,
         on_notify,
         on_notification,
+        subscriptions,
       )
     }
     ReceiveTimeout -> {
@@ -1670,6 +1867,7 @@ fn listener_loop(
         command_subject,
         on_notify,
         on_notification,
+        subscriptions,
       )
     }
   }

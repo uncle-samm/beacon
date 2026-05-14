@@ -21,6 +21,8 @@ elif command -v google-chrome >/dev/null 2>&1; then
   CHROME="$(command -v google-chrome)"
 elif command -v chromium >/dev/null 2>&1; then
   CHROME="$(command -v chromium)"
+elif command -v chromium-browser >/dev/null 2>&1; then
+  CHROME="$(command -v chromium-browser)"
 else
   echo "missing Chrome/Chromium. Set CHROME_BIN to a headless-capable browser." >&2
   exit 1
@@ -33,6 +35,7 @@ mkdir -p "$PROFILE_DIR"
   --remote-debugging-port="$CDP_PORT" \
   --user-data-dir="$PROFILE_DIR" \
   --disable-gpu \
+  ${CHROME_EXTRA_ARGS:-} \
   --no-first-run \
   --no-default-browser-check \
   about:blank >/tmp/beacon-cdp-chrome.log 2>&1 &

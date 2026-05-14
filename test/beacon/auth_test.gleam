@@ -1,6 +1,8 @@
+import beacon/api
 import beacon/auth
 import beacon/session
 import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
+import gleam/bit_array
 import gleam/bytes_tree
 import gleam/http
 import gleam/http/request.{type Request}
@@ -73,6 +75,19 @@ pub fn create_login_then_with_session_cookie_supports_custom_response_test() {
   should.equal(stored_csrf, login.csrf_token)
   let assert Ok(cookie_header) = find_header(resp.headers, "set-cookie")
   should.be_true(contains(cookie_header, "beacon_session=" <> login.session.id))
+}
+
+pub fn login_json_response_sets_standard_json_body_test() {
+  let store = session.new_store("auth_login_json_response")
+  let config = auth.dev_session_config()
+  let result = auth.login_json_response(store, "json-user", config)
+
+  should.equal(result.response.status, 200)
+  should.be_true(contains(response_body(result.response), "\"ok\":true"))
+  should.be_true(contains(response_body(result.response), result.csrf_token))
+  let assert Ok(cookie_header) =
+    find_header(result.response.headers, "set-cookie")
+  should.be_true(contains(cookie_header, "beacon_session=" <> result.session.id))
 }
 
 pub fn default_session_config_uses_secure_cookie_defaults_test() {
@@ -168,6 +183,18 @@ pub fn ws_session_auth_accepts_valid_session_and_rejects_missing_test() {
   should.equal(auth_fn(missing_req), Error("missing session cookie"))
 }
 
+pub fn protect_ws_alias_matches_session_auth_test() {
+  let store = session.new_store("auth_protect_ws")
+  let config = auth.dev_session_config()
+  let result = auth.login_json_response(store, "socket-user", config)
+  let auth_fn = auth.protect_ws(store, config)
+  let req: Request(Connection) =
+    make_request("GET", "/ws")
+    |> request.set_header("cookie", "beacon_session=" <> result.session.id)
+
+  should.equal(auth_fn(req), Ok(Nil))
+}
+
 pub fn csrf_authenticated_wraps_api_handler_test() {
   let store = session.new_store("auth_api_wrapper")
   let config = auth.dev_session_config()
@@ -189,6 +216,90 @@ pub fn csrf_authenticated_wraps_api_handler_test() {
   should.equal(ok_resp.status, 200)
   let forbidden_resp = handler(missing_csrf_req)
   should.equal(forbidden_resp.status, 403)
+}
+
+pub fn auth_login_route_creates_session_and_cookie_test() {
+  let store = session.new_store("auth_login_route")
+  let config = auth.dev_session_config()
+  let handler =
+    api.routes([
+      auth.login_route("/api/login", store, config, fn(_req) {
+        Ok("route-user")
+      }),
+    ])
+  let req: Request(Connection) = make_request("POST", "/api/login")
+
+  let assert Some(resp) = handler(req)
+  should.equal(resp.status, 200)
+  should.be_true(contains(response_body(resp), "\"ok\":true"))
+  let assert Ok(cookie_header) = find_header(resp.headers, "set-cookie")
+  should.be_true(contains(cookie_header, "beacon_session="))
+}
+
+pub fn auth_login_route_rejects_failed_authentication_test() {
+  let store = session.new_store("auth_login_route_reject")
+  let config = auth.dev_session_config()
+  let handler =
+    api.routes([
+      auth.login_route("/api/login", store, config, fn(_req) {
+        Error("bad credentials")
+      }),
+    ])
+  let req: Request(Connection) = make_request("POST", "/api/login")
+
+  let assert Some(resp) = handler(req)
+  should.equal(resp.status, 401)
+  should.equal(response_body(resp), "bad credentials")
+}
+
+pub fn auth_current_user_route_returns_user_test() {
+  let store = session.new_store("auth_current_user_route")
+  let config = auth.dev_session_config()
+  let result = auth.login_json_response(store, "route-user", config)
+  let handler = api.routes([auth.current_user_route("/api/me", store, config)])
+  let req: Request(Connection) =
+    make_request("GET", "/api/me")
+    |> request.set_header("cookie", "beacon_session=" <> result.session.id)
+
+  let assert Some(resp) = handler(req)
+  should.equal(resp.status, 200)
+  should.equal(response_body(resp), "{\"user\":\"route-user\"}")
+}
+
+pub fn auth_logout_route_requires_csrf_and_deletes_session_test() {
+  let store = session.new_store("auth_logout_route")
+  let config = auth.dev_session_config()
+  let result = auth.login_json_response(store, "route-user", config)
+  let handler = api.routes([auth.logout_route("/api/logout", store, config)])
+  let req: Request(Connection) =
+    make_request("POST", "/api/logout")
+    |> request.set_header("cookie", "beacon_session=" <> result.session.id)
+    |> request.set_header("x-csrf-token", result.csrf_token)
+
+  let assert Some(resp) = handler(req)
+  should.equal(resp.status, 200)
+  should.equal(response_body(resp), "{\"ok\":true}")
+  should.equal(session.get(store, result.session.id), option.None)
+}
+
+pub fn init_from_session_uses_authenticated_or_guest_init_test() {
+  let store = session.new_store("auth_init_from_session")
+  let config = auth.dev_session_config()
+  let result = auth.login_json_response(store, "init-user", config)
+  let init =
+    auth.init_from_session(
+      store,
+      config,
+      fn(_req) { "guest" },
+      fn(_req, _sess, user_id) { "user:" <> user_id },
+    )
+  let authed_req: Request(Connection) =
+    make_request("GET", "/")
+    |> request.set_header("cookie", "beacon_session=" <> result.session.id)
+  let guest_req: Request(Connection) = make_request("GET", "/")
+
+  should.equal(init(authed_req), "user:init-user")
+  should.equal(init(guest_req), "guest")
 }
 
 // --- helpers ---
@@ -216,6 +327,12 @@ fn api_json(body: String) -> response.Response(ResponseBody) {
   response.new(200)
   |> response.set_header("content-type", "application/json")
   |> response.set_body(Bytes(bytes_tree.from_string(body)))
+}
+
+fn response_body(resp: response.Response(ResponseBody)) -> String {
+  let Bytes(tree) = resp.body
+  let assert Ok(body) = tree |> bytes_tree.to_bit_array |> bit_array.to_string
+  body
 }
 
 fn make_request(method: String, path: String) -> Request(Connection) {

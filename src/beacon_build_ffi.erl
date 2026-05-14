@@ -1,15 +1,61 @@
 -module(beacon_build_ffi).
--export([run_command/1, string_to_bytes/1, bytes_to_string/1,
+-export([string_to_bytes/1, bytes_to_string/1,
+         run_program/3, absolute_path/1, generate_safe_hash/0,
          is_any_source_newer_than_manifest/1, is_any_source_newer_than/2]).
 
-%% SECURITY: os:cmd runs commands via the system shell. All directory paths
-%% concatenated into commands MUST be wrapped in single quotes on the caller side
-%% (build.gleam) to prevent shell injection. Gleam project paths are controlled
-%% by the developer (not user input), but quoting prevents accidental breakage
-%% from paths with spaces or special characters.
-run_command(Cmd) ->
-    Result = os:cmd(binary_to_list(Cmd)),
-    unicode:characters_to_binary(Result).
+%% Run a program without invoking a shell. This prevents build-time command
+%% injection through project paths or path dependencies.
+run_program(Cwd0, Program0, Args0) ->
+    Cwd = binary_to_list(Cwd0),
+    Program = binary_to_list(Program0),
+    Args = [binary_to_list(Arg) || Arg <- Args0],
+    case os:find_executable(Program) of
+        false ->
+            {error, unicode:characters_to_binary(["Executable not found: ", Program])};
+        Executable ->
+            try open_port(
+                    {spawn_executable, Executable},
+                    [
+                        {cd, Cwd},
+                        {args, Args},
+                        exit_status,
+                        use_stdio,
+                        stderr_to_stdout,
+                        binary
+                    ]
+                ) of
+                Port -> collect_port_output(Port, [])
+            catch
+                error:Reason ->
+                    {error, unicode:characters_to_binary(
+                        io_lib:format("Failed to start ~s in ~s: ~p", [Program, Cwd, Reason])
+                    )}
+            end
+    end.
+
+collect_port_output(Port, Acc) ->
+    receive
+        {Port, {data, Data}} ->
+            collect_port_output(Port, [Data | Acc]);
+        {Port, {exit_status, 0}} ->
+            {ok, iolist_to_binary(lists:reverse(Acc))};
+        {Port, {exit_status, Status}} ->
+            Output = iolist_to_binary(lists:reverse(Acc)),
+            {error, unicode:characters_to_binary([
+                Output,
+                "\nExit status: ",
+                integer_to_list(Status)
+            ])}
+    end.
+
+absolute_path(Path0) ->
+    Path = binary_to_list(Path0),
+    {ok, unicode:characters_to_binary(filename:absname(Path))}.
+
+generate_safe_hash() ->
+    Seed = term_to_binary({erlang:monotonic_time(), erlang:unique_integer([positive])}),
+    Hex = binary:encode_hex(crypto:hash(sha256, Seed), lowercase),
+    binary:part(Hex, 0, 8).
 
 %% Convert a binary string to a list of byte values.
 %% Used by the AST extractor to slice source text by byte offsets.

@@ -11,7 +11,7 @@ no macros — pure function calls for views, build-time AST analysis via Glance.
 WebSocket via Beacon's gen_tcp server, one BEAM actor per connection.
 
 **Wire protocol:**
-- 5 `ClientMessage` variants: `ClientEvent`, `ClientHeartbeat`, `ClientJoin`, `ClientNavigate`, `ClientEventBatch`
+- 6 `ClientMessage` variants: `ClientEvent`, `ClientHeartbeat`, `ClientJoin`, `ClientNavigate`, `ClientRequestSync`, `ClientEventBatch`
 - 8 `ServerMessage` variants: `ServerMount`, `ServerHeartbeatAck`, `ServerError`, `ServerModelSync`, `ServerPatch`, `ServerNavigate`, `ServerHardNavigate`, `ServerReload`
 
 **Security (`SecurityLimits`):**
@@ -34,14 +34,14 @@ MVU loop as OTP actor. One per user session.
 - `init: fn() -> #(model, Effect(msg))`
 - `update: fn(model, msg) -> #(model, Effect(msg))`
 - `view: fn(model) -> Node(msg)`
-- Optional `decode_event` (manual) or automatic via handler registry
+- `decode_event` from app config or generated `beacon_codec.decode_event/4`
 - Optional `serialize_model`/`deserialize_model` for state recovery
 - Route patterns + `on_route_change` callback
 - Dynamic subscriptions: `fn(model) -> List(String)` with `on_notify` handler
 
 **`RuntimeState`** tracks:
 - Current model, connections map, event clock (monotonic, for ordering)
-- Handler registry from last view render
+- Optional client handler metadata; not a server-side event decoder
 - `CachedModelState`: either `FullModelCache` or `SubstateCache` (per-field JSON caching)
 - PubSub listener subject and current subscriptions
 
@@ -88,7 +88,7 @@ Three diffing layers, each operating at a different granularity:
 **Substate tracking (`runtime.gleam` `CachedModelState`):**
 - `SubstateCache` tracks per-field JSON strings independently
 - Only changed substates trigger re-serialization and diffing
-- Falls back to `FullModelCache` for models without substates
+- Uses `FullModelCache` for models without substates
 
 ### 5. Routing (`src/beacon/route.gleam`)
 
@@ -104,9 +104,8 @@ matching with `:param` extraction.
 manifest entries. Each page entry contains a pattern, the message to send on
 initial SSR or client-side navigation, and a typed render function used by
 `route.dispatch_view`. Route-aware SSR runs the same update path before rendering
-first paint, so hydrated state matches the HTML. The lower-level
-`beacon.routes([...])` + `beacon.on_route_change(...)` pair remains available for
-custom routing.
+first paint, so hydrated state matches the HTML. There is one public route API:
+`route_pages`.
 
 **Route mini-apps:** `route.page_model` lets a page module own a child `Model`,
 `Msg`, `update`, and `view` while the root app embeds that child state and wraps
@@ -148,14 +147,41 @@ Effects are data, not actions. `Effect(msg)` is an opaque list of callbacks.
 - `batch(List(Effect))` — combine multiple effects
 - `map(Effect(a), fn(a) -> b)` — transform message type
 
-### 8. Handler Registry (`src/beacon/handler.gleam`)
+Spawned background work, delayed messages, repeating timers, and dynamic PubSub
+listeners are runtime-owned. Runtime shutdown stops live effect processes and
+listener subscriptions so reconnect churn does not leak work.
 
-Automatic event decoding — eliminates manual `decode_event` functions.
+### 8. Generated Event And Render Contract
 
-1. Before each view render: `start_render()` creates a fresh registry
+Live events require a generated `decode_event` contract. The runtime
+does not render `view` on live join or normal model updates; the browser renders
+from model sync/patch state and sends an encoded Msg envelope for server
+authority.
+
+The handler registry is client-side metadata in generated apps:
+
+1. Browser render starts a registry for DOM event attributes
 2. During render: `on_click(Increment)` calls `register_simple(msg)`, returns handler ID (`"h0"`, `"h1"`, ...)
-3. After render: `finish_render()` returns the populated `HandlerRegistry`
-4. On client event: `resolve(registry, handler_id, data)` looks up the Msg
+3. Browser events resolve the handler ID to a typed `Msg`
+4. Generated `encode_msg` serializes the `Msg` into `data.__beacon_msg`
+5. Server `beacon_codec.decode_event/4` decodes that envelope and runs `update`
+
+If generated `beacon_codec.decode_event/4` is not available for a public app,
+startup fails. The low-level `application.AppConfig.decode_event` field remains
+only for advanced non-browser transports. There is no server-rendered
+handler-registry event path.
+
+Generated `beacon_codec.render_model/1` is also part of the startup contract for
+public apps. SSR uses this generated renderer when the app is started through
+the public Beacon builder, so first paint and post-hydration rendering are tied
+to the same generated contract. The build also writes
+`build/beacon_contract.json` with Model, Local, Server, client message,
+component message, skipped server state, and generated codec details.
+
+Apps may define `pub type ClientMsg` to explicitly allow only a subset of
+top-level `Msg` variants to originate from the browser. Variants excluded from
+`ClientMsg` can still be produced by server effects or server-side update code,
+but generated browser events will not decode into them.
 
 Two handler types: `simple` (fixed Msg) and `parameterized` (callback that receives event data string).
 Uses process dictionary for storage since view runs synchronously in a single BEAM process.
@@ -166,10 +192,10 @@ Stack-based for nested component renders.
 The browser-side JavaScript follows one rendering model:
 
 **SSR first render:** HTTP requests receive fully rendered HTML for first paint,
-SEO, and accessibility. On WebSocket join, the server may send the initial
-`ServerMount` payload and the authoritative `ServerModelSync`.
+SEO, and accessibility. On WebSocket join, the server sends authoritative
+`ServerModelSync` for hydration and must not remount the SSR HTML.
 
-**Client-state live rendering:** After mount, normal model updates are
+**Client-state live rendering:** After hydration, normal model updates are
 `ServerPatch` or `ServerModelSync`; the server does not use repeated HTML mount
 messages for ordinary live updates. The client decodes model JSON, runs the
 generated `view`, and updates the DOM locally.
@@ -195,6 +221,8 @@ Generated client code is required for normal apps:
 - On event: runs `update` locally for instant DOM update
 - If model changed: sends event to server, awaits `ServerModelSync`/`ServerPatch`
 - If only local state changed: no server traffic (zero latency)
+- If patch application fails: sends `ClientRequestSync`; server replies with
+  `ServerModelSync` and no post-mount HTML
 - RAF-throttled rendering — multiple events batch into one DOM update per frame
 
 If Beacon cannot generate the client renderer/model codec for an app shape, app
@@ -257,14 +285,15 @@ Files: `beacon_client.gleam` (Gleam types), `beacon_client_ffi.mjs` (JS runtime)
 |---------|--------|---------|
 | `ClientEvent` | name, handler_id, data, target_path, clock, ops | DOM event; ops are untrusted client hints |
 | `ClientHeartbeat` | — | Keep-alive |
-| `ClientJoin` | token, path | Initial mount request; browser recovery token is read from HttpOnly cookie |
+| `ClientJoin` | token, path | Live hydration request; browser recovery token is read from HttpOnly cookie |
 | `ClientNavigate` | path | SPA navigation |
-| `ClientEventBatch` | events: List(ClientMessage) | LOCAL events replayed before MODEL event |
+| `ClientRequestSync` | - | Full model resync request after client patch failure |
+| `ClientEventBatch` | events: List(ClientMessage) | Bounded explicit batch for non-browser clients; generated browser clients do not replay local-only events |
 
 ### Server -> Client
 | Message | Fields | Purpose |
 |---------|--------|---------|
-| `ServerMount` | payload (HTML) | Initial live mount HTML only |
+| `ServerMount` | payload (HTML) | Reserved remount message; normal apps use SSR HTML plus `ServerModelSync` |
 | `ServerHeartbeatAck` | — | Heartbeat response |
 | `ServerError` | reason | Error notification |
 | `ServerModelSync` | model_json, version, ack_clock | Full authoritative model state |

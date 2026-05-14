@@ -69,10 +69,15 @@ diff_maps(Old, New, BasePath) ->
                 %% New key
                 [#{<<"op">> => <<"replace">>, <<"path">> => Path, <<"value">> => NewVal} | Acc];
             {ok, OldVal} ->
-                diff_values(OldVal, NewVal, Path) ++ Acc
+                prepend_all(diff_values(OldVal, NewVal, Path), Acc)
         end
     end, [], New),
     RemovedOps ++ ChangedOps.
+
+prepend_all([], Acc) ->
+    Acc;
+prepend_all([Item | Rest], Acc) ->
+    prepend_all(Rest, [Item | Acc]).
 
 %% Diff two arrays. Detects append pattern (common prefix + new items at end).
 -spec diff_arrays(list(), list(), binary()) -> list().
@@ -81,12 +86,11 @@ diff_arrays(Old, New, Path) ->
     NewLen = length(New),
     case NewLen > OldLen of
         true ->
-            %% Check for append: new list starts with all old items
-            {Prefix, Suffix} = lists:split(OldLen, New),
-            case Prefix =:= Old of
+            %% Check for append without copying the unchanged prefix.
+            case has_prefix(New, Old) of
                 true ->
                     %% Pure append — only send the new items
-                    [#{<<"op">> => <<"append">>, <<"path">> => Path, <<"value">> => Suffix}];
+                    [#{<<"op">> => <<"append">>, <<"path">> => Path, <<"value">> => lists:nthtail(OldLen, New)}];
                 false ->
                     %% Not a simple append — replace entire array
                     [#{<<"op">> => <<"replace">>, <<"path">> => Path, <<"value">> => New}]
@@ -99,6 +103,13 @@ diff_arrays(Old, New, Path) ->
                     [#{<<"op">> => <<"replace">>, <<"path">> => Path, <<"value">> => New}]
             end
     end.
+
+has_prefix(_List, []) ->
+    true;
+has_prefix([A | RestA], [A | RestB]) ->
+    has_prefix(RestA, RestB);
+has_prefix(_, _) ->
+    false.
 
 %% === Apply Engine ===
 

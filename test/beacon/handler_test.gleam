@@ -32,6 +32,25 @@ pub fn parameterized_handler_test() {
     handler.resolve(registry, id, "{\"value\":\"Alice\"}")
 }
 
+pub fn parameterized_handler_decodes_escaped_json_value_test() {
+  handler.start_render()
+  let id = handler.register_parameterized(SetName)
+  let registry = handler.finish_render()
+  let assert Ok(SetName("{\"card_title\":\"CDP route card\"}")) =
+    handler.resolve(
+      registry,
+      id,
+      "{\"value\":\"{\\\"card_title\\\":\\\"CDP route card\\\"}\"}",
+    )
+}
+
+pub fn parameterized_handler_rejects_missing_value_test() {
+  handler.start_render()
+  let id = handler.register_parameterized(SetName)
+  let registry = handler.finish_render()
+  let assert Error(_) = handler.resolve(registry, id, "{}")
+}
+
 pub fn unknown_handler_returns_error_test() {
   handler.start_render()
   let registry = handler.finish_render()

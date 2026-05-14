@@ -86,6 +86,33 @@ pub fn view(model: Model, local: Local) { model }
   let assert analyzer.ModelOnly = analyzer.msg_impact(reset)
 }
 
+pub fn client_msg_allowlist_is_detected_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg {
+  Increment
+  AdminReset
+}
+pub type ClientMsg {
+  Increment
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    Increment -> Model(count: model.count + 1)
+    AdminReset -> Model(count: 0)
+  }
+}
+
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert 2 = list.length(analysis.msg_variants)
+  let assert 1 = list.length(analysis.client_msg_variants)
+  let assert "Increment" = find_variant(analysis.client_msg_variants, "Increment").name
+}
+
 pub fn state_diagnostics_describe_model_local_server_shape_test() {
   let source =
     "
@@ -1433,4 +1460,120 @@ pub fn view(model: Model) { model }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert True = analysis.computed_fields == []
+}
+
+pub fn client_update_purity_rejects_store_call_test() {
+  let source =
+    "
+import beacon/store
+
+pub type Model { Model(count: Int) }
+pub type Msg { Save }
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    Save -> {
+      store.put(store.new(\"bad\"), \"count\", model.count)
+      model
+    }
+  }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Error(message) = analyzer.validate_client_update_purity(source)
+  let assert True = string.contains(message, "store.put")
+  let assert True = string.contains(message, "move this to on_update")
+}
+
+pub fn client_update_purity_rejects_random_call_test() {
+  let source =
+    "
+import gleam/int
+
+pub type Model { Model(count: Int) }
+pub type Msg { Roll }
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    Roll -> Model(count: int.random(10))
+  }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Error(message) = analyzer.validate_client_update_purity(source)
+  let assert True = string.contains(message, "int.random")
+}
+
+pub fn client_update_purity_rejects_captured_make_update_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg { Inc }
+pub fn make_update(shared: Int) -> fn(Model, Msg) -> Model {
+  fn(model: Model, msg: Msg) {
+    case msg { Inc -> Model(count: model.count + shared) }
+  }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Error(message) = analyzer.validate_client_update_purity(source)
+  let assert True = string.contains(message, "make_update")
+  let assert True = string.contains(message, "on_update")
+}
+
+pub fn client_contract_report_lists_state_and_codecs_test() {
+  let source =
+    "
+import beacon/store
+
+pub type Model { Model(count: Int) }
+pub type Local { Local(draft: String) }
+pub type Server { Server(secret: String) }
+pub type Msg {
+  Save
+  SetDraft(String)
+}
+pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
+  case msg {
+    Save -> #(Model(count: model.count + 1), local)
+    SetDraft(text) -> #(model, Local(draft: text))
+  }
+}
+pub fn view(model: Model, local: Local) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let report = analyzer.client_contract_report(source, analysis)
+  let joined = string.join(report, "\n")
+  let assert True = string.contains(joined, "Client contract")
+  let assert True = string.contains(joined, "Model: count: Int")
+  let assert True = string.contains(joined, "Local: draft: String")
+  let assert True = string.contains(joined, "Server: Server")
+  let assert True = string.contains(joined, "beacon/store")
+  let assert True = string.contains(joined, "Msg.SetDraft: LOCAL")
+  let assert True = string.contains(joined, "Generated codecs")
+}
+
+pub fn client_contract_summary_counts_client_allowlist_test() {
+  let source =
+    "
+pub type Model { Model(count: Int) }
+pub type Msg {
+  Increment
+  AdminReset
+}
+pub type ClientMsg {
+  Increment
+}
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    Increment -> Model(count: model.count + 1)
+    AdminReset -> Model(count: 0)
+  }
+}
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let summary = analyzer.client_contract_summary(analysis)
+  let assert True = string.contains(summary, "ClientMsg=allowlist")
+  let assert True = string.contains(summary, "browser messages=1")
+  let assert True = string.contains(summary, "server/internal messages=1")
+  let assert True = string.contains(summary, "render_model")
 }

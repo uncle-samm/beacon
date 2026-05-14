@@ -1,22 +1,15 @@
 /// AI Chat — demonstrates:
-/// - Real AI via glean + OpenRouter (Claude Sonnet 4.6)
-/// - Smooth character-by-character streaming (tokens buffered, dripped to client)
+/// - Server-side streaming without exposing secrets to the client
+/// - Smooth character-by-character streaming (text buffered, dripped to client)
 /// - Multi-turn conversation with full history
 /// - effect.from for spawning async work that dispatches to the runtime
 import beacon
 import beacon/effect
 import beacon/html
 import beacon/log
-import envoy
 import gleam/erlang/process
 import gleam/list
 import gleam/string
-import glean/agent.{type Agent}
-import glean/error as glean_error
-import glean/message
-import glean/providers/openrouter
-import glean/run
-import glean/stream
 
 // --- Types ---
 
@@ -55,7 +48,7 @@ pub fn init() -> #(Model, effect.Effect(Msg)) {
       messages: [
         ChatMessage(
           role: Assistant,
-          content: "Hello! I'm Claude, powered by OpenRouter. Ask me anything — I remember our full conversation!",
+          content: "Hello! This example streams a deterministic server-side response so CI can test effect dispatch without external services.",
         ),
       ],
       input_text: "",
@@ -146,51 +139,23 @@ fn start_streaming(messages: List(ChatMessage)) -> effect.Effect(Msg) {
   })
 }
 
-/// Fetches the AI stream and sends token chunks to the subject.
+/// Builds a deterministic stream and sends it to the subject.
 /// Sends "" (empty string) when done, or an error string prefixed with "ERR:".
 fn fetch_ai_stream(
   messages: List(ChatMessage),
   subject: process.Subject(String),
 ) -> Nil {
-  case envoy.get("OPENROUTER_API_KEY") {
-    Error(_) -> {
-      log.warning("ai_chat", "OPENROUTER_API_KEY is missing")
-      process.send(subject, "ERR:No API key. Set OPENROUTER_API_KEY.")
-      Nil
-    }
-    Ok(api_key) -> {
-      case string.is_empty(api_key) {
-        True -> {
-          log.warning("ai_chat", "OPENROUTER_API_KEY is empty")
-          process.send(subject, "ERR:No API key. Set OPENROUTER_API_KEY.")
-          Nil
-        }
-        False -> {
-          let my_agent = build_agent(api_key)
-          let glean_messages = to_glean_messages(messages)
+  let prompt = latest_user_text(messages, "your message")
+  let response =
+    "Server stream received: "
+    <> prompt
+    <> ". Beacon keeps this work on the server and sends state updates to the client."
 
-          case
-            run.stream_messages(my_agent, Nil, glean_messages, fn(event) {
-              case event {
-                stream.TextDelta(_, delta) -> process.send(subject, delta)
-                stream.StreamError(msg) -> {
-                  log.error("ai_chat", "Stream error: " <> msg)
-                  Nil
-                }
-                _ -> log.debug("ai_chat", "Ignored non-text stream event")
-              }
-            })
-          {
-            Ok(_) -> process.send(subject, "")
-            Error(err) -> {
-              log.error("ai_chat", "AI error: " <> glean_error.to_string(err))
-              process.send(subject, "ERR:" <> glean_error.to_string(err))
-            }
-          }
-        }
-      }
-    }
-  }
+  log.info("ai_chat", "Starting deterministic response stream")
+  process.send(subject, response)
+  sleep(20)
+  process.send(subject, "")
+  Nil
 }
 
 /// Reads token chunks from the subject and dispatches small character batches
@@ -264,21 +229,17 @@ fn take_graphemes_loop(
   }
 }
 
-fn build_agent(api_key: String) -> Agent(Nil) {
-  openrouter.new(api_key: api_key, model: "anthropic/claude-sonnet-4-6")
-  |> agent.new
-  |> agent.system(
-    "You are a helpful, concise assistant. Keep responses brief — 2-3 sentences max unless asked for detail.",
-  )
-}
-
-fn to_glean_messages(messages: List(ChatMessage)) -> List(message.Message) {
-  list.map(messages, fn(m) {
-    case m.role {
-      User -> message.user(m.content)
-      Assistant -> message.assistant(m.content)
+fn latest_user_text(messages: List(ChatMessage), default_text: String) -> String {
+  case messages {
+    [] -> default_text
+    [message, ..rest] -> {
+      let next = case message.role {
+        User -> message.content
+        Assistant -> default_text
+      }
+      latest_user_text(rest, next)
     }
-  })
+  }
 }
 
 @external(erlang, "timer", "sleep")

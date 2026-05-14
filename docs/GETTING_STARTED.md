@@ -57,12 +57,9 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
 pub fn main() {
   beacon.app(init, update, view)
   |> beacon.title("My Counter")
-  |> beacon.head_html("<link rel='stylesheet' href='/styles.css'>")
   |> beacon.start(8080)
 }
 ```
-
-`beacon.head_html(html_string)` injects custom content into the `<head>` of the SSR page -- use it for stylesheets, meta tags, fonts, or any other head content your app needs.
 
 ### 4. Run it
 
@@ -101,6 +98,29 @@ normal updates are model sync/patch messages and the browser renders from the
 generated client code. If the generated client renderer cannot be built, startup
 fails instead of serving a degraded app.
 
+Live events use a generated event decoder contract. Generated clients
+resolve DOM handlers in the browser, encode the typed `Msg`, and the server
+decodes that envelope before running the authoritative update. If the generated
+contract cannot be built, startup fails; Beacon does not render `view` on the
+server to decode events after SSR.
+
+For privileged/internal server messages, add a `ClientMsg` type containing only
+the `Msg` variants that may come from browser events:
+
+```gleam
+pub type Msg {
+  Increment
+  AdminReset
+}
+
+pub type ClientMsg {
+  Increment
+}
+```
+
+The generated contract will decode browser events into `Increment` only;
+`AdminReset` remains server/internal.
+
 The current public API still uses typed entrypoints such as `app`,
 `app_with_local`, and `app_with_server` because Gleam does not support overloaded
 functions. Treat them as type-specific doors into the same runtime model, not as
@@ -121,6 +141,19 @@ beacon.app_with_local(init, init_local, update, view)
 
 `init_local(model)` receives the initial `Model`, so the first client-only values
 can be derived from server-known state without exposing `Server`.
+
+For submit boundaries that depend on current browser draft values, prefer the
+snapshot helper:
+
+```gleam
+html.form([beacon.on_submit_local(fn(fields_json) { Save(fields_json) })], [
+  html.input([html.name("title"), beacon.on_input(SetTitle)]),
+])
+```
+
+`on_submit_local` sends a live form snapshot as JSON event data. This avoids the
+stale-handler bug caused by closing over server-side Local in
+`on_submit(Save(local.draft))`.
 
 ### Routing
 
@@ -188,10 +221,13 @@ beacon.app_with_local(init, init_local, update, view)
 
 ```gleam
 import beacon/api
+import gleam/json
 
 beacon.app(init, update, view)
 |> beacon.api_routes(api.routes([
-  api.get("/api/status", fn(_req) { api.json(200, "{\"ok\":true}") }),
+  api.get("/api/status", fn(_req) {
+    api.json_value(200, json.object([#("ok", json.bool(True))]))
+  }),
   api.post("/api/webhook", handle_webhook),
 ]))
 |> beacon.start(8080)
@@ -199,8 +235,37 @@ beacon.app(init, update, view)
 
 API routes run **before** SSR/static file routing. Unknown method/path combinations fall through to normal page rendering.
 
-Use `beacon/transport/http.read_body(req, max_bytes)` to read POST bodies.
-For custom matching, pass a raw `fn(req) -> Option(Response(ResponseBody))` to `beacon.api_routes`.
+For request bodies, prefer the high-level helpers:
+
+```gleam
+fn handle_login(req) {
+  case api.read_form(req, 4096) {
+    Ok(fields) -> {
+      case api.form_field(fields, "username") {
+        Ok(username) -> api.text(200, "hello " <> username)
+        Error(reason) -> api.text(400, reason)
+      }
+    }
+    Error(reason) -> api.text(400, reason)
+  }
+}
+```
+
+Use `api.read_text(req, max_bytes)` for raw UTF-8 bodies. For fully custom
+matching, pass a raw `fn(req) -> Option(Response(ResponseBody))` to
+`beacon.api_routes`.
+
+### Advanced: Custom Head HTML
+
+```gleam
+beacon.app(init, update, view)
+|> beacon.head_html("<link rel='stylesheet' href='/styles.css'>")
+|> beacon.start(8080)
+```
+
+`beacon.head_html(html_string)` injects trusted content into the `<head>` of the
+SSR page. Use it for static stylesheets, meta tags, or fonts. Do not pass user
+input to `head_html`.
 
 ### Cookies
 
@@ -246,29 +311,27 @@ let store = session.new_store("my_app_sessions")
 let auth_config = auth.default_session_config()
 
 beacon.app_with_server(init, init_server, update, view)
-|> beacon.api_routes(api.routes([
-  api.post("/api/login", fn(req) {
-    let assert Ok(user_id) = authenticate_login(req)
-    let login = auth.create_login(store, user_id)
-
-    api.json(200, "{\"csrf\":\"" <> login.csrf_token <> "\"}")
-    |> auth.with_session_cookie(login.session, auth_config)
-  }),
-  api.get("/api/me", auth.authenticated(store, auth_config, fn(_req, _sess, user) {
-    api.json(200, "{\"user\":\"" <> user <> "\"}")
-  })),
-  api.post("/api/logout", auth.csrf_authenticated(store, auth_config, fn(_req, sess, _user) {
-    auth.logout_response(store, sess, api.text(200, "Logged out"), auth_config)
-  })),
-]))
-|> beacon.ws_auth(auth.ws_session_auth(store, auth_config))
+|> beacon.api_routes(auth.session_routes(store, auth_config, authenticate_login))
+|> beacon.ws_auth(auth.protect_ws(store, auth_config))
 |> beacon.start(8080)
+
+fn authenticate_login(req) {
+  case api.read_form(req, 4096) {
+    Ok(fields) -> api.form_field(fields, "username")
+    Error(reason) -> Error(reason)
+  }
+}
 ```
 
 For localhost HTTP development, use `auth.dev_session_config()` explicitly. The
 default config keeps the cookie `Secure`, `HttpOnly`, and `SameSite=Lax`.
 
-### WebSocket Authentication
+Use `auth.login_route`, `auth.current_user_route`, and `auth.logout_route` when
+you want the standard JSON/cookie behavior but custom route names. Use
+`auth.protect_api` and `auth.protect_api_with_csrf` for custom authenticated
+API handlers.
+
+### Advanced: WebSocket Authentication
 
 ```gleam
 beacon.app(init, update, view)
@@ -283,40 +346,54 @@ beacon.app(init, update, view)
 
 Runs before the WebSocket upgrade handshake. Return `Ok(Nil)` to allow, `Error(reason)` to reject with 401.
 
-### Request-Aware Server Init (ws_init)
+If you are using standard Beacon sessions, prefer
+`auth.protect_ws(store, auth_config)` over a custom hook.
 
-With `app_with_server`, the `init_server` function takes no arguments. Use `ws_init` to replace it with a function that receives the HTTP request -- so you can read cookies, headers, and query params to populate server state:
+### Request-Aware Server Init
+
+With `app_with_server`, the `init_server` function takes no arguments. Use
+`auth.init_from_session` when SSR should render a signed-in model on first
+paint:
 
 ```gleam
 beacon.app_with_server(init, init_server, update, view)
-|> beacon.ws_auth(fn(req) {
-  case beacon.get_cookie(req, "session") {
-    Ok(_) -> Ok(Nil)
-    Error(Nil) -> Error("No session")
-  }
-})
-|> beacon.ws_init(fn(req) {
-  let user_id = case beacon.get_cookie(req, "session") {
-    Ok(token) -> validate_and_get_user_id(token)
-    Error(Nil) -> None
-  }
-  #(Model(count: 0), ServerState(user_id: user_id, db_pool: get_pool()))
-})
+|> beacon.ws_auth(auth.protect_ws(store, auth_config))
+|> beacon.ws_init(auth.init_from_session(
+  store,
+  auth_config,
+  fn(_req) { #(init(), init_server()) },
+  fn(req, sess, user_id) {
+    #(init_authenticated(req.path, sess, user_id), init_server())
+  },
+))
 |> beacon.start(8080)
 ```
 
-When `ws_init` is set, it replaces both `init` and `init_server` -- it returns the full combined state `#(Model, Server)`. Without `ws_init`, the original `init` + `init_server` functions are used (backwards compatible).
+`beacon.ws_init` is the raw hook underneath this helper. When set, it replaces
+both `init` and `init_server` and returns the full combined state
+`#(Model, Server)`, so keep it for request-aware initialization only.
 
 ### Effects and Async
 
 For apps that need side effects (HTTP calls, database queries, timers):
 
 ```gleam
-beacon.app_with_effects(init, update, view)
+beacon.app(init, update, view)
+|> beacon.on_update(fn(model, msg) {
+  case msg {
+    Saved -> effect.from(fn(_) { persist(model) })
+    _ -> effect.none()
+  }
+})
 |> beacon.start(8080)
 ```
 
-Where `init` returns `#(model, Effect(msg))` and `update` returns `#(model, Effect(msg))`.
+Keep `update` pure and deterministic. Put stores, PubSub, HTTP, env reads,
+random values, and other BEAM-only work in `on_update`; the build/linter will
+reject those calls inside client-visible `update`. `app_with_effects` remains
+available for server-authoritative effect apps, but the recommended shape is
+`app(init, update, view) |> on_update(...)` when the app should also produce a
+client renderer.
 
 Available effects:
 - `effect.from(fn(dispatch) { ... })` -- run async work, dispatch messages back
@@ -377,6 +454,8 @@ html.form([beacon.on_submit(FormSubmitted)], [
 ```
 
 `on_submit` prevents the default form submission and sends the message to the server.
+Use `on_submit_local(fn(fields_json) { ... })` when the submit depends on the
+current form values rather than a fixed message.
 
 ## Production Deployment
 

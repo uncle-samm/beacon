@@ -8,6 +8,8 @@
 import beacon/build/analyzer
 import beacon/log
 import glance
+import gleam/int
+import gleam/json
 import gleam/list
 import gleam/option
 import gleam/string
@@ -452,13 +454,21 @@ fn compile_module(path: String, source: String) -> Result(Nil, String) {
       list.each(analyzer.state_diagnostics(analysis), fn(line) {
         log.info("beacon.build", line)
       })
+      list.each(analyzer.client_contract_report(source, analysis), fn(line) {
+        log.info("beacon.build", line)
+      })
+      log.info("beacon.build", analyzer.client_contract_summary(analysis))
       list.each(analysis.msg_variants, fn(v) {
         let label = analyzer.msg_impact_label(analyzer.msg_impact(v))
         log.info("beacon.build", "  " <> v.name <> " → " <> label)
       })
 
+      use Nil <- result_try(analyzer.validate_client_update_purity(source))
+      use Nil <- result_try(validate_event_contract(analysis))
+
       // Generate beacon_codec.gleam — model encoder for state-over-the-wire
       let module_path = extract_module_path(path)
+      use Nil <- result_try(write_contract_report(path, module_path, analysis))
       generate_codec_module(module_path, analysis, source)
 
       case can_build_enhanced_bundle(source, analysis) {
@@ -634,6 +644,8 @@ pub fn can_build_enhanced_bundle(
   source: String,
   analysis: analyzer.Analysis,
 ) -> Result(Bool, String) {
+  use Nil <- result_try(analyzer.validate_client_update_purity(source))
+  use Nil <- result_try(validate_event_contract(analysis))
   case analyzer.extract_client_source(source) {
     Ok(client_source) -> {
       let has_model = string.contains(client_source, "pub type Model")
@@ -652,8 +664,189 @@ pub fn can_build_enhanced_bundle(
   }
 }
 
+fn validate_event_contract(analysis: analyzer.Analysis) -> Result(Nil, String) {
+  let unsupported =
+    client_event_variants(analysis)
+    |> list.flat_map(fn(variant) {
+      variant.fields
+      |> list.filter_map(fn(field) {
+        case event_field_supported(field, analysis) {
+          True -> Error(Nil)
+          False ->
+            Ok(variant.name <> "." <> field.name <> ": " <> field.type_name)
+        }
+      })
+    })
+  case unsupported {
+    [] -> Ok(Nil)
+    fields ->
+      Error(
+        "Unsupported generated event contract. Beacon no longer decodes events by server-rendering views; every Msg payload must have a generated JSON codec. Unsupported fields: "
+        <> string.join(fields, ", "),
+      )
+  }
+}
+
+fn client_event_variants(
+  analysis: analyzer.Analysis,
+) -> List(analyzer.MsgVariant) {
+  case analysis.client_msg_variants {
+    [] -> analysis.msg_variants
+    variants -> variants
+  }
+}
+
+fn event_field_supported(
+  field: analyzer.TypeField,
+  analysis: analyzer.Analysis,
+) -> Bool {
+  case field.type_name {
+    "Msg" if field.module != "" -> True
+    "Int" | "Float" | "Bool" | "String" -> True
+    "Option" ->
+      case field.inner_type {
+        "Int" | "Float" | "Bool" | "String" -> True
+        inner ->
+          case
+            find_custom_type(analysis.custom_types, inner, field.inner_module)
+          {
+            Ok(_) -> True
+            Error(_) -> False
+          }
+      }
+    "List" ->
+      case field.inner_type {
+        "Int" | "Float" | "Bool" | "String" -> True
+        inner ->
+          case
+            find_custom_type(analysis.custom_types, inner, field.inner_module)
+          {
+            Ok(_) -> True
+            Error(_) -> False
+          }
+      }
+    _ ->
+      case find_enum_type(analysis.enum_types, field.type_name, field.module) {
+        Ok(_) -> True
+        Error(_) ->
+          case
+            find_custom_type(
+              analysis.custom_types,
+              field.type_name,
+              field.module,
+            )
+          {
+            Ok(_) -> True
+            Error(_) -> False
+          }
+      }
+  }
+}
+
+fn find_external_msg_type(
+  analysis: analyzer.Analysis,
+  module_name: String,
+) -> Result(analyzer.MsgTypeInfo, Nil) {
+  list.find(analysis.external_msg_types, fn(msg_type) {
+    msg_type.module == module_name
+  })
+}
+
 fn unsupported_client_bundle_shape_message() -> String {
   "Unsupported app shape for client-state rendering. Beacon requires generated client-visible Model, Msg, update, and view code so SSR is only the first render and live updates are state sync/patch messages. Move those definitions into a supported client-visible module shape or extend the AST/codegen path before starting this app."
+}
+
+fn write_contract_report(
+  source_path: String,
+  module_path: String,
+  analysis: analyzer.Analysis,
+) -> Result(Nil, String) {
+  use Nil <- result_try(case simplifile.create_directory_all("build") {
+    Ok(Nil) -> Ok(Nil)
+    Error(err) ->
+      Error(
+        "Failed to create build directory for contract report: "
+        <> string.inspect(err),
+      )
+  })
+  let contract =
+    json.object([
+      #("source", json.string(source_path)),
+      #("module", json.string(module_path)),
+      #("rendering", json.string("ssr-first-then-client-state")),
+      #("model", fields_json(analysis.model_fields)),
+      #("local", fields_json(analysis.local_fields)),
+      #("server", fields_json(analysis.server_fields)),
+      #("has_local", json.bool(analysis.has_local)),
+      #("has_server", json.bool(analysis.has_server)),
+      #("messages", msg_variants_json(analysis.msg_variants)),
+      #("client_messages", msg_variants_json(client_event_variants(analysis))),
+      #(
+        "external_messages",
+        json.array(analysis.external_msg_types, fn(info) {
+          json.object([
+            #("module", json.string(info.module)),
+            #("variants", msg_variants_json(info.variants)),
+          ])
+        }),
+      ),
+      #(
+        "generated_codecs",
+        json.array(
+          [
+            "encode_model",
+            "decode_model",
+            "decode_event",
+            "encode_msg",
+            "render_model",
+          ],
+          json.string,
+        ),
+      ),
+      #("summary", json.string(analyzer.client_contract_summary(analysis))),
+      #("skipped_server_state", json.bool(analysis.has_server)),
+    ])
+    |> json.to_string
+  case simplifile.write("build/beacon_contract.json", contract) {
+    Ok(Nil) -> {
+      log.info(
+        "beacon.build",
+        "Generated contract report: build/beacon_contract.json",
+      )
+      Ok(Nil)
+    }
+    Error(err) ->
+      Error(
+        "Failed to write build/beacon_contract.json: " <> string.inspect(err),
+      )
+  }
+}
+
+fn fields_json(fields: List(analyzer.TypeField)) -> json.Json {
+  json.array(fields, fn(field) {
+    json.object([
+      #("name", json.string(field.name)),
+      #("type", json.string(field.type_name)),
+      #("inner_type", json.string(field.inner_type)),
+      #("module", json.string(field.module)),
+      #("inner_module", json.string(field.inner_module)),
+    ])
+  })
+}
+
+fn msg_variants_json(variants: List(analyzer.MsgVariant)) -> json.Json {
+  json.array(variants, fn(variant) {
+    json.object([
+      #("name", json.string(variant.name)),
+      #("fields", fields_json(variant.fields)),
+      #("affects_model", json.bool(variant.affects_model)),
+      #("affects_local", json.bool(variant.affects_local)),
+      #(
+        "impact",
+        json.string(analyzer.msg_impact_label(analyzer.msg_impact(variant))),
+      ),
+    ])
+  })
 }
 
 /// Create all required directories for the enhanced build.
@@ -789,10 +982,9 @@ fn build_enhanced_bundle(
     },
   )
 
-  let compile_result = run_command("cd '" <> dir <> "' && gleam build 2>&1")
-  case string.contains(compile_result, "Compiled in") {
-    False -> Error("JS compilation failed:\n" <> compile_result)
-    True -> {
+  case run_program(dir, "gleam", ["build"]) {
+    Error(compile_result) -> Error("JS compilation failed:\n" <> compile_result)
+    Ok(_compile_result) -> {
       use Nil <- result_try(
         case simplifile.create_directory_all("priv/static") {
           Ok(Nil) -> Ok(Nil)
@@ -812,17 +1004,19 @@ fn build_enhanced_bundle(
       let hash = generate_safe_hash()
       let filename = "beacon_client_" <> hash <> ".js"
       use Nil <- result_try(clean_old_client_bundles("priv/static"))
-      let result =
-        run_command(
-          "cd '"
-          <> dir
-          <> "' && npx esbuild bundle_entry.mjs --bundle --format=iife --global-name=Beacon --outfile=../../priv/static/"
-          <> filename
-          <> " --minify 2>&1",
-        )
-      case string.contains(result, "Done") || string.contains(result, ".js") {
-        False -> Error("esbuild failed:\n" <> result)
-        True -> {
+      case
+        run_program(dir, "npx", [
+          "esbuild",
+          "bundle_entry.mjs",
+          "--bundle",
+          "--format=iife",
+          "--global-name=Beacon",
+          "--outfile=../../priv/static/" <> filename,
+          "--minify",
+        ])
+      {
+        Error(result) -> Error("esbuild failed:\n" <> result)
+        Ok(_result) -> {
           case
             simplifile.write("priv/static/beacon_client.manifest", filename)
           {
@@ -1094,6 +1288,11 @@ pub fn on_submit(msg: msg) -> Attr {
   element.EventAttr(event_name: \"submit\", handler_id: id, debounce_ms: None)
 }
 
+pub fn on_submit_local(callback: fn(String) -> msg) -> Attr {
+  let id = handler.register_parameterized(callback)
+  element.EventAttr(event_name: \"submit-local\", handler_id: id, debounce_ms: None)
+}
+
 pub fn on_change(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
   element.EventAttr(event_name: \"change\", handler_id: id, debounce_ms: None)
@@ -1104,8 +1303,8 @@ pub fn on_mousedown(callback: fn(String) -> msg) -> Attr {
   element.EventAttr(event_name: \"mousedown\", handler_id: id, debounce_ms: None)
 }
 
-pub fn on_mouseup(msg: msg) -> Attr {
-  let id = handler.register_simple(msg)
+pub fn on_mouseup(callback: fn(String) -> msg) -> Attr {
+  let id = handler.register_parameterized(callback)
   element.EventAttr(event_name: \"mouseup\", handler_id: id, debounce_ms: None)
 }
 
@@ -1362,6 +1561,10 @@ fn generate_entry_point(
     "" -> ""
     imports -> imports <> "\n"
   }
+  let option_import = case analysis_uses_option(analysis) {
+    True -> "import gleam/option\n"
+    False -> ""
+  }
 
   // State-over-the-wire: client only needs view + decode_model + handler registry.
   // init() returns a stub model — the real model comes from server via model_sync.
@@ -1372,7 +1575,7 @@ import beacon/element
 import beacon_client/handler
 import gleam/dynamic/decode
 import gleam/json
-" <> entry_ext_imports_section <> "
+" <> option_import <> entry_ext_imports_section <> "
 /// Stub init — the real model comes from server via model_sync.
 pub fn init() -> app.Model {
   " <> default_model <> "
@@ -1408,8 +1611,17 @@ pub fn decode_model(json_str: String) -> Result(app.Model, String) {
 }
 
 " <> generate_client_encode_model(analysis, source) <> "
+" <> generate_client_encode_msg(analysis) <> "
 " <> generate_local_decoder(analysis, source) <> "
 "
+}
+
+fn analysis_uses_option(analysis: analyzer.Analysis) -> Bool {
+  list.any(analysis.model_fields, fn(f) { f.type_name == "Option" })
+  || list.any(analysis.local_fields, fn(f) { f.type_name == "Option" })
+  || list.any(analysis.msg_variants, fn(v) {
+    list.any(v.fields, fn(f) { f.type_name == "Option" })
+  })
 }
 
 fn default_client_value_for_field(
@@ -1512,6 +1724,200 @@ pub fn encode_model(model: app.Model, local: app.Local) -> String {
 }
 "
     }
+  }
+}
+
+/// Generate client-side Msg encoding for the mandatory event contract.
+/// The browser resolves the DOM handler locally, encodes the resulting Msg,
+/// and the server decodes that JSON instead of re-rendering view handlers.
+fn generate_client_encode_msg(analysis: analyzer.Analysis) -> String {
+  let nested =
+    analysis.external_msg_types
+    |> list.map(fn(msg_type) {
+      generate_client_msg_encoder_fn(
+        "client_encode_msg_" <> msg_type.module,
+        msg_type.module,
+        msg_type.module <> ".Msg",
+        msg_type.variants,
+        analysis,
+        False,
+      )
+    })
+    |> string.join("\n")
+  let top =
+    generate_client_msg_encoder_fn(
+      "encode_msg",
+      "app",
+      "app.Msg",
+      client_event_variants(analysis),
+      analysis,
+      uses_client_msg_allowlist(analysis),
+    )
+
+  "\n" <> nested <> "\n" <> top <> "\n"
+}
+
+fn generate_client_msg_encoder_fn(
+  fn_name: String,
+  constructor_prefix: String,
+  msg_type: String,
+  variants: List(analyzer.MsgVariant),
+  analysis: analyzer.Analysis,
+  add_forbidden_arm: Bool,
+) -> String {
+  let arms =
+    list.map(variants, fn(variant) {
+      let args =
+        variant.fields
+        |> list.index_map(fn(_field, idx) { "arg" <> int.to_string(idx) })
+      let pattern = case args {
+        [] -> constructor_prefix <> "." <> variant.name
+        _ ->
+          constructor_prefix
+          <> "."
+          <> variant.name
+          <> "("
+          <> string.join(args, ", ")
+          <> ")"
+      }
+      let arg_entries =
+        variant.fields
+        |> list.index_map(fn(field, idx) {
+          let arg_name = "arg" <> int.to_string(idx)
+          "      #(\""
+          <> arg_name
+          <> "\", "
+          <> client_event_json_expr(arg_name, field, analysis)
+          <> ")"
+        })
+      let entries =
+        list.append(
+          ["      #(\"tag\", json.string(\"" <> variant.name <> "\"))"],
+          arg_entries,
+        )
+      "    "
+      <> pattern
+      <> " -> json.object([\n"
+      <> string.join(entries, ",\n")
+      <> "\n    ])"
+    })
+  let all_arms = case add_forbidden_arm {
+    True ->
+      list.append(arms, [
+        "    _ -> json.object([\n      #(\"tag\", json.string(\"__forbidden_client_msg\"))\n    ])",
+      ])
+    False -> arms
+  }
+
+  "pub fn "
+  <> fn_name
+  <> "(msg: "
+  <> msg_type
+  <> ") -> String {\n  let payload = case msg {\n"
+  <> string.join(all_arms, "\n")
+  <> "\n  }\n  json.to_string(payload)\n}\n"
+}
+
+fn uses_client_msg_allowlist(analysis: analyzer.Analysis) -> Bool {
+  case analysis.client_msg_variants {
+    [] -> False
+    variants ->
+      list.length(variants) != list.length(analysis.msg_variants)
+      || list.any(analysis.msg_variants, fn(msg_variant) {
+        !list.any(variants, fn(client_variant) {
+          client_variant.name == msg_variant.name
+        })
+      })
+  }
+}
+
+fn client_event_json_expr(
+  value: String,
+  field: analyzer.TypeField,
+  analysis: analyzer.Analysis,
+) -> String {
+  case field.type_name {
+    "Msg" if field.module != "" ->
+      "json.string(client_encode_msg_" <> field.module <> "(" <> value <> "))"
+    "Int" -> "json.int(" <> value <> ")"
+    "Float" -> "json.float(" <> value <> ")"
+    "Bool" -> "json.bool(" <> value <> ")"
+    "String" -> "json.string(" <> value <> ")"
+    "Option" -> {
+      let inner_encoder = case field.inner_type {
+        "Int" -> "json.int(v)"
+        "Float" -> "json.float(v)"
+        "Bool" -> "json.bool(v)"
+        "String" -> "json.string(v)"
+        inner ->
+          case find_enum_type(analysis.enum_types, inner, field.inner_module) {
+            Ok(et) ->
+              "json.string(client_"
+              <> encoder_name(et.module, et.name)
+              <> "(v))"
+            Error(_) ->
+              case
+                find_custom_type(
+                  analysis.custom_types,
+                  inner,
+                  field.inner_module,
+                )
+              {
+                Ok(ct) -> "client_" <> encoder_name(ct.module, ct.name) <> "(v)"
+                Error(_) -> "json.string(v)"
+              }
+          }
+      }
+      "case "
+      <> value
+      <> " { option.Some(v) -> "
+      <> inner_encoder
+      <> "\n        option.None -> json.null() }"
+    }
+    "List" ->
+      case field.inner_type {
+        "Int" -> "json.array(" <> value <> ", json.int)"
+        "Float" -> "json.array(" <> value <> ", json.float)"
+        "Bool" -> "json.array(" <> value <> ", json.bool)"
+        "String" -> "json.array(" <> value <> ", json.string)"
+        inner ->
+          case
+            find_custom_type(analysis.custom_types, inner, field.inner_module)
+          {
+            Ok(ct) ->
+              "json.array("
+              <> value
+              <> ", client_"
+              <> encoder_name(ct.module, ct.name)
+              <> ")"
+            Error(_) -> "json.array(" <> value <> ", fn(_) { json.null() })"
+          }
+      }
+    _ ->
+      case find_enum_type(analysis.enum_types, field.type_name, field.module) {
+        Ok(et) ->
+          "json.string(client_"
+          <> encoder_name(et.module, et.name)
+          <> "("
+          <> value
+          <> "))"
+        Error(_) ->
+          case
+            find_custom_type(
+              analysis.custom_types,
+              field.type_name,
+              field.module,
+            )
+          {
+            Ok(ct) ->
+              "client_"
+              <> encoder_name(ct.module, ct.name)
+              <> "("
+              <> value
+              <> ")"
+            Error(_) -> "json.string(\"<unsupported>\")"
+          }
+      }
   }
 }
 
@@ -1792,17 +2198,22 @@ pub fn build_base_client() -> Result(Nil, String) {
   })
 
   // Ensure beacon_client is built (JS target)
-  let bc_build_result =
-    run_command(
-      "cd '"
-      <> beacon_root
-      <> "/beacon_client' && gleam build --target javascript 2>&1",
-    )
+  use bc_build_result <- result_try(
+    case
+      run_program(beacon_root <> "/beacon_client", "gleam", [
+        "build",
+        "--target",
+        "javascript",
+      ])
+    {
+      Ok(output) -> Ok(output)
+      Error(reason) -> Error("beacon_client JS build failed:\n" <> reason)
+    },
+  )
   log.debug("beacon.build", "beacon_client build: " <> bc_build_result)
 
   // Resolve absolute path for the entry point import
-  let abs_bc_js = run_command("cd '" <> bc_js <> "' && pwd")
-  let abs_bc_path = string.trim(abs_bc_js)
+  use abs_bc_path <- result_try(absolute_path(bc_js))
 
   // Create entry point — just import the client module.
   // It auto-boots via the data-beacon-auto script attribute detection.
@@ -1822,19 +2233,17 @@ pub fn build_base_client() -> Result(Nil, String) {
           case clean_old_client_bundles("priv/static") {
             Error(reason) -> Error(reason)
             Ok(Nil) -> {
-              let result =
-                run_command(
-                  "cd '"
-                  <> dir
-                  <> "' && npx esbuild entry.mjs --bundle --format=iife --outfile=../../priv/static/"
-                  <> filename
-                  <> " --minify 2>&1",
-                )
               case
-                string.contains(result, "Done")
-                || string.contains(result, ".js")
+                run_program(dir, "npx", [
+                  "esbuild",
+                  "entry.mjs",
+                  "--bundle",
+                  "--format=iife",
+                  "--outfile=../../priv/static/" <> filename,
+                  "--minify",
+                ])
               {
-                True -> {
+                Ok(_result) -> {
                   case
                     simplifile.write(
                       "priv/static/beacon_client.manifest",
@@ -1852,7 +2261,8 @@ pub fn build_base_client() -> Result(Nil, String) {
                       Error("Failed to write manifest: " <> string.inspect(err))
                   }
                 }
-                False -> Error("esbuild failed for base client:\n" <> result)
+                Error(result) ->
+                  Error("esbuild failed for base client:\n" <> result)
               }
             }
           }
@@ -2461,7 +2871,14 @@ pub fn encode_model(state: "
     <> "  json.object([\n"
     <> string.join(all_field_encoders, ",\n")
     <> ",\n  ])\n  |> json.to_string\n}\n"
+    <> generate_server_render_model(
+      module_name,
+      param_type,
+      model_extract,
+      analysis,
+    )
     <> generate_server_decode_model(module_name, analysis, source)
+    <> generate_server_decode_event(module_name, analysis)
     <> generate_substate_encoders(module_name, analysis)
 
   let optional_imports =
@@ -2487,7 +2904,7 @@ pub fn encode_model(state: "
             "" -> []
             imports -> [string.trim(imports)]
           },
-          ["import gleam/json", ..optional_imports],
+          ["import beacon/element", "import gleam/json", ..optional_imports],
         ),
       ),
       "\n",
@@ -2506,6 +2923,25 @@ pub fn encode_model(state: "
         "Failed to write codec " <> codec_path <> ": " <> string.inspect(err),
       )
   }
+}
+
+fn generate_server_render_model(
+  module_name: String,
+  param_type: String,
+  model_extract: String,
+  analysis: analyzer.Analysis,
+) -> String {
+  let view_call = case analysis.has_local {
+    True -> module_name <> ".view(model, local)"
+    False -> module_name <> ".view(model)"
+  }
+  "\n/// Render the model with the same generated server contract used for SSR.\npub fn render_model(state: "
+  <> param_type
+  <> ") -> String {\n"
+  <> model_extract
+  <> "  "
+  <> view_call
+  <> "\n  |> element.to_string\n}\n"
 }
 
 /// Generate per-substate encoder functions + substate_names + encode_flat_fields.
@@ -2743,6 +3179,211 @@ fn generate_server_decode_model(
       <> "    Error(_) -> Error(\"Failed to decode model+local\")\n"
       <> "  }\n}\n"
     }
+  }
+}
+
+fn generate_server_decode_event(
+  module_name: String,
+  analysis: analyzer.Analysis,
+) -> String {
+  let nested_decoders =
+    analysis.external_msg_types
+    |> list.map(fn(msg_type) {
+      generate_server_decode_msg_fn(
+        "decode_msg_" <> msg_type.module,
+        msg_type.module,
+        msg_type.module <> ".Msg",
+        msg_type.variants,
+        analysis,
+      )
+    })
+    |> string.join("\n")
+  let top_decoder =
+    generate_server_decode_msg_fn(
+      "decode_msg",
+      module_name,
+      module_name <> ".Msg",
+      client_event_variants(analysis),
+      analysis,
+    )
+
+  "\n/// Decode the generated client event contract. Live event decoding never\n/// renders the server view or reads the handler registry.\npub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result("
+  <> module_name
+  <> ".Msg, String) {\n"
+  <> "  let envelope_decoder = {\n"
+  <> "    use msg_json <- decode.field(\"__beacon_msg\", decode.string)\n"
+  <> "    decode.success(msg_json)\n"
+  <> "  }\n"
+  <> "  case json.parse(data, envelope_decoder) {\n"
+  <> "    Ok(msg_json) -> decode_msg(msg_json)\n"
+  <> "    Error(_) -> Error(\"Client event missing generated Beacon message envelope\")\n"
+  <> "  }\n"
+  <> "}\n\n"
+  <> nested_decoders
+  <> "\n"
+  <> top_decoder
+}
+
+fn generate_server_decode_msg_fn(
+  fn_name: String,
+  constructor_prefix: String,
+  msg_type: String,
+  variants: List(analyzer.MsgVariant),
+  analysis: analyzer.Analysis,
+) -> String {
+  let arms =
+    list.map(variants, fn(variant) {
+      let decode_fields =
+        variant.fields
+        |> list.index_map(fn(field, idx) {
+          let arg_name = "arg" <> int.to_string(idx)
+          let decoder = server_event_decoder_for_field(field, analysis)
+          "      use "
+          <> arg_name
+          <> " <- decode.field(\""
+          <> arg_name
+          <> "\", "
+          <> decoder
+          <> ")"
+        })
+      let constructor_args =
+        variant.fields
+        |> list.index_map(fn(field, idx) {
+          let arg_name = "arg" <> int.to_string(idx)
+          case
+            find_enum_type(analysis.enum_types, field.type_name, field.module)
+          {
+            Ok(et) ->
+              "server_"
+              <> decoder_name(et.module, et.name)
+              <> "_value("
+              <> arg_name
+              <> ")"
+            Error(_) -> arg_name
+          }
+        })
+      let constructor =
+        constructor_prefix
+        <> "."
+        <> variant.name
+        <> case constructor_args {
+          [] -> ""
+          _ -> "(" <> string.join(constructor_args, ", ") <> ")"
+        }
+      "    \""
+      <> variant.name
+      <> "\" -> {\n"
+      <> "      let msg_decoder = {\n"
+      <> string.join(decode_fields, "\n")
+      <> case decode_fields {
+        [] -> ""
+        _ -> "\n"
+      }
+      <> "      decode.success("
+      <> constructor
+      <> ")\n"
+      <> "      }\n"
+      <> "      case json.parse(json_str, msg_decoder) {\n"
+      <> "        Ok(msg) -> Ok(msg)\n"
+      <> "        Error(_) -> Error(\"Generated Beacon message payload did not match tag "
+      <> variant.name
+      <> "\")\n"
+      <> "      }\n"
+      <> "    }"
+    })
+
+  "fn "
+  <> fn_name
+  <> "(json_str: String) -> Result("
+  <> msg_type
+  <> ", String) {\n"
+  <> "  let tag_decoder = {\n"
+  <> "    use tag <- decode.field(\"tag\", decode.string)\n"
+  <> "    decode.success(tag)\n"
+  <> "  }\n"
+  <> "  case json.parse(json_str, tag_decoder) {\n"
+  <> "    Ok(tag) -> {\n"
+  <> "      case tag {\n"
+  <> string.join(arms, "\n")
+  <> "\n"
+  <> "        _ -> Error(\"Unknown generated Beacon message tag \" <> tag)\n"
+  <> "      }\n"
+  <> "    }\n"
+  <> "    Error(_) -> Error(\"Generated Beacon message payload missing tag\")\n"
+  <> "  }\n"
+  <> "}\n"
+}
+
+fn server_event_decoder_for_field(
+  field: analyzer.TypeField,
+  analysis: analyzer.Analysis,
+) -> String {
+  case field.type_name {
+    "Msg" if field.module != "" -> {
+      let placeholder = default_msg_value(field.module, analysis)
+      "decode.then(decode.string, fn(raw) {\n"
+      <> "        case decode_msg_"
+      <> field.module
+      <> "(raw) {\n"
+      <> "          Ok(msg) -> decode.success(msg)\n"
+      <> "          Error(reason) -> decode.failure("
+      <> placeholder
+      <> ", reason)\n"
+      <> "        }\n"
+      <> "      })"
+    }
+    _ ->
+      server_decoder_for_field(
+        field,
+        analysis.custom_types,
+        analysis.enum_types,
+      )
+  }
+}
+
+fn default_msg_value(module_name: String, analysis: analyzer.Analysis) -> String {
+  case find_external_msg_type(analysis, module_name) {
+    Ok(info) ->
+      case info.variants {
+        [variant, ..] ->
+          module_name
+          <> "."
+          <> variant.name
+          <> case variant.fields {
+            [] -> ""
+            fields ->
+              "("
+              <> string.join(
+                list.map(fields, fn(field) {
+                  default_event_value(field, analysis)
+                }),
+                ", ",
+              )
+              <> ")"
+          }
+        [] -> module_name <> ".Msg"
+      }
+    Error(_) -> module_name <> ".Msg"
+  }
+}
+
+fn default_event_value(
+  field: analyzer.TypeField,
+  analysis: analyzer.Analysis,
+) -> String {
+  case field.type_name {
+    "Int" -> "0"
+    "Float" -> "0.0"
+    "Bool" -> "False"
+    "String" -> "\"\""
+    "List" -> "[]"
+    "Option" -> "option.None"
+    "Msg" if field.module != "" -> default_msg_value(field.module, analysis)
+    _ ->
+      case find_enum_type(analysis.enum_types, field.type_name, field.module) {
+        Ok(et) -> default_client_enum_value(et)
+        Error(_) -> "\"\""
+      }
   }
 }
 
@@ -3002,43 +3643,63 @@ fn read_beacon_path_from_toml() -> Result(String, Nil) {
 /// Find a Gleam source file with Model, Msg, update, view.
 fn find_app_module(dir: String) -> Result(#(String, String), String) {
   // Two-pass search:
-  // 1. Full app module: update + view + Model + Msg in one file (standard app)
-  // 2. Model-only module: pub type Model in any file (app_with_server, multi-file)
+  // 1. Entrypoint app module: full app module that actually starts Beacon.
+  // 2. Full app module: update + view + Model + Msg in one file.
+  // 3. Model-only module: pub type Model in any file (app_with_server, multi-file)
   //    The codec only needs Model fields — the analyzer handles cross-file resolution.
   let all_files = collect_gleam_files(dir)
-  // Pass 1: single-file app with all four
-  let full_match =
+  let entrypoint_match =
     list.find(all_files, fn(pair) {
       let #(_path, source) = pair
-      let has_update =
-        string.contains(source, "pub fn update")
-        || string.contains(source, "pub fn make_update")
-      let has_view = string.contains(source, "pub fn view")
-      let has_model = string.contains(source, "pub type Model")
-      let has_msg = string.contains(source, "pub type Msg")
-      has_update && has_view && has_model && has_msg
+      is_full_app_source(source) && is_beacon_entrypoint_source(source)
     })
-  case full_match {
+  case entrypoint_match {
     Ok(found) -> Ok(found)
     Error(Nil) -> {
-      // Pass 2: file with pub type Model (codec-only — enough for encode_model)
-      let model_match =
+      let full_match =
         list.find(all_files, fn(pair) {
           let #(_path, source) = pair
-          string.contains(source, "pub type Model")
+          is_full_app_source(source)
         })
-      case model_match {
-        Ok(found) -> {
-          log.info(
-            "beacon.build",
-            "Found Model type (codec-only mode) in: " <> { found.0 },
-          )
-          Ok(found)
+      case full_match {
+        Ok(found) -> Ok(found)
+        Error(Nil) -> {
+          // Pass 3: file with pub type Model (codec-only — enough for encode_model)
+          let model_match =
+            list.find(all_files, fn(pair) {
+              let #(_path, source) = pair
+              string.contains(source, "pub type Model")
+            })
+          case model_match {
+            Ok(found) -> {
+              log.info(
+                "beacon.build",
+                "Found Model type (codec-only mode) in: " <> { found.0 },
+              )
+              Ok(found)
+            }
+            Error(Nil) -> Error("No module found with pub type Model")
+          }
         }
-        Error(Nil) -> Error("No module found with pub type Model")
       }
     }
   }
+}
+
+fn is_full_app_source(source: String) -> Bool {
+  let has_update =
+    string.contains(source, "pub fn update")
+    || string.contains(source, "pub fn make_update")
+  let has_view = string.contains(source, "pub fn view")
+  let has_model = string.contains(source, "pub type Model")
+  let has_msg = string.contains(source, "pub type Msg")
+  has_update && has_view && has_model && has_msg
+}
+
+fn is_beacon_entrypoint_source(source: String) -> Bool {
+  string.contains(source, "beacon.app(")
+  || string.contains(source, "beacon.app_with")
+  || string.contains(source, "beacon.start(")
 }
 
 /// Recursively collect all .gleam files in a directory, skipping beacon/.
@@ -3089,7 +3750,10 @@ fn collect_gleam_files(dir: String) -> List(#(String, String)) {
 /// Run `gleam build` to compile newly generated source files (e.g., beacon_codec.gleam).
 /// Returns the build output.
 pub fn run_gleam_build() -> String {
-  run_command("gleam build 2>&1")
+  case run_program(".", "gleam", ["build"]) {
+    Ok(output) -> output
+    Error(reason) -> reason
+  }
 }
 
 /// Validate that a string contains only hexadecimal characters (0-9, a-f, A-F).
@@ -3110,7 +3774,7 @@ fn is_hex_string(s: String) -> Bool {
 /// Generate a safe hash string for cache-busting filenames.
 /// Returns a validated hex string.
 fn generate_safe_hash() -> String {
-  let raw = string.trim(run_command("date +%s | shasum | head -c 8"))
+  let raw = string.trim(do_generate_safe_hash())
   // Supported build hosts produce a non-empty hexadecimal digest here.
   let assert True = is_hex_string(raw) && raw != ""
   raw
@@ -3119,8 +3783,18 @@ fn generate_safe_hash() -> String {
 @external(erlang, "beacon_codegen_ffi", "get_args")
 fn get_args() -> List(String)
 
-@external(erlang, "beacon_build_ffi", "run_command")
-fn run_command(cmd: String) -> String
+@external(erlang, "beacon_build_ffi", "run_program")
+fn run_program(
+  cwd: String,
+  program: String,
+  args: List(String),
+) -> Result(String, String)
+
+@external(erlang, "beacon_build_ffi", "absolute_path")
+fn absolute_path(path: String) -> Result(String, String)
+
+@external(erlang, "beacon_build_ffi", "generate_safe_hash")
+fn do_generate_safe_hash() -> String
 
 /// Return True when any provided source path is newer than the manifest.
 ///

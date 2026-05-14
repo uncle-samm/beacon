@@ -71,7 +71,7 @@ fn test_app_config(port: Int) -> application.AppConfig(TestModel, TestMsg) {
 pub fn http_get_root_returns_200_with_ssr_html_test() {
   start_httpc()
   let port = 11_000 + unique_port_offset()
-  let assert Ok(_app) = application.start(test_app_config(port))
+  let assert Ok(_app) = application.start_advanced(test_app_config(port))
   process.sleep(100)
 
   let assert Ok(#(status, _headers, body)) =
@@ -85,7 +85,7 @@ pub fn http_get_root_returns_200_with_ssr_html_test() {
 pub fn http_get_beacon_js_returns_runtime_javascript_test() {
   start_httpc()
   let port = 12_000 + unique_port_offset()
-  let assert Ok(_app) = application.start(test_app_config(port))
+  let assert Ok(_app) = application.start_advanced(test_app_config(port))
   process.sleep(100)
 
   let assert Ok(#(status, _headers, body)) =
@@ -95,10 +95,28 @@ pub fn http_get_beacon_js_returns_runtime_javascript_test() {
   let assert True = string.contains(body, "WebSocket")
 }
 
+pub fn http_get_beacon_js_gzips_when_requested_test() {
+  start_httpc()
+  let port = 12_500 + unique_port_offset()
+  let assert Ok(_app) = application.start_advanced(test_app_config(port))
+  process.sleep(100)
+
+  let assert Ok(#(status, headers, _body)) =
+    http_request(
+      "GET",
+      "http://localhost:" <> int.to_string(port) <> "/beacon_client.js",
+      [#("accept-encoding", "gzip")],
+      "",
+    )
+  let assert 200 = status
+  let assert True = has_header(headers, "content-encoding", "gzip")
+  let assert True = has_header(headers, "vary", "accept-encoding")
+}
+
 pub fn http_get_has_security_headers_test() {
   start_httpc()
   let port = 13_000 + unique_port_offset()
-  let assert Ok(_app) = application.start(test_app_config(port))
+  let assert Ok(_app) = application.start_advanced(test_app_config(port))
   process.sleep(100)
 
   let assert Ok(#(_status, headers, _body)) =
@@ -117,7 +135,7 @@ pub fn http_pre_upgrade_rejects_too_many_headers_test() {
       max_http_headers: 2,
     )
   let assert Ok(_app) =
-    application.start(
+    application.start_advanced(
       application.AppConfig(..test_app_config(port), security_limits: limits),
     )
   process.sleep(100)
@@ -145,7 +163,7 @@ pub fn http_pre_upgrade_rejects_large_headers_test() {
       max_http_header_bytes: 32,
     )
   let assert Ok(_app) =
-    application.start(
+    application.start_advanced(
       application.AppConfig(..test_app_config(port), security_limits: limits),
     )
   process.sleep(100)
@@ -162,27 +180,28 @@ pub fn http_pre_upgrade_rejects_large_headers_test() {
 
 // ===== 22.1: Real WebSocket Stress Test =====
 
-pub fn ws_connect_and_receive_mount_test() {
+pub fn ws_connect_and_receive_model_sync_test() {
   start_httpc()
   let port = 14_000 + unique_port_offset()
-  let assert Ok(_app) = application.start(test_app_config(port))
+  let assert Ok(_app) = application.start_advanced(test_app_config(port))
   process.sleep(100)
 
   // Open a real WebSocket connection via gen_tcp
   let assert Ok(socket) = ws_connect("localhost", port)
   // Send join message
   let assert Ok(Nil) = ws_send(socket, "{\"type\":\"join\"}")
-  // Receive mount response
+  // Receive authoritative model state. SSR already supplied first HTML.
   let assert Ok(response) = ws_recv(socket, 3000)
-  // Response should be a JSON mount message with type field
-  let assert True = string.contains(response, "\"type\":\"mount\"")
+  let assert True = string.contains(response, "\"type\":\"model_sync\"")
+  let assert True = string.contains(response, "\\\"count\\\":0")
+  let assert False = string.contains(response, "\"type\":\"mount\"")
   ws_close(socket)
 }
 
 pub fn ws_50_concurrent_connections_test() {
   start_httpc()
   let port = 15_000 + unique_port_offset()
-  let assert Ok(_app) = application.start(test_app_config(port))
+  let assert Ok(_app) = application.start_advanced(test_app_config(port))
   process.sleep(200)
 
   let result_subject = process.new_subject()
@@ -201,21 +220,25 @@ pub fn ws_50_concurrent_connections_test() {
 pub fn two_connections_have_independent_state_test() {
   start_httpc()
   let port = 17_000 + unique_port_offset()
-  let assert Ok(_app) = application.start(test_app_config(port))
+  let assert Ok(_app) = application.start_advanced(test_app_config(port))
   process.sleep(200)
 
   // Open two independent WebSocket connections
   let assert Ok(socket_a) = ws_connect("localhost", port)
   let assert Ok(socket_b) = ws_connect("localhost", port)
 
-  // Both join — each should get their own runtime with count:0
+  // Both join — each should get their own runtime with count:0.
   let assert Ok(Nil) = ws_send(socket_a, "{\"type\":\"join\"}")
-  let assert Ok(mount_a) = ws_recv(socket_a, 3000)
-  let assert True = string.contains(mount_a, "count:0")
+  let assert Ok(sync_a) = ws_recv(socket_a, 3000)
+  let assert True = string.contains(sync_a, "\"type\":\"model_sync\"")
+  let assert True = string.contains(sync_a, "\\\"count\\\":0")
+  let assert False = string.contains(sync_a, "\"type\":\"mount\"")
 
   let assert Ok(Nil) = ws_send(socket_b, "{\"type\":\"join\"}")
-  let assert Ok(mount_b) = ws_recv(socket_b, 3000)
-  let assert True = string.contains(mount_b, "count:0")
+  let assert Ok(sync_b) = ws_recv(socket_b, 3000)
+  let assert True = string.contains(sync_b, "\"type\":\"model_sync\"")
+  let assert True = string.contains(sync_b, "\\\"count\\\":0")
+  let assert False = string.contains(sync_b, "\"type\":\"mount\"")
 
   // Send increment on connection A only
   let assert Ok(Nil) =
@@ -224,9 +247,10 @@ pub fn two_connections_have_independent_state_test() {
       "{\"type\":\"event\",\"name\":\"click\",\"handler_id\":\"inc\",\"data\":\"{}\",\"target_path\":\"0\",\"clock\":1}",
     )
   let assert Ok(response_a) = ws_recv(socket_a, 3000)
-  // Connection A should have received a model_sync with count:1
-  // Wire format: {"type":"model_sync","model":"{\"count\":1}","version":1,...}
-  let assert True = string.contains(response_a, "model_sync")
+  // Connection A should receive a state update with count:1.
+  let assert True =
+    string.contains(response_a, "model_sync")
+    || string.contains(response_a, "\"type\":\"patch\"")
 
   // Connection B should NOT have received anything (independent runtime)
   // Try to receive — should timeout (no message)
@@ -247,7 +271,7 @@ pub fn auth_middleware_blocks_ws_upgrade_test() {
   let auth_mw = fn(_req, _next) { gleam_http_response_new(401) }
   let config =
     application.AppConfig(..test_app_config(port), middlewares: [auth_mw])
-  let assert Ok(_app) = application.start(config)
+  let assert Ok(_app) = application.start_advanced(config)
   process.sleep(100)
 
   // HTTP GET should be blocked by auth middleware
@@ -282,7 +306,7 @@ pub fn api_handler_serves_json_test() {
       ..test_app_config(port),
       api_handler: option.Some(api_handler),
     )
-  let assert Ok(_app) = application.start(config)
+  let assert Ok(_app) = application.start_advanced(config)
   process.sleep(100)
 
   let assert Ok(#(status, _headers, body)) =
@@ -311,7 +335,7 @@ pub fn api_handler_fallthrough_to_ssr_test() {
       ..test_app_config(port),
       api_handler: option.Some(api_handler),
     )
-  let assert Ok(_app) = application.start(config)
+  let assert Ok(_app) = application.start_advanced(config)
   process.sleep(100)
 
   // Root path should fall through to SSR
@@ -335,13 +359,14 @@ pub fn ws_auth_rejects_unauthorized_test() {
       ..test_app_config(port),
       ws_auth: option.Some(ws_auth),
     )
-  let assert Ok(_app) = application.start(config)
+  let assert Ok(_app) = application.start_advanced(config)
   process.sleep(100)
 
   // WebSocket upgrade to /ws should be rejected with 401
   // Use http_get on /ws — ws_auth runs before upgrade, returns 401 HTTP response
+  let origin = "http://localhost:" <> int.to_string(port)
   let assert Ok(#(status, _headers, _body)) =
-    http_get("http://localhost:" <> int.to_string(port) <> "/ws")
+    http_request("GET", origin <> "/ws", [#("origin", origin)], "")
   let assert 401 = status
 }
 

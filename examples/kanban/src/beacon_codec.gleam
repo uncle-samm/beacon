@@ -2,6 +2,7 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import kanban
+import beacon/element
 import gleam/json
 import gleam/dynamic/decode
 
@@ -50,6 +51,14 @@ pub fn encode_model(state: #(kanban.Model, kanban.Local)) -> String {
   |> json.to_string
 }
 
+/// Render the model with the same generated server contract used for SSR.
+pub fn render_model(state: #(kanban.Model, kanban.Local)) -> String {
+  let model = state.0
+  let local = state.1
+  kanban.view(model, local)
+  |> element.to_string
+}
+
 /// Decode a #(Model, Local) from JSON string (for applying client patches).
 pub fn decode_model(json_str: String) -> Result(#(kanban.Model, kanban.Local), String) {
   let state_decoder = {
@@ -63,6 +72,113 @@ pub fn decode_model(json_str: String) -> Result(#(kanban.Model, kanban.Local), S
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
     Error(_) -> Error("Failed to decode model+local")
+  }
+}
+
+/// Decode the generated client event contract. Live event decoding never
+/// renders the server view or reads the handler registry.
+pub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result(kanban.Msg, String) {
+  let envelope_decoder = {
+    use msg_json <- decode.field("__beacon_msg", decode.string)
+    decode.success(msg_json)
+  }
+  case json.parse(data, envelope_decoder) {
+    Ok(msg_json) -> decode_msg(msg_json)
+    Error(_) -> Error("Client event missing generated Beacon message envelope")
+  }
+}
+
+
+fn decode_msg(json_str: String) -> Result(kanban.Msg, String) {
+  let tag_decoder = {
+    use tag <- decode.field("tag", decode.string)
+    decode.success(tag)
+  }
+  case json.parse(json_str, tag_decoder) {
+    Ok(tag) -> {
+      case tag {
+    "UpdateInput" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(kanban.UpdateInput(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag UpdateInput")
+      }
+    }
+    "AddCard" -> {
+      let msg_decoder = {
+      decode.success(kanban.AddCard)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag AddCard")
+      }
+    }
+    "StartDrag" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(kanban.StartDrag(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag StartDrag")
+      }
+    }
+    "DropOnColumn" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(kanban.DropOnColumn(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag DropOnColumn")
+      }
+    }
+    "DragOverColumn" -> {
+      let msg_decoder = {
+      decode.success(kanban.DragOverColumn)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag DragOverColumn")
+      }
+    }
+    "DeleteCard" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.int)
+      decode.success(kanban.DeleteCard(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag DeleteCard")
+      }
+    }
+    "BoardUpdated" -> {
+      let msg_decoder = {
+      decode.success(kanban.BoardUpdated)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag BoardUpdated")
+      }
+    }
+    "SetCards" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.list(server_decode_card()))
+      use arg1 <- decode.field("arg1", decode.int)
+      decode.success(kanban.SetCards(arg0, arg1))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SetCards")
+      }
+    }
+        _ -> Error("Unknown generated Beacon message tag " <> tag)
+      }
+    }
+    Error(_) -> Error("Generated Beacon message payload missing tag")
   }
 }
 

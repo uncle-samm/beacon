@@ -52,7 +52,7 @@ pub fn full_auth_cookie_csrf_ws_flow_test() {
   let port = 21_000 + unique_port_offset()
   let store = session.new_store("auth_flow_" <> int.to_string(port))
   let csrf_store = form.create_csrf_store("auth_flow_csrf_" <> int.to_string(port))
-  let assert Ok(_app) = application.start(test_config(port, store, csrf_store))
+  let assert Ok(_app) = application.start_advanced(test_config(port, store, csrf_store))
   process.sleep(150)
 
   let base = "http://localhost:" <> int.to_string(port)
@@ -124,10 +124,12 @@ pub fn full_auth_cookie_csrf_ws_flow_test() {
   let assert Ok(socket) =
     ws_connect_with_headers("localhost", port, [#("cookie", session_cookie)])
   let assert Ok(Nil) = ws_send(socket, "{\"type\":\"join\"}")
-  let assert Ok(mount) = ws_recv(socket, 3000)
-  let assert True = string.contains(mount, "Grace Hopper")
-  let assert True = string.contains(mount, "admin")
-  let assert False = string.contains(mount, "server-private-key")
+  let assert Ok(sync) = ws_recv(socket, 3000)
+  let assert True = string.contains(sync, "\"type\":\"model_sync\"")
+  let assert True = string.contains(sync, "Grace Hopper")
+  let assert True = string.contains(sync, "admin")
+  let assert False = string.contains(sync, "server-private-key")
+  let assert False = string.contains(sync, "\"type\":\"mount\"")
   ws_close(socket)
 
   let assert Ok(#(logout_status, logout_headers, logout_body)) =
@@ -162,7 +164,7 @@ fn test_config(
     }),
     secret_key: "auth-flow-secret-key-long-enough-for-hmac!!",
     title: "Auth Flow",
-    serialize_model: None,
+    serialize_model: Some(serialize_public_model),
     deserialize_model: None,
     middlewares: [],
     static_dir: None,
@@ -191,6 +193,27 @@ fn init_model() -> Model {
     csrf_token: "",
     status: "Sign in",
   )
+}
+
+fn serialize_public_model(combined: #(Model, Server)) -> String {
+  let #(model, _server) = combined
+  "{"
+  <> "\"route\":\""
+  <> model.route
+  <> "\",\"authenticated\":"
+  <> case model.authenticated {
+    True -> "true"
+    False -> "false"
+  }
+  <> ",\"user\":\""
+  <> model.user
+  <> "\",\"role\":\""
+  <> model.role
+  <> "\",\"display_name\":\""
+  <> model.display_name
+  <> "\",\"status\":\""
+  <> model.status
+  <> "\"}"
 }
 
 fn init_server() -> Server {

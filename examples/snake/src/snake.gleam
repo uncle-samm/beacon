@@ -43,6 +43,7 @@ pub type Model {
     player_name: String,
     name_input: String,
     has_name: Bool,
+    high_score_pending: Bool,
   )
 }
 
@@ -75,81 +76,76 @@ pub fn init() -> Model {
     player_name: "",
     name_input: "",
     has_name: False,
+    high_score_pending: False,
   )
 }
 
 // --- Update ---
 
-pub fn make_update(
-  high_scores: store.ListStore(String),
-) -> fn(Model, Msg) -> #(Model, effect.Effect(Msg)) {
-  fn(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
-    case msg {
-      Tick -> {
-        case model.game_state {
-          GameOver -> #(model, effect.none())
-          Playing -> {
-            let new_model = advance_snake(model, high_scores)
-            #(new_model, effect.none())
-          }
-        }
+pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
+  case msg {
+    Tick -> {
+      case model.game_state {
+        GameOver -> #(model, effect.none())
+        Playing -> #(advance_snake(model), effect.none())
       }
+    }
 
-      ChangeDirection(dir) -> {
-        // Prevent 180-degree turns
-        let valid = case model.direction, dir {
-          Up, Down | Down, Up | Left, Right | Right, Left -> False
-          _, _ -> True
-        }
-        case valid {
-          True -> #(Model(..model, direction: dir), effect.none())
-          False -> #(model, effect.none())
-        }
+    ChangeDirection(dir) -> {
+      // Prevent 180-degree turns
+      let valid = case model.direction, dir {
+        Up, Down | Down, Up | Left, Right | Right, Left -> False
+        _, _ -> True
       }
-
-      RestartGame -> {
-        let new_snake = [Point(x: 10, y: 7)]
-        let new_food = random_food(new_snake)
-        // Don't start a new timer — the existing one from SetName still runs.
-        // Just reset the game state. The Tick handler checks game_state.
-        #(
-          Model(
-            ..model,
-            snake: new_snake,
-            direction: Right,
-            food: new_food,
-            score: 0,
-            game_state: Playing,
-          ),
-          effect.none(),
-        )
+      case valid {
+        True -> #(Model(..model, direction: dir), effect.none())
+        False -> #(model, effect.none())
       }
+    }
 
-      UpdateNameInput(text) -> #(
-        Model(..model, name_input: text),
+    RestartGame -> {
+      let new_snake = [Point(x: 10, y: 7)]
+      let new_food = next_food(new_snake, model.score + 1)
+      // Don't start a new timer — the existing one from SetName still runs.
+      // Just reset the game state. The Tick handler checks game_state.
+      #(
+        Model(
+          ..model,
+          snake: new_snake,
+          direction: Right,
+          food: new_food,
+          score: 0,
+          game_state: Playing,
+          high_score_pending: False,
+        ),
         effect.none(),
       )
-
-      SetName -> {
-        let name = string.trim(model.name_input)
-        case string.is_empty(name) {
-          True -> #(model, effect.none())
-          False -> #(
-            Model(..model, player_name: name, has_name: True),
-            effect.every(150, fn() { Tick }),
-          )
-        }
-      }
-
-      HighScoreUpdated -> #(model, effect.none())
     }
+
+    UpdateNameInput(text) -> #(
+      Model(..model, name_input: text),
+      effect.none(),
+    )
+
+    SetName -> {
+      let name = string.trim(model.name_input)
+      case string.is_empty(name) {
+        True -> #(model, effect.none())
+        False -> #(
+          Model(..model, player_name: name, has_name: True),
+          effect.every(150, fn() { Tick }),
+        )
+      }
+    }
+
+    HighScoreUpdated -> #(
+      Model(..model, high_score_pending: False),
+      effect.none(),
+    )
   }
 }
 
-fn advance_snake(
-  model: Model,
-  high_scores: store.ListStore(String),
-) -> Model {
+fn advance_snake(model: Model) -> Model {
   let assert [head, ..] = model.snake
   let new_head = case model.direction {
     Up -> Point(x: head.x, y: head.y - 1)
@@ -165,26 +161,11 @@ fn advance_snake(
     || new_head.y < 0
     || new_head.y >= model.grid_height
   {
-    True -> {
-      // Record high score
-      let entry =
-        model.player_name
-        <> ": "
-        <> int.to_string(model.score)
-      store.append(high_scores, "scores", entry)
-      Model(..model, game_state: GameOver)
-    }
+    True -> Model(..model, game_state: GameOver, high_score_pending: True)
     False -> {
       // Self collision
       case list.contains(model.snake, new_head) {
-        True -> {
-          let entry =
-            model.player_name
-            <> ": "
-            <> int.to_string(model.score)
-          store.append(high_scores, "scores", entry)
-          Model(..model, game_state: GameOver)
-        }
+        True -> Model(..model, game_state: GameOver, high_score_pending: True)
         False -> {
           // Ate food?
           let ate = new_head == model.food
@@ -197,7 +178,7 @@ fn advance_snake(
             False -> model.score
           }
           let new_food = case ate {
-            True -> random_food(new_snake)
+            True -> next_food(new_snake, new_score)
             False -> model.food
           }
           Model(
@@ -220,13 +201,29 @@ fn drop_last(items: List(a)) -> List(a) {
   }
 }
 
-fn random_food(snake: List(Point)) -> Point {
-  let x = abs_int(unique_int()) % grid_w
-  let y = abs_int(unique_int()) % grid_h
+fn next_food(snake: List(Point), seed: Int) -> Point {
+  let x = { seed * 7 + 3 } % grid_w
+  let y = { seed * 11 + 5 } % grid_h
   let p = Point(x: x, y: y)
   case list.contains(snake, p) {
-    True -> random_food(snake)
+    True -> next_food(snake, seed + 1)
     False -> p
+  }
+}
+
+fn make_on_update(
+  high_scores: store.ListStore(String),
+) -> fn(Model, Msg) -> effect.Effect(Msg) {
+  fn(model: Model, msg: Msg) -> effect.Effect(Msg) {
+    case msg, model.high_score_pending {
+      Tick, True ->
+        effect.from(fn(dispatch) {
+          let entry = model.player_name <> ": " <> int.to_string(model.score)
+          store.append(high_scores, "scores", entry)
+          dispatch(HighScoreUpdated)
+        })
+      _, _ -> effect.none()
+    }
   }
 }
 
@@ -376,17 +373,12 @@ pub fn start() {
 
   beacon.app_with_effects(
     fn() { #(init(), effect.none()) },
-    make_update(high_scores),
+    update,
     view,
   )
+  |> beacon.on_update(make_on_update(high_scores))
   |> beacon.title("Multiplayer Snake")
   |> beacon.subscriptions(fn(_model) { ["store:snake_scores"] })
   |> beacon.on_notify(fn(_topic) { HighScoreUpdated })
   |> beacon.start(8080)
 }
-
-@external(erlang, "erlang", "unique_integer")
-fn unique_int() -> Int
-
-@external(erlang, "erlang", "abs")
-fn abs_int(n: Int) -> Int

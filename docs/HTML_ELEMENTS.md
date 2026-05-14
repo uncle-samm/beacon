@@ -51,7 +51,7 @@ Defined in `beacon` (not `beacon/html`):
 | `on_change(fn(String) -> Msg)` | change | Receives value |
 | `on_keydown(fn(String) -> Msg)` | keydown | Receives key name |
 | `on_mousedown(fn(String) -> Msg)` | mousedown | Receives "x,y" |
-| `on_mouseup(Msg)` | mouseup | Simple message |
+| `on_mouseup(fn(String) -> Msg)` | mouseup | Pointer coordinates as `"x,y"`, or the full drag trail as semicolon-separated `"x,y;x,y;..."` after `on_mousedown` + `on_mousemove` |
 | `on_mousemove(fn(String) -> Msg)` | mousemove | Receives "x,y" |
 | `on_dragstart(fn(String) -> Msg)` | dragstart | Receives drag-id |
 | `on_dragover(Msg)` | dragover | Simple (preventDefault) |

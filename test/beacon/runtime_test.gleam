@@ -1,6 +1,8 @@
 import beacon/effect
 import beacon/element
 import beacon/error
+import beacon/handler
+import beacon/pubsub
 import beacon/route
 import beacon/runtime
 import beacon/ssr
@@ -29,6 +31,7 @@ pub type CounterMsg {
   Increment
   Decrement
   SetCount(Int)
+  Tick
 }
 
 pub type RouteModel {
@@ -52,6 +55,7 @@ fn counter_update(
     Increment -> #(CounterModel(count: model.count + 1), effect.none())
     Decrement -> #(CounterModel(count: model.count - 1), effect.none())
     SetCount(n) -> #(CounterModel(count: n), effect.none())
+    Tick -> #(CounterModel(count: model.count + 1), effect.none())
   }
 }
 
@@ -127,7 +131,9 @@ fn route_config() -> runtime.RuntimeConfig(RouteModel, RouteMsg) {
     init: route_init,
     update: route_update,
     view: route_view,
-    decode_event: option.None,
+    decode_event: option.Some(fn(_name, _handler_id, _data, _path) {
+      Error(error.RuntimeError(reason: "route test does not decode events"))
+    }),
     serialize_model: option.Some(fn(model: RouteModel) {
       "{\"current_path\":\""
       <> model.current_path
@@ -210,7 +216,7 @@ pub fn runtime_starts_successfully_test() {
   let assert Ok(subject) = runtime.start(counter_config())
   let transport_subject = process.new_subject()
 
-  // Connect and join to verify we get a mount message
+  // Connect and join to verify we get authoritative model state without a remount.
   process.send(
     subject,
     runtime.ClientConnected(conn_id: "start_conn", subject: transport_subject),
@@ -225,10 +231,13 @@ pub fn runtime_starts_successfully_test() {
   let selector =
     process.new_selector()
     |> process.select(transport_subject)
-  let assert Ok(mount_msg) = process.selector_receive(selector, 500)
-  case mount_msg {
-    transport.SendMount(payload: _) -> Nil
-    _ -> panic as "Expected SendMount after join"
+  let assert Ok(sync_msg) = process.selector_receive(selector, 500)
+  case sync_msg {
+    transport.SendModelSync(model_json: json, ..) -> {
+      let assert True = string.contains(json, "\"count\":0")
+    }
+    transport.SendMount(..) -> panic as "Join must not send SendMount"
+    _ -> panic as "Expected SendModelSync after join"
   }
 }
 
@@ -245,7 +254,7 @@ pub fn runtime_accepts_client_connect_test() {
   )
   process.sleep(20)
 
-  // Join and verify mount message is received
+  // Join and verify model state is received.
   process.send(
     subject,
     runtime.ClientJoined(conn_id: "test_conn_1", token: "", path: "/"),
@@ -255,17 +264,17 @@ pub fn runtime_accepts_client_connect_test() {
   let selector =
     process.new_selector()
     |> process.select(fake_transport_subject)
-  let assert Ok(mount_msg) = process.selector_receive(selector, 500)
-  case mount_msg {
-    transport.SendMount(payload: payload) -> {
-      // Mount should contain the initial counter view with "0" rendered in element
-      let assert True = string.contains(payload, ">0<")
+  let assert Ok(sync_msg) = process.selector_receive(selector, 500)
+  case sync_msg {
+    transport.SendModelSync(model_json: json, ..) -> {
+      let assert True = string.contains(json, "\"count\":0")
     }
-    _ -> panic as "Expected SendMount after connect + join"
+    transport.SendMount(..) -> panic as "Join must not send SendMount"
+    _ -> panic as "Expected SendModelSync after connect + join"
   }
 }
 
-pub fn runtime_sends_mount_on_join_test() {
+pub fn runtime_sends_model_sync_on_join_test() {
   let assert Ok(subject) = runtime.start(counter_config())
   let transport_subject = process.new_subject()
 
@@ -283,17 +292,17 @@ pub fn runtime_sends_mount_on_join_test() {
   )
   process.sleep(50)
 
-  // Check that we received a mount message with rendered content
+  // Check that we received authoritative model state, not an HTML remount.
   let selector =
     process.new_selector()
     |> process.select(transport_subject)
-  let assert Ok(mount_msg) = process.selector_receive(selector, 500)
-  case mount_msg {
-    transport.SendMount(payload: payload) -> {
-      // The counter view renders int.to_string(model.count), so mount should contain "0" in element
-      let assert True = string.contains(payload, ">0<")
+  let assert Ok(sync_msg) = process.selector_receive(selector, 500)
+  case sync_msg {
+    transport.SendModelSync(model_json: json, ..) -> {
+      let assert True = string.contains(json, "\"count\":0")
     }
-    _ -> panic as "Expected SendMount message on join"
+    transport.SendMount(..) -> panic as "Join must not send SendMount"
+    _ -> panic as "Expected SendModelSync message on join"
   }
 }
 
@@ -435,7 +444,9 @@ pub fn runtime_effect_dispatches_message_test() {
       update: counter_update,
       view: counter_view,
       decode_event: option.Some(counter_decode_event),
-      serialize_model: option.None,
+      serialize_model: option.Some(fn(model: CounterModel) {
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
       deserialize_model: option.None,
       route_patterns: [],
       on_route_change: option.None,
@@ -459,7 +470,7 @@ pub fn runtime_effect_dispatches_message_test() {
   process.sleep(50)
 
   // The effect should have already dispatched SetCount(42),
-  // so joining should show count=42 in the mount HTML
+  // so joining should sync count=42 in model state.
   process.send(
     subject,
     runtime.ClientJoined(conn_id: "test_conn_6", token: "", path: "/"),
@@ -470,10 +481,9 @@ pub fn runtime_effect_dispatches_message_test() {
     process.new_selector()
     |> process.select(transport_subject)
 
-  // We might get multiple messages (patch from effect + mount from join)
+  // We might get multiple messages (patch from effect + model sync from join)
   // Drain all and find a message proving SetCount(42) was applied.
-  // Mount renders the view (text "42"), model_sync contains JSON with count,
-  // patches contain /count path.
+  // Model sync contains JSON with count; patches contain /count path.
   let first_msg = process.selector_receive(selector, 500)
   let msgs =
     drain_messages(transport_subject, case first_msg {
@@ -483,8 +493,7 @@ pub fn runtime_effect_dispatches_message_test() {
   let has_42 =
     list.any(msgs, fn(m) {
       case m {
-        transport.SendMount(payload: payload) ->
-          string.contains(payload, ">42<")
+        transport.SendMount(..) -> False
         transport.SendPatch(ops_json: json, ..) ->
           string.contains(json, "42") && string.contains(json, "/count")
         transport.SendModelSync(model_json: json, ..) ->
@@ -495,23 +504,31 @@ pub fn runtime_effect_dispatches_message_test() {
   let assert True = has_42
 }
 
-pub fn runtime_survives_view_crash_test() {
-  // Create a config where the view function crashes on count > 0
+pub fn live_update_does_not_render_server_view_test() {
+  // Live updates use the generated/explicit event contract. The runtime must
+  // not render the server view after an event.
   let config =
     runtime.RuntimeConfig(
       init: fn() { #(CounterModel(count: 0), effect.none()) },
       update: counter_update,
       view: fn(model: CounterModel) {
-        case model.count > 0 {
+        case model.count == 1 {
           True -> {
-            // Intentionally crash to test error boundary
+            // Intentionally crash to prove a failed render is not committed.
             crash_for_test()
           }
-          False -> element.el("div", [], [element.text("ok")])
+          False ->
+            element.el(
+              "button",
+              [],
+              [element.text("ok")],
+            )
         }
       },
       decode_event: option.Some(counter_decode_event),
-      serialize_model: option.None,
+      serialize_model: option.Some(fn(model: CounterModel) {
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
       deserialize_model: option.None,
       route_patterns: [],
       on_route_change: option.None,
@@ -533,7 +550,14 @@ pub fn runtime_survives_view_crash_test() {
   )
   process.sleep(20)
 
-  // Send increment — this will cause the view to crash
+  process.send(
+    subject,
+    runtime.ClientJoined(conn_id: "crash_conn", token: "", path: "/"),
+  )
+  process.sleep(50)
+  let _ = drain_messages(transport_subject, [])
+
+  // Send increment. The view would crash for count=1 if the runtime rendered it.
   process.send(
     subject,
     runtime.ClientEventReceived(
@@ -548,38 +572,59 @@ pub fn runtime_survives_view_crash_test() {
   )
   process.sleep(50)
 
-  // Runtime should still be alive — send a decrement event
-  process.send(
-    subject,
-    runtime.ClientEventReceived(
-      conn_id: "crash_conn",
-      event_name: "click",
-      handler_id: "decrement",
-      event_data: "{}",
-      target_path: "0",
-      clock: 2,
-      ops: "",
-    ),
-  )
-  process.sleep(50)
+  let crash_msgs = drain_messages(transport_subject, [])
+  let has_render_error =
+    list.any(crash_msgs, fn(msg) {
+      case msg {
+        transport.SendError(reason: reason) ->
+          string.contains(reason, "View rendering failed")
+        _ -> False
+      }
+    })
+  let committed_model =
+    list.any(crash_msgs, fn(msg) {
+      case msg {
+        transport.SendModelSync(model_json: json, ..) ->
+          string.contains(json, "\"count\":1")
+        transport.SendPatch(ops_json: json, ..) -> string.contains(json, "1")
+        _ -> False
+      }
+    })
+  let assert False = has_render_error
+  let assert True = committed_model
 
-  // Drain any messages from earlier, then send a new join to prove runtime is alive
-  let _ = drain_messages(transport_subject, [])
+  // Rejoin proves the runtime stayed alive and kept the updated model.
   process.send(
     subject,
     runtime.ClientJoined(conn_id: "crash_conn", token: "", path: "/"),
   )
   process.sleep(50)
+  let join_msgs = drain_messages(transport_subject, [])
+  let sync_has_updated_model =
+    list.any(join_msgs, fn(msg) {
+      case msg {
+        transport.SendModelSync(model_json: json, ..) ->
+          string.contains(json, "\"count\":1")
+        _ -> False
+      }
+    })
+  let assert True = sync_has_updated_model
 
-  // Verify we get a mount message back (proving the runtime survived the crash)
-  let selector =
-    process.new_selector()
-    |> process.select(transport_subject)
-  let assert Ok(mount_msg) = process.selector_receive(selector, 500)
-  case mount_msg {
-    transport.SendMount(payload: _) -> Nil
-    _ -> panic as "Expected SendMount after view crash recovery"
-  }
+  // Runtime should still process later effects without rendering the view.
+  process.send(subject, runtime.EffectDispatched(message: Decrement))
+  process.sleep(50)
+
+  let recovery_msgs = drain_messages(transport_subject, [])
+  let recovered =
+    list.any(recovery_msgs, fn(msg) {
+      case msg {
+        transport.SendModelSync(model_json: json, ..) ->
+          string.contains(json, "\"count\":0")
+        transport.SendPatch(ops_json: json, ..) -> string.contains(json, "0")
+        _ -> False
+      }
+    })
+  let assert True = recovered
 }
 
 pub fn runtime_shutdown_test() {
@@ -589,6 +634,80 @@ pub fn runtime_shutdown_test() {
   process.sleep(50)
   // Actor should be stopped — further messages won't be processed
   // (we can't easily verify this without monitoring, but at least it shouldn't crash)
+}
+
+pub fn runtime_shutdown_stops_periodic_effects_test() {
+  let proof_subject = process.new_subject()
+  let config =
+    runtime.RuntimeConfig(..counter_config(), init: fn() {
+      #(
+        CounterModel(count: 0),
+        effect.every(25, fn() {
+          process.send(proof_subject, "tick")
+          Tick
+        }),
+      )
+    })
+
+  let assert Ok(subject) = runtime.start(config)
+  let assert Ok("tick") = process.receive(proof_subject, 250)
+  process.send(subject, runtime.Shutdown)
+  let _ = process.receive(proof_subject, 50)
+  let assert Error(Nil) = process.receive(proof_subject, 120)
+}
+
+pub fn runtime_shutdown_stops_dynamic_subscription_listener_test() {
+  pubsub.start()
+  let topic = "runtime_shutdown_subscription_test"
+  let proof_subject = process.new_subject()
+  let config =
+    runtime.RuntimeConfig(
+      ..counter_config(),
+      dynamic_subscriptions: option.Some(fn(_model) { [topic] }),
+      on_notify: option.Some(fn(received_topic) {
+        process.send(proof_subject, received_topic)
+        Increment
+      }),
+    )
+
+  let assert Ok(subject) = runtime.start(config)
+  process.sleep(50)
+  process.send(subject, runtime.Shutdown)
+  process.sleep(50)
+  pubsub.broadcast(topic, "after_shutdown")
+  let assert Error(Nil) = process.receive(proof_subject, 200)
+}
+
+pub fn client_request_sync_sends_model_sync_without_mount_test() {
+  let assert Ok(subject) = runtime.start(counter_config())
+  let transport_subject = process.new_subject()
+
+  process.send(
+    subject,
+    runtime.ClientConnected(conn_id: "sync_conn", subject: transport_subject),
+  )
+  process.sleep(20)
+  process.send(subject, runtime.ClientSyncRequested(conn_id: "sync_conn"))
+  process.sleep(50)
+
+  let msgs = drain_messages(transport_subject, [])
+  let has_model_sync =
+    list.any(msgs, fn(m) {
+      case m {
+        transport.SendModelSync(model_json: json, ..) ->
+          string.contains(json, "\"count\":0")
+        _ -> False
+      }
+    })
+  let has_mount =
+    list.any(msgs, fn(m) {
+      case m {
+        transport.SendMount(..) -> True
+        _ -> False
+      }
+    })
+  let assert True = has_model_sync
+  let assert False = has_mount
 }
 
 pub fn state_recovery_from_token_test() {
@@ -696,20 +815,17 @@ pub fn state_recovery_from_token_test() {
   )
   process.sleep(50)
 
-  // The mount should contain "3" (recovered state), not "0" (init state)
+  // The model sync should contain "3" (recovered state), not "0" (init state).
   let selector =
     process.new_selector()
     |> process.select(transport_subject2)
-  let assert Ok(mount_msg) = process.selector_receive(selector, 1000)
-  // The mount payload should be a Rendered JSON containing "3" in element
-  case mount_msg {
-    transport.SendMount(payload: payload) -> {
-      let assert True = string.contains(payload, ">3<")
+  let assert Ok(sync_msg) = process.selector_receive(selector, 1000)
+  case sync_msg {
+    transport.SendModelSync(model_json: json, ..) -> {
+      let assert "3" = json
     }
-    _ -> {
-      // Should have received a mount — fail explicitly
-      panic as "Expected SendMount message"
-    }
+    transport.SendMount(..) -> panic as "Join must not send SendMount"
+    _ -> panic as "Expected SendModelSync message"
   }
 }
 
@@ -749,9 +865,8 @@ pub fn model_sync_sent_after_event_test() {
   )
   process.sleep(20)
 
-  // Drain mount + initial model_sync messages
+  // Drain initial model_sync messages
   let selector = process.new_selector() |> process.select(transport_subject)
-  let _ = process.selector_receive(selector, 500)
   let _ = process.selector_receive(selector, 500)
 
   // Send an increment event
@@ -815,7 +930,7 @@ pub fn sends_patch_not_model_sync_after_join_test() {
   )
   process.sleep(50)
 
-  // Drain mount + initial model_sync
+  // Drain initial model_sync
   let init_msgs = drain_messages(transport_subject, [])
   // Verify initial messages include a model_sync (full sync on join)
   let has_initial_sync =
@@ -1067,6 +1182,174 @@ pub fn post_mount_updates_never_send_html_mount_test() {
   let assert True = has_state_update
 }
 
+pub fn slow_client_mailbox_triggers_backpressure_close_test() {
+  let assert Ok(subject) = runtime.start(counter_config())
+  let transport_subject = process.new_subject()
+
+  process.send(
+    subject,
+    runtime.ClientConnected(conn_id: "slow_conn", subject: transport_subject),
+  )
+  process.sleep(20)
+  process.send(
+    subject,
+    runtime.ClientJoined(conn_id: "slow_conn", token: "", path: "/"),
+  )
+  process.sleep(50)
+  let _ = drain_messages(transport_subject, [])
+
+  fill_transport_mailbox(transport_subject, 1001)
+  process.send(
+    subject,
+    runtime.ClientEventReceived(
+      conn_id: "slow_conn",
+      event_name: "click",
+      handler_id: "increment",
+      event_data: "{}",
+      target_path: "0",
+      clock: 1,
+      ops: "",
+    ),
+  )
+  process.sleep(100)
+
+  let msgs = drain_messages(transport_subject, [])
+  let has_backpressure_close =
+    list.any(msgs, fn(m) {
+      case m {
+        transport.CloseForBackpressure(reason) ->
+          string.contains(reason, "too far behind")
+        _ -> False
+      }
+    })
+  let assert True = has_backpressure_close
+}
+
+fn fill_transport_mailbox(
+  subject: process.Subject(transport.InternalMessage),
+  remaining: Int,
+) -> Nil {
+  case remaining <= 0 {
+    True -> Nil
+    False -> {
+      process.send(subject, transport.SendError(reason: "queued"))
+      fill_transport_mailbox(subject, remaining - 1)
+    }
+  }
+}
+
+pub fn explicit_decode_event_skips_server_view_render_on_join_and_update_test() {
+  let view_subject = process.new_subject()
+  let config =
+    runtime.RuntimeConfig(
+      init: counter_init,
+      update: counter_update,
+      view: fn(model: CounterModel) {
+        process.send(view_subject, "view")
+        counter_view(model)
+      },
+      decode_event: option.Some(counter_decode_event),
+      serialize_model: option.Some(fn(model: CounterModel) {
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
+      deserialize_model: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      on_route_leave: option.None,
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
+      on_notification: option.None,
+      init_from_request: option.None,
+      secret_key: "",
+      dev_mode: False,
+    )
+  let assert Ok(subject) = runtime.start(config)
+  let transport_subject = process.new_subject()
+
+  process.send(
+    subject,
+    runtime.ClientConnected(conn_id: "decode_fast", subject: transport_subject),
+  )
+  process.sleep(20)
+  process.send(
+    subject,
+    runtime.ClientJoined(conn_id: "decode_fast", token: "", path: "/"),
+  )
+  process.sleep(50)
+  let assert 0 = count_string_messages(view_subject, 0)
+  let _ = drain_messages(transport_subject, [])
+
+  process.send(
+    subject,
+    runtime.ClientEventReceived(
+      conn_id: "decode_fast",
+      event_name: "click",
+      handler_id: "increment",
+      event_data: "{}",
+      target_path: "0",
+      clock: 1,
+      ops: "",
+    ),
+  )
+  process.sleep(50)
+
+  let assert 0 = count_string_messages(view_subject, 0)
+  let msgs = drain_messages(transport_subject, [])
+  let has_state_update =
+    list.any(msgs, fn(m) {
+      case m {
+        transport.SendPatch(..) -> True
+        transport.SendModelSync(..) -> True
+        _ -> False
+      }
+    })
+  let assert True = has_state_update
+}
+
+pub fn runtime_requires_event_decoder_test() {
+  let view_subject = process.new_subject()
+  let config =
+    runtime.RuntimeConfig(
+      init: counter_init,
+      update: counter_update,
+      view: fn(model: CounterModel) {
+        process.send(view_subject, "view")
+        element.el(
+          "button",
+          [element.on("click", handler.register_simple(Increment))],
+          [
+            element.text(int.to_string(model.count)),
+          ],
+        )
+      },
+      decode_event: option.None,
+      serialize_model: option.Some(fn(model: CounterModel) {
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
+      deserialize_model: option.None,
+      route_patterns: [],
+      on_route_change: option.None,
+      on_route_leave: option.None,
+      dynamic_subscriptions: option.None,
+      on_notify: option.None,
+      on_notification: option.None,
+      init_from_request: option.None,
+      secret_key: "",
+      dev_mode: False,
+    )
+  let assert Error(error.ConfigError(reason: reason)) = runtime.start(config)
+  let assert True = string.contains(reason, "Missing event decoder")
+  let assert 0 = count_string_messages(view_subject, 0)
+}
+
+fn count_string_messages(subject: process.Subject(String), count: Int) -> Int {
+  let selector = process.new_selector() |> process.select(subject)
+  case process.selector_receive(selector, 100) {
+    Ok(_) -> count_string_messages(subject, count + 1)
+    Error(Nil) -> count
+  }
+}
+
 pub fn multiple_increments_produce_patches_test() {
   // After join, sending 5 increments should produce 5 patches (not model_syncs)
   let config = counter_config()
@@ -1239,7 +1522,7 @@ pub fn server_state_not_in_model_sync_test() {
   )
   process.sleep(100)
 
-  // Collect ALL messages from join (mount + model_sync)
+  // Collect ALL messages from join.
   let msgs = drain_messages(transport_subject, [])
   // Find model_sync message — it should contain count but NOT api_key
   let model_syncs =
@@ -1312,7 +1595,7 @@ pub fn app_with_server_background_effect_pushes_update_test() {
     runtime.ClientJoined(conn_id: "bg_conn", token: "", path: "/"),
   )
   process.sleep(100)
-  // Drain mount + initial model_sync
+  // Drain initial model_sync
   let _ = drain_messages(transport_subject, [])
 
   // Simulate background effect dispatching a message
@@ -1395,7 +1678,7 @@ pub fn app_with_server_user_event_pushes_update_test() {
     runtime.ClientJoined(conn_id: "evt_conn", token: "", path: "/"),
   )
   process.sleep(100)
-  // Drain mount + initial model_sync
+  // Drain initial model_sync
   let _ = drain_messages(transport_subject, [])
 
   // Send a client event (simulating button click)
@@ -1813,19 +2096,19 @@ pub fn init_from_request_replaces_default_init_test() {
       option.Some(fake_req),
     )
 
-  // Send ClientJoin to trigger mount — the runtime will send back model state
+  // Send ClientJoin; the runtime will send back model state.
   on_event("ws_init_conn", transport.ClientJoin(token: "", path: "/"))
   process.sleep(200)
 
   // Drain the transport subject for messages
   let msgs = drain_messages(transport_subject, [])
-  // Look for a model_sync or mount containing "42" (the count from cookie)
+  // Look for a model_sync containing "42" (the count from cookie).
   let has_42 =
     list.any(msgs, fn(m) {
       case m {
         transport.SendModelSync(model_json: json, ..) ->
           string.contains(json, "\"count\":42")
-        transport.SendMount(payload: p) -> string.contains(p, "42")
+        transport.SendMount(..) -> False
         _ -> False
       }
     })
@@ -1867,7 +2150,7 @@ pub fn init_from_request_none_uses_default_init_test() {
       case m {
         transport.SendModelSync(model_json: json, ..) ->
           string.contains(json, "\"count\":0")
-        transport.SendMount(payload: p) -> string.contains(p, ">0<")
+        transport.SendMount(..) -> False
         _ -> False
       }
     })
@@ -1931,17 +2214,15 @@ pub fn join_recovers_state_from_httponly_cookie_test() {
       case m {
         transport.SendModelSync(model_json: json, ..) ->
           string.contains(json, "\"count\":77")
-        transport.SendMount(payload: html) -> string.contains(html, "77")
+        transport.SendMount(..) -> False
         _ -> False
       }
     })
   let assert True = has_cookie_model
 }
 
-/// Regression test: mount HTML must reflect the ws_init model, not the default init.
-/// Bug: client showed login page after auth because mount used SSR HTML (hydrated=true skip).
-/// Fix: handleMount always morphs the mount HTML, never skips.
-pub fn mount_html_reflects_ws_init_model_test() {
+/// Regression test: live join model sync must reflect the ws_init model, not the default init.
+pub fn model_sync_reflects_ws_init_model_test() {
   // ws_init sets count to 99 (simulating auth-populated state)
   let init_from_req = fn(_req: request.Request(server.Connection)) -> #(
     CounterModel,
@@ -1956,7 +2237,9 @@ pub fn mount_html_reflects_ws_init_model_test() {
       update: counter_update,
       view: counter_view,
       decode_event: option.Some(counter_decode_event),
-      serialize_model: option.None,
+      serialize_model: option.Some(fn(model: CounterModel) {
+        "{\"count\":" <> int.to_string(model.count) <> "}"
+      }),
       deserialize_model: option.None,
       route_patterns: [],
       on_route_change: option.None,
@@ -1978,28 +2261,29 @@ pub fn mount_html_reflects_ws_init_model_test() {
   let assert Ok(#(on_event, _shutdown)) =
     runtime.start_and_connect_with_request(
       config,
-      "mount_html_conn",
+      "ws_init_sync_conn",
       transport_subject,
       option.Some(fake_req),
     )
 
-  // Join — triggers mount HTML render
-  on_event("mount_html_conn", transport.ClientJoin(token: "", path: "/"))
+  // Join — sends authoritative model state without remounting SSR HTML.
+  on_event("ws_init_sync_conn", transport.ClientJoin(token: "", path: "/"))
   process.sleep(200)
 
   let msgs = drain_messages(transport_subject, [])
 
-  // The mount HTML MUST contain "99" (from ws_init), not "0" (from default init)
-  let mount_has_99 =
+  // The model sync MUST contain "99" (from ws_init), not "0" (from default init).
+  let sync_has_99 =
     list.any(msgs, fn(m) {
       case m {
-        transport.SendMount(payload: html) -> string.contains(html, "99")
+        transport.SendModelSync(model_json: json, ..) ->
+          string.contains(json, "\"count\":99")
         _ -> False
       }
     })
-  let assert True = mount_has_99
+  let assert True = sync_has_99
 
-  // Verify it does NOT contain the default init value in mount
+  // Verify join did not remount HTML.
   let mount_msgs =
     list.filter_map(msgs, fn(m) {
       case m {
@@ -2007,6 +2291,5 @@ pub fn mount_html_reflects_ws_init_model_test() {
         _ -> Error(Nil)
       }
     })
-  // At least one mount message should exist
-  let assert True = list.length(mount_msgs) >= 1
+  let assert 0 = list.length(mount_msgs)
 }

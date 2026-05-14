@@ -53,6 +53,16 @@ pub fn record_latency(table: MetricsTable, latency_us: Int) -> Nil {
   record_latency_ffi(table, latency_us)
 }
 
+/// Remember the start time for one in-flight event in the current worker.
+pub fn mark_event_send_start(sent_at_us: Int) -> Nil {
+  mark_event_send_start_ffi(sent_at_us)
+}
+
+/// Take and clear the current worker's in-flight event start time.
+pub fn take_event_send_start() -> Int {
+  take_event_send_start_ffi()
+}
+
 /// Get monotonic time in microseconds (for latency measurement).
 pub fn now_us() -> Int {
   monotonic_us_ffi()
@@ -142,6 +152,12 @@ fn increment_by_ffi(table: MetricsTable, key: String, amount: Int) -> Nil
 
 @external(erlang, "beacon_sim_ffi", "record_latency")
 fn record_latency_ffi(table: MetricsTable, latency_us: Int) -> Nil
+
+@external(erlang, "beacon_sim_ffi", "mark_event_send_start")
+fn mark_event_send_start_ffi(sent_at_us: Int) -> Nil
+
+@external(erlang, "beacon_sim_ffi", "take_event_send_start")
+fn take_event_send_start_ffi() -> Int
 
 @external(erlang, "beacon_sim_ffi", "record_payload")
 fn record_payload_ffi(table: MetricsTable, payload: String) -> Nil

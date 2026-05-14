@@ -2,7 +2,10 @@
 -export([
     rescue/1, store_redirect_target/1, get_redirect_target/0,
     try_load_codec_encoder/0, try_load_codec_decoder/0,
-    try_load_substate_names/0, try_load_substate_encoder/1, try_load_flat_encoder/0
+    try_load_codec_event_decoder/0,
+    try_load_codec_renderer/0,
+    try_load_substate_names/0, try_load_substate_encoder/1, try_load_flat_encoder/0,
+    message_queue_len/1
 ]).
 
 %% Execute a function, catching any exception.
@@ -56,6 +59,38 @@ try_load_codec_decoder() ->
             case erlang:function_exported(beacon_codec, decode_model, 1) of
                 true ->
                     {ok, fun beacon_codec:decode_model/1};
+                false ->
+                    {error, nil}
+            end;
+        _ ->
+            {error, nil}
+    end.
+
+%% Auto-discover beacon_codec module and return its decode_event function.
+%% Returns {ok, Fun} if the module exists and exports decode_event/4,
+%% or {error, nil} if not found.
+try_load_codec_event_decoder() ->
+    case code:ensure_loaded(beacon_codec) of
+        {module, beacon_codec} ->
+            case erlang:function_exported(beacon_codec, decode_event, 4) of
+                true ->
+                    {ok, fun beacon_codec:decode_event/4};
+                false ->
+                    {error, nil}
+            end;
+        _ ->
+            {error, nil}
+    end.
+
+%% Auto-discover beacon_codec module and return its render_model function.
+%% Returns {ok, Fun} if the module exists and exports render_model/1,
+%% or {error, nil} if not found.
+try_load_codec_renderer() ->
+    case code:ensure_loaded(beacon_codec) of
+        {module, beacon_codec} ->
+            case erlang:function_exported(beacon_codec, render_model, 1) of
+                true ->
+                    {ok, fun beacon_codec:render_model/1};
                 false ->
                     {error, nil}
             end;
@@ -130,4 +165,10 @@ try_load_flat_encoder() ->
             end;
         _ ->
             {error, nil}
+    end.
+
+message_queue_len(Pid) ->
+    case erlang:process_info(Pid, message_queue_len) of
+        {message_queue_len, Len} -> Len;
+        undefined -> 1000000000
     end.

@@ -75,6 +75,23 @@ pub fn attribute_escapes_quotes_test() {
   let assert True = str_contains(result, "&quot;")
 }
 
+pub fn event_handler_id_escapes_quotes_test() {
+  let node =
+    element.el("button", [element.on("click", "h\" onclick=\"evil")], [
+      element.text("Click"),
+    ])
+  let result = element.to_string(node)
+  let assert True = str_contains(result, "h&quot; onclick=&quot;evil")
+  let assert False = str_contains(result, " onclick=\"evil")
+}
+
+pub fn unsafe_attribute_names_are_rejected_by_validator_test() {
+  let assert False = element.is_valid_attribute_name("onclick")
+  let assert False = element.is_valid_attribute_name("data-bad\" onclick=\"x")
+  let assert True = element.is_valid_attribute_name("data-testid")
+  let assert True = element.is_valid_attribute_name("aria-label")
+}
+
 pub fn beacon_keyed_renders_data_beacon_key_test() {
   let node = beacon.keyed("terminal-session-1", element.el("div", [], []))
   let result = element.to_string(node)

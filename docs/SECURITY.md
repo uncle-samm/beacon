@@ -39,7 +39,7 @@ as every other Beacon app.
 
 ## Origin Validation
 
-On every WebSocket upgrade, the transport checks the `Origin` header against the `Host` header. Empty origins, empty hosts, and mismatches are rejected with HTTP 403. Requests without an `Origin` header (non-browser clients, same-origin) are allowed.
+On every WebSocket upgrade, the transport checks the `Origin` header against the `Host` header. Missing origins, empty origins, empty hosts, protocol-relative values, and mismatches are rejected with HTTP 403. Non-browser clients must send an explicit same-host `Origin` header.
 
 ## Rate Limiting
 
@@ -57,7 +57,21 @@ Global pre-upgrade and WebSocket connection count is tracked via ETS. When `max_
 
 ## HTTP Pre-Upgrade Limits
 
-Before WebSocket upgrade, Beacon limits total header count, total header bytes, and request/header read time. Slow or oversized pre-upgrade requests fail before any runtime process is started.
+Before WebSocket upgrade, Beacon limits total header count, total request/header bytes, and total request/header read time using one monotonic deadline. Slow or oversized pre-upgrade requests fail before any runtime process is started.
+
+## Response Header Validation
+
+HTTP responses are validated immediately before serialization. Header names must be RFC token names, and header values must not contain CR, LF, or NUL bytes. Unsafe response headers fail loudly instead of being written to the socket, preventing HTTP response splitting from API routes or middleware.
+
+## HTML Attribute Validation
+
+Beacon escapes text and attribute values during SSR. Generic custom attribute names are validated before rendering and cannot be inline event attributes such as `onclick`; use Beacon event helpers instead. Event handler IDs are rendered as escaped attribute values.
+
+`element.raw_html` and `head_html` are trusted-only escape hatches for already-sanitized HTML. Do not pass user input to them.
+
+## Build And Dev Command Execution
+
+Build and dev tooling launches `gleam`, `npx`, `fswatch`, and `inotifywait` with argv-based Erlang ports instead of shell strings. Project paths and path dependencies are not interpolated into shell commands.
 
 ## Secure Headers
 
@@ -90,15 +104,16 @@ For application auth, prefer `beacon/auth` helpers over hand-written cookie and
 CSRF handling. `auth.default_session_config()` sets an opaque `beacon_session`
 cookie with `HttpOnly`, `Secure`, `SameSite=Lax`, and path `/`.
 
-`auth.create_login()` creates a server-side session and a cryptographically
-random session-bound CSRF token. Return that CSRF token in the login response
-body and require it on state-changing API routes with
-`auth.csrf_authenticated()`. Do not store the CSRF token in a cookie.
+`auth.login_json_response()` and `auth.login_route()` create a server-side
+session and a cryptographically random session-bound CSRF token. Return that
+CSRF token in the login response body and require it on state-changing API
+routes with `auth.protect_api_with_csrf()` or `auth.csrf_authenticated()`. Do
+not store the CSRF token in a cookie.
 
-Use `auth.ws_session_auth(store, config)` for WebSocket upgrades that should
-share the same session policy. Use `auth.dev_session_config()` only for
-localhost HTTP development, where the `Secure` cookie attribute would prevent
-the browser from storing the cookie.
+Use `auth.protect_ws(store, config)` for WebSocket upgrades that should share
+the same session policy. Use `auth.dev_session_config()` only for localhost
+HTTP development, where the `Secure` cookie attribute would prevent the browser
+from storing the cookie.
 
 ## Timer Cap
 

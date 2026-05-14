@@ -2,6 +2,7 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import snake
+import beacon/element
 import gleam/json
 import gleam/dynamic/decode
 
@@ -66,8 +67,16 @@ pub fn encode_model(state: snake.Model) -> String {
     #("player_name", json.string(model.player_name)),
     #("name_input", json.string(model.name_input)),
     #("has_name", json.bool(model.has_name)),
+    #("high_score_pending", json.bool(model.high_score_pending)),
   ])
   |> json.to_string
+}
+
+/// Render the model with the same generated server contract used for SSR.
+pub fn render_model(state: snake.Model) -> String {
+  let model = state
+  snake.view(model)
+  |> element.to_string
 }
 
 /// Decode a Model from JSON string (for applying client patches).
@@ -83,11 +92,97 @@ pub fn decode_model(json_str: String) -> Result(snake.Model, String) {
     use player_name <- decode.field("player_name", decode.string)
     use name_input <- decode.field("name_input", decode.string)
     use has_name <- decode.field("has_name", decode.bool)
-    decode.success(snake.Model(snake: snake, direction: server_decode_direction_value(direction), food: food, score: score, game_state: server_decode_gamestate_value(game_state), grid_width: grid_width, grid_height: grid_height, player_name: player_name, name_input: name_input, has_name: has_name))
+    use high_score_pending <- decode.field("high_score_pending", decode.bool)
+    decode.success(snake.Model(snake: snake, direction: server_decode_direction_value(direction), food: food, score: score, game_state: server_decode_gamestate_value(game_state), grid_width: grid_width, grid_height: grid_height, player_name: player_name, name_input: name_input, has_name: has_name, high_score_pending: high_score_pending))
   }
   case json.parse(json_str, model_decoder) {
     Ok(model) -> Ok(model)
     Error(_) -> Error("Failed to decode model")
+  }
+}
+
+/// Decode the generated client event contract. Live event decoding never
+/// renders the server view or reads the handler registry.
+pub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result(snake.Msg, String) {
+  let envelope_decoder = {
+    use msg_json <- decode.field("__beacon_msg", decode.string)
+    decode.success(msg_json)
+  }
+  case json.parse(data, envelope_decoder) {
+    Ok(msg_json) -> decode_msg(msg_json)
+    Error(_) -> Error("Client event missing generated Beacon message envelope")
+  }
+}
+
+
+fn decode_msg(json_str: String) -> Result(snake.Msg, String) {
+  let tag_decoder = {
+    use tag <- decode.field("tag", decode.string)
+    decode.success(tag)
+  }
+  case json.parse(json_str, tag_decoder) {
+    Ok(tag) -> {
+      case tag {
+    "Tick" -> {
+      let msg_decoder = {
+      decode.success(snake.Tick)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag Tick")
+      }
+    }
+    "ChangeDirection" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(snake.ChangeDirection(server_decode_direction_value(arg0)))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag ChangeDirection")
+      }
+    }
+    "RestartGame" -> {
+      let msg_decoder = {
+      decode.success(snake.RestartGame)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag RestartGame")
+      }
+    }
+    "UpdateNameInput" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(snake.UpdateNameInput(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag UpdateNameInput")
+      }
+    }
+    "SetName" -> {
+      let msg_decoder = {
+      decode.success(snake.SetName)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SetName")
+      }
+    }
+    "HighScoreUpdated" -> {
+      let msg_decoder = {
+      decode.success(snake.HighScoreUpdated)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag HighScoreUpdated")
+      }
+    }
+        _ -> Error("Unknown generated Beacon message tag " <> tag)
+      }
+    }
+    Error(_) -> Error("Generated Beacon message payload missing tag")
   }
 }
 
@@ -118,6 +213,7 @@ pub fn encode_flat_fields(state: snake.Model) -> String {
     #("player_name", json.string(model.player_name)),
     #("name_input", json.string(model.name_input)),
     #("has_name", json.bool(model.has_name)),
+    #("high_score_pending", json.bool(model.high_score_pending)),
   ])
   |> json.to_string
 }

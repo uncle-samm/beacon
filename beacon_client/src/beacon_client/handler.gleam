@@ -1,8 +1,9 @@
 /// Client-side handler registry — mirrors the server's beacon/handler.gleam
 /// but uses JavaScript module-level storage instead of BEAM process dictionary.
 import gleam/dict.{type Dict}
+import gleam/dynamic/decode
 import gleam/int
-import gleam/string
+import gleam/json
 
 /// A registry mapping handler IDs to Msg values or callbacks.
 pub type HandlerRegistry(msg) {
@@ -79,8 +80,10 @@ pub fn resolve(
     Error(Nil) -> {
       case dict.get(registry.parameterized, handler_id) {
         Ok(callback) -> {
-          let value = extract_value(event_data)
-          Ok(callback(value))
+          case extract_value(event_data) {
+            Ok(value) -> Ok(callback(value))
+            Error(reason) -> Error(reason)
+          }
         }
         Error(Nil) -> Error("Unknown handler: " <> handler_id)
       }
@@ -88,15 +91,14 @@ pub fn resolve(
   }
 }
 
-fn extract_value(data: String) -> String {
-  case string.split(data, "\"value\":\"") {
-    [_, rest] -> {
-      case string.split(rest, "\"") {
-        [value, ..] -> value
-        _ -> ""
-      }
-    }
-    _ -> ""
+fn extract_value(data: String) -> Result(String, String) {
+  let decoder = {
+    use value <- decode.field("value", decode.string)
+    decode.success(value)
+  }
+  case json.parse(data, decoder) {
+    Ok(value) -> Ok(value)
+    Error(_) -> Error("Event data missing string `value` field")
   }
 }
 

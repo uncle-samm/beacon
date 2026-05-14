@@ -1,0 +1,15 @@
+.git
+.venv
+.tmp
+__pycache__
+*.pyc
+
+/build
+/beacon_client/build
+/examples/*/build
+/examples/*/node_modules
+
+node_modules
+/node_modules
+
+.DS_Store

@@ -76,6 +76,7 @@ ws_connect(Host, Port, Attempt) ->
             Req = iolist_to_binary([
                 <<"GET /ws HTTP/1.1\r\n">>,
                 <<"Host: ">>, Host, <<"\r\n">>,
+                <<"Origin: http://">>, Host, <<"\r\n">>,
                 <<"Upgrade: websocket\r\n">>,
                 <<"Connection: Upgrade\r\n">>,
                 <<"Sec-WebSocket-Key: ">>, Key, <<"\r\n">>,
@@ -109,6 +110,7 @@ ws_connect_with_headers(Host, Port, Headers) ->
                 <<"GET /ws HTTP/1.1\r\n">>,
                 <<"Host: ">>, Host, <<"\r\n">>,
                 render_headers(Headers),
+                <<"Origin: http://">>, Host, <<"\r\n">>,
                 <<"Upgrade: websocket\r\n">>,
                 <<"Connection: Upgrade\r\n">>,
                 <<"Sec-WebSocket-Key: ">>, Key, <<"\r\n">>,
@@ -151,6 +153,7 @@ ws_connect_no_retry(Host, Port) ->
             Req = iolist_to_binary([
                 <<"GET /ws HTTP/1.1\r\n">>,
                 <<"Host: ">>, Host, <<"\r\n">>,
+                <<"Origin: http://">>, Host, <<"\r\n">>,
                 <<"Upgrade: websocket\r\n">>,
                 <<"Connection: Upgrade\r\n">>,
                 <<"Sec-WebSocket-Key: ">>, Key, <<"\r\n">>,

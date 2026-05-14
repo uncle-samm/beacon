@@ -193,12 +193,11 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
           paddle_h,
           "#ff6b6b",
         ),
-        rect(
+        ball_rect(
           model.ball_x - ball_size / 2,
           model.ball_y - ball_size / 2,
           ball_size,
           ball_size,
-          "#fff",
         ),
       ],
     ),
@@ -247,6 +246,26 @@ fn rect(x: Int, y: Int, w: Int, h: Int, color: String) -> beacon.Node(Msg) {
         <> int.to_string(h)
         <> "px;background:"
         <> color,
+      ),
+    ],
+    [],
+  )
+}
+
+fn ball_rect(x: Int, y: Int, w: Int, h: Int) -> beacon.Node(Msg) {
+  html.div(
+    [
+      html.attribute("data-testid", "pong-ball"),
+      html.style(
+        "position:absolute;left:"
+        <> int.to_string(x)
+        <> "px;top:"
+        <> int.to_string(y)
+        <> "px;width:"
+        <> int.to_string(w)
+        <> "px;height:"
+        <> int.to_string(h)
+        <> "px;background:#fff",
       ),
     ],
     [],

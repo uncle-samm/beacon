@@ -2,6 +2,7 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import triple_counter
+import beacon/element
 import gleam/json
 import gleam/dynamic/decode
 
@@ -25,6 +26,14 @@ pub fn encode_model(state: #(triple_counter.Model, triple_counter.Local)) -> Str
   |> json.to_string
 }
 
+/// Render the model with the same generated server contract used for SSR.
+pub fn render_model(state: #(triple_counter.Model, triple_counter.Local)) -> String {
+  let model = state.0
+  let local = state.1
+  triple_counter.view(model, local)
+  |> element.to_string
+}
+
 /// Decode a #(Model, Local) from JSON string (for applying client patches).
 pub fn decode_model(json_str: String) -> Result(#(triple_counter.Model, triple_counter.Local), String) {
   let state_decoder = {
@@ -36,5 +45,107 @@ pub fn decode_model(json_str: String) -> Result(#(triple_counter.Model, triple_c
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
     Error(_) -> Error("Failed to decode model+local")
+  }
+}
+
+/// Decode the generated client event contract. Live event decoding never
+/// renders the server view or reads the handler registry.
+pub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result(triple_counter.Msg, String) {
+  let envelope_decoder = {
+    use msg_json <- decode.field("__beacon_msg", decode.string)
+    decode.success(msg_json)
+  }
+  case json.parse(data, envelope_decoder) {
+    Ok(msg_json) -> decode_msg(msg_json)
+    Error(_) -> Error("Client event missing generated Beacon message envelope")
+  }
+}
+
+
+fn decode_msg(json_str: String) -> Result(triple_counter.Msg, String) {
+  let tag_decoder = {
+    use tag <- decode.field("tag", decode.string)
+    decode.success(tag)
+  }
+  case json.parse(json_str, tag_decoder) {
+    Ok(tag) -> {
+      case tag {
+    "SharedIncrement" -> {
+      let msg_decoder = {
+      decode.success(triple_counter.SharedIncrement)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SharedIncrement")
+      }
+    }
+    "SharedDecrement" -> {
+      let msg_decoder = {
+      decode.success(triple_counter.SharedDecrement)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SharedDecrement")
+      }
+    }
+    "SharedUpdated" -> {
+      let msg_decoder = {
+      decode.success(triple_counter.SharedUpdated)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SharedUpdated")
+      }
+    }
+    "SetSharedCount" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.int)
+      decode.success(triple_counter.SetSharedCount(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SetSharedCount")
+      }
+    }
+    "MyIncrement" -> {
+      let msg_decoder = {
+      decode.success(triple_counter.MyIncrement)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag MyIncrement")
+      }
+    }
+    "MyDecrement" -> {
+      let msg_decoder = {
+      decode.success(triple_counter.MyDecrement)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag MyDecrement")
+      }
+    }
+    "LocalIncrement" -> {
+      let msg_decoder = {
+      decode.success(triple_counter.LocalIncrement)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag LocalIncrement")
+      }
+    }
+    "LocalDecrement" -> {
+      let msg_decoder = {
+      decode.success(triple_counter.LocalDecrement)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag LocalDecrement")
+      }
+    }
+        _ -> Error("Unknown generated Beacon message tag " <> tag)
+      }
+    }
+    Error(_) -> Error("Generated Beacon message payload missing tag")
   }
 }

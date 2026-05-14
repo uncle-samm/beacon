@@ -1,7 +1,10 @@
 import beacon
 import beacon/html
+import beacon/log
 import beacon/route
+import gleam/dynamic/decode
 import gleam/int
+import gleam/json
 import gleam/list
 
 pub type Model {
@@ -44,12 +47,12 @@ pub type Msg {
   SetDraft(String)
   SetFilter(String)
   ToggleCompact
-  AddCard
+  AddCard(String)
   Advance(Int)
   SetDraftName(String)
   SetDraftRole(String)
   ToggleMenu
-  SaveProfile
+  SaveProfile(String)
 }
 
 pub fn init() -> Model {
@@ -102,11 +105,18 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
     SetDraft(text) -> #(model, Local(..local, draft: text))
     SetFilter(filter) -> #(model, Local(..local, filter: filter))
     ToggleCompact -> #(model, Local(..local, compact: !local.compact))
-    AddCard -> {
-      case local.draft == "" {
+    AddCard(fields_json) -> {
+      let title = case form_field(fields_json, "card_title") {
+        Ok(value) -> value
+        Error(reason) -> {
+          log.warning("routed_workspace", "Invalid card submit: " <> reason)
+          ""
+        }
+      }
+      case title == "" {
         True -> #(model, local)
         False -> {
-          let card = Card(id: model.next_id, title: local.draft, lane: "todo")
+          let card = Card(id: model.next_id, title: title, lane: "todo")
           #(
             Model(
               ..model,
@@ -125,15 +135,26 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
     SetDraftName(name) -> #(model, Local(..local, draft_name: name))
     SetDraftRole(role) -> #(model, Local(..local, draft_role: role))
     ToggleMenu -> #(model, Local(..local, menu_open: !local.menu_open))
-    SaveProfile -> #(
-      Model(
-        ..model,
-        display_name: local.draft_name,
-        role: local.draft_role,
-        saved_version: model.saved_version + 1,
-      ),
-      local,
-    )
+    SaveProfile(fields_json) -> {
+      case
+        form_field(fields_json, "display_name"),
+        form_field(fields_json, "role")
+      {
+        Ok(name), Ok(role) -> #(
+          Model(
+            ..model,
+            display_name: name,
+            role: role,
+            saved_version: model.saved_version + 1,
+          ),
+          local,
+        )
+        Error(reason), _ | _, Error(reason) -> {
+          log.warning("routed_workspace", "Invalid profile submit: " <> reason)
+          #(model, local)
+        }
+      }
+    }
   }
 }
 
@@ -226,7 +247,7 @@ fn pipeline_view(model: Model, local: Local) -> beacon.Node(Msg) {
   html.div([], [
     html.form(
       [
-        beacon.on_submit(AddCard),
+        beacon.on_submit_local(AddCard),
         html.style(
           "display:flex;gap:8px;align-items:center;margin-bottom:16px;",
         ),
@@ -235,6 +256,7 @@ fn pipeline_view(model: Model, local: Local) -> beacon.Node(Msg) {
         html.input([
           html.type_("text"),
           html.value(local.draft),
+          html.attribute("name", "card_title"),
           html.placeholder("New card title"),
           beacon.on_input(SetDraft),
           html.attribute("data-testid", "card-draft"),
@@ -296,7 +318,7 @@ fn settings_view(model: Model, local: Local) -> beacon.Node(Msg) {
   html.div([], [
     html.form(
       [
-        beacon.on_submit(SaveProfile),
+        beacon.on_submit_local(SaveProfile),
         html.style("display:grid;gap:12px;max-width:460px;"),
       ],
       [
@@ -305,6 +327,7 @@ fn settings_view(model: Model, local: Local) -> beacon.Node(Msg) {
           html.input([
             html.type_("text"),
             html.value(local.draft_name),
+            html.attribute("name", "display_name"),
             beacon.on_input(SetDraftName),
             html.attribute("data-testid", "draft-name"),
           ]),
@@ -315,6 +338,7 @@ fn settings_view(model: Model, local: Local) -> beacon.Node(Msg) {
             [
               beacon.on_change(SetDraftRole),
               html.attribute("data-testid", "draft-role"),
+              html.attribute("name", "role"),
             ],
             [
               option("owner", local.draft_role, "Owner"),
@@ -430,6 +454,17 @@ fn option(value: String, selected: String, label: String) -> beacon.Node(Msg) {
     False -> [html.attribute("value", value)]
   }
   html.option(attrs, [html.text(label)])
+}
+
+fn form_field(fields_json: String, field: String) -> Result(String, String) {
+  let decoder = {
+    use value <- decode.field(field, decode.string)
+    decode.success(value)
+  }
+  case json.parse(fields_json, decoder) {
+    Ok(value) -> Ok(value)
+    Error(_) -> Error("missing string field `" <> field <> "`")
+  }
 }
 
 fn metric(label: String, value: String) -> beacon.Node(Msg) {

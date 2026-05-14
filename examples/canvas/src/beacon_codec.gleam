@@ -2,6 +2,7 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import canvas
+import beacon/element
 import gleam/json
 import gleam/dynamic/decode
 
@@ -43,6 +44,14 @@ pub fn encode_model(state: #(canvas.Model, canvas.Local)) -> String {
   |> json.to_string
 }
 
+/// Render the model with the same generated server contract used for SSR.
+pub fn render_model(state: #(canvas.Model, canvas.Local)) -> String {
+  let model = state.0
+  let local = state.1
+  canvas.view(model, local)
+  |> element.to_string
+}
+
 /// Decode a #(Model, Local) from JSON string (for applying client patches).
 pub fn decode_model(json_str: String) -> Result(#(canvas.Model, canvas.Local), String) {
   let state_decoder = {
@@ -57,6 +66,103 @@ pub fn decode_model(json_str: String) -> Result(#(canvas.Model, canvas.Local), S
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
     Error(_) -> Error("Failed to decode model+local")
+  }
+}
+
+/// Decode the generated client event contract. Live event decoding never
+/// renders the server view or reads the handler registry.
+pub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result(canvas.Msg, String) {
+  let envelope_decoder = {
+    use msg_json <- decode.field("__beacon_msg", decode.string)
+    decode.success(msg_json)
+  }
+  case json.parse(data, envelope_decoder) {
+    Ok(msg_json) -> decode_msg(msg_json)
+    Error(_) -> Error("Client event missing generated Beacon message envelope")
+  }
+}
+
+
+fn decode_msg(json_str: String) -> Result(canvas.Msg, String) {
+  let tag_decoder = {
+    use tag <- decode.field("tag", decode.string)
+    decode.success(tag)
+  }
+  case json.parse(json_str, tag_decoder) {
+    Ok(tag) -> {
+      case tag {
+    "StartDrawing" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(canvas.StartDrawing(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag StartDrawing")
+      }
+    }
+    "MoveCursor" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(canvas.MoveCursor(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag MoveCursor")
+      }
+    }
+    "StopDrawing" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(canvas.StopDrawing(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag StopDrawing")
+      }
+    }
+    "SetColor" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(canvas.SetColor(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SetColor")
+      }
+    }
+    "ClearCanvas" -> {
+      let msg_decoder = {
+      decode.success(canvas.ClearCanvas)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag ClearCanvas")
+      }
+    }
+    "StrokesUpdated" -> {
+      let msg_decoder = {
+      decode.success(canvas.StrokesUpdated)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag StrokesUpdated")
+      }
+    }
+    "SetStrokes" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.list(server_decode_stroke()))
+      decode.success(canvas.SetStrokes(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SetStrokes")
+      }
+    }
+        _ -> Error("Unknown generated Beacon message tag " <> tag)
+      }
+    }
+    Error(_) -> Error("Generated Beacon message payload missing tag")
   }
 }
 

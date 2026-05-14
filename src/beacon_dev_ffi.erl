@@ -1,15 +1,54 @@
 -module(beacon_dev_ffi).
--export([run_command/1, sleep/1, check_for_changes/1, get_file_timestamps/1,
-         do_hot_swap/0, string_contains/2, int_to_string/1, find_gleam_files/1,
+-export([run_program/3, sleep/1, check_for_changes/1, get_file_timestamps/1,
+         do_hot_swap/0, int_to_string/1, find_gleam_files/1,
          start_native_watcher/1, poll_native_watcher/0, native_watcher_available/0,
          notify_browser_reload/0]).
 
 %% Persistent state for file modification tracking
 -define(TIMESTAMP_KEY, beacon_dev_timestamps).
 
-run_command(Cmd) ->
-    Result = os:cmd(binary_to_list(Cmd)),
-    unicode:characters_to_binary(Result).
+run_program(Cwd0, Program0, Args0) ->
+    Cwd = binary_to_list(Cwd0),
+    Program = binary_to_list(Program0),
+    Args = [binary_to_list(Arg) || Arg <- Args0],
+    case os:find_executable(Program) of
+        false ->
+            {error, unicode:characters_to_binary(["Executable not found: ", Program])};
+        Executable ->
+            try open_port(
+                    {spawn_executable, Executable},
+                    [
+                        {cd, Cwd},
+                        {args, Args},
+                        exit_status,
+                        use_stdio,
+                        stderr_to_stdout,
+                        binary
+                    ]
+                ) of
+                Port -> collect_port_output(Port, [])
+            catch
+                error:Reason ->
+                    {error, unicode:characters_to_binary(
+                        io_lib:format("Failed to start ~s in ~s: ~p", [Program, Cwd, Reason])
+                    )}
+            end
+    end.
+
+collect_port_output(Port, Acc) ->
+    receive
+        {Port, {data, Data}} ->
+            collect_port_output(Port, [Data | Acc]);
+        {Port, {exit_status, 0}} ->
+            {ok, iolist_to_binary(lists:reverse(Acc))};
+        {Port, {exit_status, Status}} ->
+            Output = iolist_to_binary(lists:reverse(Acc)),
+            {error, unicode:characters_to_binary([
+                Output,
+                "\nExit status: ",
+                integer_to_list(Status)
+            ])}
+    end.
 
 sleep(Ms) ->
     timer:sleep(Ms),
@@ -95,12 +134,6 @@ get_mtime(File) ->
             0
     end.
 
-string_contains(Haystack, Needle) ->
-    case binary:match(Haystack, Needle) of
-        nomatch -> false;
-        _ -> true
-    end.
-
 int_to_string(N) ->
     integer_to_binary(N).
 
@@ -136,28 +169,40 @@ native_watcher_available() ->
 %% Start a native file watcher process. Returns a port.
 %% On macOS: uses fswatch. On Linux: uses inotifywait.
 start_native_watcher(Dirs) ->
-    %% SECURITY: Wrap each directory path in single quotes to prevent shell injection.
-    %% Directory paths come from developer configuration, not user input, but quoting
-    %% prevents breakage from paths with spaces or special characters.
-    DirStr = lists:join(" ", ["'" ++ binary_to_list(D) ++ "'" || D <- Dirs]),
-    Cmd = case os:type() of
+    DirArgs = [binary_to_list(D) || D <- Dirs],
+    Command = case os:type() of
         {unix, darwin} ->
-            "fswatch -1 --include '\\.gleam$' --exclude '.*' " ++ DirStr;
+            {ok, "fswatch", ["-1", "--include", "\\.gleam$", "--exclude", ".*"] ++ DirArgs};
 	    {unix, linux} ->
-	        "inotifywait -r -e modify,create,delete --include '\\.gleam$' " ++ DirStr;
+	        {ok, "inotifywait", ["-r", "-e", "modify,create,delete", "--include", "\\.gleam$"] ++ DirArgs};
 	    Other ->
 	        {unsupported, Other}
 	end,
-	case Cmd of
+	case Command of
 	    {unsupported, OtherOs} ->
 	        Reason = unicode:characters_to_binary(
 	            io_lib:format("native watcher unsupported for os:type()=~p", [OtherOs])
 	        ),
 	        {error, Reason};
-	    Command ->
-	        Port = open_port({spawn, Command}, [stream, exit_status, binary]),
-	        erlang:put(beacon_native_watcher_port, Port),
-	        {ok, nil}
+	    {ok, Program, Args} ->
+	        case os:find_executable(Program) of
+	            false ->
+	                {error, unicode:characters_to_binary(["Executable not found: ", Program])};
+	            Executable ->
+	                try open_port(
+	                        {spawn_executable, Executable},
+	                        [{args, Args}, stream, exit_status, binary]
+	                    ) of
+	                    Port ->
+	                        erlang:put(beacon_native_watcher_port, Port),
+	                        {ok, nil}
+	                catch
+	                    error:Reason ->
+	                        {error, unicode:characters_to_binary(
+	                            io_lib:format("Failed to start watcher ~s: ~p", [Program, Reason])
+	                        )}
+	                end
+	        end
 	end.
 
 %% Poll the native watcher — returns true if a change was detected.

@@ -7,11 +7,460 @@
 
 ## Current Status
 
-**Active Milestone:** 97 — Browser Matrix Expansion
-**Last Completed:** 99 — Test Quality Hardening
+**Active Milestone:** None
+**Last Completed:** 113 — Browser And Load Evidence
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (715 tests passed, 0 failures)
+**Test Status:** GREEN (754 tests passed, 0 failures)
 **Linter:** PASSING (zero violations)
+
+### Milestone 113: Browser And Load Evidence
+> Prove the simplified model in the browser and under pressure: no flicker, no
+> repeated DOM churn, no HTML remounts after SSR, stable local interactions, and
+> bounded WebSocket behavior under multi-user/high-frequency scenarios.
+
+- [x] Add browser trace assertions for no repeated DOM mutation spam during
+      hydration, normal local events, model sync, route transitions, and
+      reconnects
+- [x] Add focused load scenarios for high-frequency local/model events, many
+      concurrent WebSockets, slow clients, and reconnect storms
+- [x] Wire the generated contract report into CDP/load output so failures
+      include the app contract that was tested
+- [x] Document the measured browser/load baseline and the exact command lines
+      in `docs/PROGRESS.md` and `docs/TESTING.md`
+
+**Notes:**
+- `test_all_cdp.py` now verifies every attempted example's
+  `build/beacon_contract.json`, prints the generated contract summary, and
+  asserts the required generated codecs are present before browser assertions.
+- `beacon/stress` now sends real masked WebSocket join/event frames through
+  each connection via `events_per_connection`, so stress tests can exercise
+  runtime update pressure instead of only idle sockets.
+- Focused desktop CDP verification:
+  `BEACON_CDP_VIEWPORTS=desktop PYTHONUNBUFFERED=1 scripts/run_all_cdp.sh counter`
+  passed with 75 checks, 0 failures, 20 skipped.
+- The focused CDP run exposed a real reconnect bug: the browser kept the old
+  model version after socket close, rejected the fresh runtime's first
+  `model_sync` as stale, and could render an optimistic click without sending
+  the event. The client now resets connection-scoped version/ack state when a
+  new WebSocket connects.
+- CDP now installs a document-start DOM monitor and asserts no empty-root
+  flicker samples, bounded mutation buckets, bounded layout shift, and mobile
+  horizontal overflow on the monitored examples. Reconnect paths also assert a
+  post-reconnect DOM conformance window.
+- Full browser baseline after regenerating all example bundles:
+  `BEACON_CDP_VIEWPORTS=desktop PYTHONUNBUFFERED=1 scripts/run_all_cdp.sh`
+  passed with 415 checks and 0 failures; `BEACON_CDP_VIEWPORTS=mobile
+  PYTHONUNBUFFERED=1 scripts/run_all_cdp.sh` passed with 424 checks and 0
+  failures.
+- The broad mobile pass exposed a real server-push/optimistic-update ordering
+  bug in Pong: an older server tick could overwrite a local Pause before the
+  Pause event was acknowledged. The browser now holds pre-ack server
+  state updates while an optimistic model event is pending and requests a full
+  sync if a held patch would make the patch base unsafe.
+- Parameterized client handlers now JSON-decode the `value` field instead of
+  string-splitting event JSON. This fixed quoted values and
+  `on_submit_local` form snapshots in generated client code and server-side
+  handler resolution.
+- Canvas remains a full freehand example: `mousedown`/`mousemove` update Local
+  immediately, while `mouseup` commits the full pointer trail once to the
+  server. Focused desktop CDP for `canvas` passed with 11 checks and 0
+  failures.
+- `on_submit_local` is now used by the routed workspace and local-first form
+  examples for submit boundaries that depend on Local fields; the server
+  receives a live form snapshot instead of reading stale server-side Local.
+- Load baseline with `examples/counter` running:
+  `gleam run -m beacon/stress` passed with 100/100 WebSocket connections,
+  1,000 event frames attempted, process count 44 → 146 → 46, memory delta
+  +1468KB, and stable final memory around 47MB.
+
+### Milestone 112: Opinionated Public API Cleanup ✅
+> Remove remaining old affordances from normal app authoring. Beacon should
+> expose one obvious app model: generated contracts, generated SSR render,
+> explicit route-aware composition, and advanced escape hatches quarantined away
+> from beginner-facing APIs.
+
+- [x] Make generated contracts mandatory for every public app/routed app start
+      path and move manual event decoders behind an explicitly advanced API
+- [x] Delete or rename stale docs/API language around file routing,
+      handler-registry authority, runtime-only apps, and HTML morph updates
+- [x] Make normal apps and routed apps feel like one API family in docs,
+      examples, diagnostics, and generated contract reports
+- [x] Print a concise build contract summary during codegen/startup in addition
+      to `build/beacon_contract.json`
+- [x] Tighten client-visible purity diagnostics and linter coverage for old
+      route/file/server-rendering patterns
+- [x] Add regression tests for the stricter public contract/startup behavior
+
+**Notes:**
+- `application.start` now rejects manual `decode_event`; callers must use
+  generated contracts through `beacon.start` or explicitly choose
+  `application.start_advanced` / `start_supervised_advanced` for test and
+  non-browser transports.
+- `beacon.routes` and `beacon.on_route_change` were removed from the public
+  `beacon` module. `route_pages` is the single public route declaration API.
+- `docs/FILE_BASED_ROUTING.md` was renamed to `docs/ROUTING.md`; docs now
+  describe explicit route modules and one app/runtime path.
+- Codegen logs a one-line contract summary and writes the same summary plus
+  `render_model` to `build/beacon_contract.json`.
+- The linter now checks shipped Markdown docs, excluding historical
+  `docs/PROGRESS.md`, for stale routing/rendering phrases.
+- Verification: `gleam build`, `gleam test` (752 passed, 0 failures),
+  `gleam run -m beacon/lint`, `python3 -m py_compile test_all_cdp.py`,
+  `node --check beacon_client/src/beacon_client_ffi.mjs`, `gleam build` in
+  `beacon_client`, `git diff --check`, and focused desktop CDP for `counter`.
+
+### Milestone 111: Generated Contract Hardening ✅
+> Make the generated contract the normal-app boundary: no runtime server handler
+> registry, startup contract verification before binding, generated SSR renderer,
+> client-originated message allowlists, and a machine-readable contract report.
+
+- [x] Remove `handler_registry` from runtime state entirely; live runtime event
+      decoding now depends only on explicit/generated decoders
+- [x] Verify `beacon_codec.encode_model/1`, `decode_event/4`, and
+      `render_model/1` before public `beacon.start` opens a port
+- [x] Add generated `render_model/1` and have SSR use it when a generated
+      contract is loaded
+- [x] Add optional `ClientMsg` allowlists so browser-originated events can be
+      narrower than server/internal `Msg`
+- [x] Generate `build/beacon_contract.json` with Model, Local, Server,
+      top-level client messages, nested component messages, and codec details
+- [x] Document low-level manual `decode_event` as an advanced non-browser hook
+      rather than the normal app path
+- [x] Add regression coverage for `ClientMsg` detection and preserve runtime
+      no-server-view behavior tests
+
+**Notes:**
+- `handler_registry` is now only a client render implementation detail in the
+  generated browser bundle. Runtime state no longer stores it.
+- Public startup is stricter: a stale or missing generated server contract fails
+  before listening instead of failing on first WebSocket event.
+- Verification: `gleam build`, `gleam test` (748 passed, 0 failures),
+  `gleam run -m beacon/lint`, `node --check
+  beacon_client/src/beacon_client_ffi.mjs`, and `gleam build` in
+  `beacon_client`.
+
+### Milestone 110: Mandatory Generated Event Contract ✅
+> Retire the remaining view-bound server event decoding path. Live events now
+> require an explicit or generated event contract; server-side `view` rendering
+> is not used to rebuild handler registries after SSR.
+
+- [x] Make `runtime.start` fail loudly when no explicit/generated
+      `decode_event` is available
+- [x] Remove runtime handler-registry event resolution from single events and
+      event batches
+- [x] Generate `beacon_codec.decode_event/4` and browser `encode_msg` so live
+      events carry the generated Msg contract
+- [x] Add generated nested Msg codecs for routed/component apps that wrap page
+      messages, such as `Home(home.Msg)`
+- [x] Update the browser client to drop events before hydration or when the
+      generated event contract is unavailable instead of sending undecodable
+      handler IDs
+- [x] Replace registry-backed runtime tests with tests for mandatory decoder
+      startup failure and no server view render on live update
+
+**Notes:**
+- `handler_registry` is no longer a server-side event authority. Generated
+  browser code still uses the client-side registry to turn DOM handlers into
+  typed `Msg` values, then sends the encoded Msg envelope to the server.
+- Verification: `gleam build`, `gleam test` (747 passed, 0 failures),
+  `gleam run -m beacon/lint`,
+  `node --check beacon_client/src/beacon_client_ffi.mjs`, `gleam build` in
+  `beacon_client`, and a focused generated routed build with
+  `gleam run -m beacon/build examples/routed/src/main.gleam`.
+
+### Milestone 109: Performance Audit Fixes ✅
+> Close the high-impact findings from the `$performance` audit while preserving
+> Beacon's single rendering model: HTTP SSR first paint, then client-rendered UI
+> from server-authoritative model sync/patch messages.
+
+- [x] Stop sending WebSocket `ServerMount` on normal live join; join now sends
+      `ServerModelSync` only so SSR HTML is not remounted after first paint
+- [x] Add regression coverage that live join and normal post-mount updates do
+      not send HTML mount frames
+- [x] Add outbound mailbox backpressure checks so slow clients are closed with
+      a clear error before runtime queues grow without bound
+- [x] Serve generated client JavaScript with gzip compression when requested
+      and include `Vary: Accept-Encoding`
+- [x] Add browser Performance API marks/measures for boot, WebSocket open,
+      model sync, patch handling, and render timing
+- [x] Make simulation latency measure event-send to response instead of
+      WebSocket write time only
+- [x] Convert `beacon/stress` from process-only sleeping to real WebSocket
+      connection stress with cleanup and duration reporting
+- [x] Optimize JSON patch diff hot paths to avoid avoidable list copying in map
+      and append-heavy array diffs
+- [x] Update wire protocol, architecture, testing docs, integration tests, and
+      auth/server-private tests to assert the no-remount join behavior
+
+**Notes:**
+- Runtime skips server-side view rendering on join and model updates. Milestone
+  110 removed the remaining registry-backed server event decoding path and made
+  explicit/generated event contracts mandatory.
+- Verification: `gleam build`, `gleam test` (747 passed, 0 failures),
+  `gleam run -m beacon/lint`, `gleam build` in `beacon_client`,
+  `node --check beacon_client/src/beacon_client_ffi.mjs`,
+  `node --check beacon_client/src/beacon_client/patch.mjs`,
+  `node test_client_patch.mjs`, `git diff --check`, and focused desktop CDP
+  `BEACON_CDP_VIEWPORTS=desktop scripts/run_all_cdp.sh counter_local`
+  (29 passed, 0 failed, 22 skipped).
+
+### Milestone 108: Stability Audit Fixes ✅
+> Close the framework, client, and harness risks found by the `$stability`
+> audit without weakening fail-loud behavior.
+
+- [x] Make runtime-owned effects track spawned process IDs and kill live
+      timers/background work on runtime shutdown
+- [x] Stop dynamic PubSub listeners and unsubscribe all listener topics on
+      runtime shutdown
+- [x] Make per-connection runtime startup failures close the WebSocket instead
+      of returning inert no-op handlers
+- [x] Make view render failures send an error and keep the last renderable
+      model instead of broadcasting stale-handler state
+- [x] Add `ClientRequestSync` so patch failures recover with `model_sync`
+      rather than staying permanently stale
+- [x] Remove generated-browser local-event replay batches; local-only events
+      stay local and later model events send a single `event`
+- [x] Bound the browser pending WebSocket send queue
+- [x] Close WebSocket protocol violations immediately instead of treating them
+      as incomplete frames
+- [x] Scope CDP server shutdown to the started process group by default
+- [x] Strengthen regression tests for effect ownership, runtime shutdown,
+      listener cleanup, render-failure commit behavior, request sync, protocol
+      violation decoding, and browser no-`event_batch` assertions
+
+**Notes:**
+- Normal generated browser clients no longer use `event_batch` for local-state
+  replay. The server still decodes bounded `event_batch` for explicit clients.
+- View render failure recovery is deliberately strict: the failed update is not
+  committed or broadcast; clients receive `ServerError`, and later renderable
+  updates continue from the previous good model.
+- Verification: `gleam build`, `gleam test` (743 passed, 0 failures),
+  `gleam run -m beacon/lint`, `gleam build` in `beacon_client`,
+  `node --check beacon_client/src/beacon_client_ffi.mjs`,
+  `node test_client_patch.mjs`, focused desktop CDP for `counter_local`
+  (29 passed, 0 failed) and `local_first_form` (13 passed, 0 failed), and
+  rebuilt all checked-in example client bundles.
+
+### Milestone 107: Performance Audit Skill ✅
+> Add a project-local Codex skill for Beacon performance and scalability
+> reviews.
+
+- [x] Add `.agents/skills/performance/SKILL.md` as a user-invocable skill
+- [x] Cover first page load, SSR, hydration, final render stability,
+      high-frequency WebSocket workloads, game-like traffic, multi-user load,
+      server/client hot paths, resource bounds, and instrumentation
+- [x] Include Beacon-specific benchmark expectations for latency
+      distributions, events/sec, bytes/event, CPU/RAM, mailbox pressure,
+      DOM mutation counts, and multi-user scenarios
+- [x] Add output format that separates first-load, hydration, WebSocket,
+      multi-user, server, client, benchmark, and docs findings
+
+**Notes:**
+- The performance skill is deliberately separate from `stability`: stability
+  asks whether Beacon keeps working under stress; performance asks how fast it
+  works and how much CPU/RAM it costs.
+
+### Milestone 106: Stability Audit Skill ✅
+> Add a project-local Codex skill for Beacon stability and reliability reviews.
+
+- [x] Add `.agents/skills/stability/SKILL.md` as a user-invocable skill
+- [x] Cover process lifecycle, message ordering, backpressure, reconnects,
+      hydration/DOM churn, route/app-shape reliability, effects/timers/stores,
+      CI/browser flakes, and observability
+- [x] Include Beacon-specific severity/scope output so findings distinguish
+      framework risks, client risks, example issues, test flakes, CI issues,
+      and docs drift
+
+**Notes:**
+- The stability skill complements `security`, `test-quality`, `dx`, and
+  `tigerstyle`: it focuses on production reliability and flake classification
+  rather than vulnerability, test honesty, ergonomics, or style alone.
+
+### Milestone 105: Developer Experience Helper APIs And Docs ✅
+> Convert the highest-impact DX audit findings into framework helpers,
+> examples, docs, and regression tests.
+
+- [x] Add `api.json_value`, `api.read_text`, `api.read_form`, and
+      `api.form_field` so common API routes do not hand-roll JSON strings or
+      request-body parsing
+- [x] Add `auth.login_json_response`, `auth.login_route`,
+      `auth.current_user_route`, `auth.logout_route`, `auth.session_routes`,
+      `auth.protect_api`, `auth.protect_api_with_csrf`, `auth.protect_ws`, and
+      `auth.init_from_session`
+- [x] Update `examples/auth_workspace` to use framework API helpers instead of
+      local form parsing and manual JSON responses
+- [x] Remove beginner-facing `model_encoder` calls from local-state examples
+- [x] Move `head_html` out of the quick start and document it as trusted,
+      advanced head injection
+- [x] Document `route_pages` as the recommended routing API and lower-level
+      route hooks as advanced internals
+- [x] Add a root `README.md` with the current state model and recommended APIs
+- [x] Add regression tests for JSON response helpers, text/form body helpers,
+      standard auth routes, auth aliases, and request-aware session init
+
+**Notes:**
+- The low-level auth and API primitives remain available for custom apps, but
+  the docs now teach a standard route/session path first.
+- `auth.init_from_session` keeps `ws_init` available without forcing users to
+  write the cookie/session error handling by hand.
+- Verification: `gleam build`, `gleam test` (738 passed, 0 failures),
+  `gleam run -m beacon/lint`, `git diff --check`, and focused builds for
+  `examples/auth_workspace`, `examples/counter_local`, and
+  `examples/local_first_form`.
+
+### Milestone 104: Developer Experience Audit Skill ✅
+> Add a project-local Codex skill for Beacon DX reviews.
+
+- [x] Add `.agents/skills/dx/SKILL.md` as a user-invocable skill
+- [x] Cover API ergonomics, state-model clarity, rendering predictability,
+      routing, auth/API, diagnostics, examples, docs, and migration friction
+- [x] Include Beacon-specific output format with severity, user impact, and
+      highest-impact fixes
+
+**Notes:**
+- The DX skill is deliberately separate from `security`, `test-quality`,
+  `docs-quality`, and `tigerstyle`. It audits framework learnability and
+  workflow friction rather than correctness alone.
+
+### Milestone 103: Security Hardening Audit Fixes ✅
+> Close the framework-level findings from the `$security` audit without adding
+> fallback behavior.
+
+- [x] Reject unsafe HTTP response headers before serialization to prevent CRLF
+      response splitting
+- [x] Replace build and dev shell command execution with argv-based Erlang port
+      execution
+- [x] Cap HTTP pre-upgrade parsing with one total monotonic deadline across the
+      request line and headers
+- [x] Require WebSocket upgrade requests to include a same-host `Origin`
+      header
+- [x] Harden client JSON patch application against prototype-pollution paths
+      and encode JSON Pointer path segments in generated patches
+- [x] Validate HTML tag/attribute/event names and escape event handler IDs
+- [x] Add regression tests for response headers, attribute validation, event
+      escaping, and client patch pollution/path encoding
+- [x] Update `docs/SECURITY.md` with the stricter Origin, response header,
+      attribute, build command, and pre-upgrade deadline behavior
+
+**Notes:**
+- `beacon/transport/http.write_response` now validates every response header
+  immediately before writing to the socket and returns `Error` on invalid names
+  or values.
+- `beacon_build_ffi` and `beacon_dev_ffi` no longer expose `os:cmd` command
+  helpers. `gleam`, `npx`, and native watchers are launched via
+  `{spawn_executable, ...}` with argv lists.
+- `beacon_transport_ffi.read_http_request_with_limits` uses one deadline for
+  request-line and header parsing so a peer cannot multiply the timeout by the
+  configured header count.
+- Verification: `gleam build`, `gleam test` (727 passed, 0 failures),
+  `gleam run -m beacon/lint`, `node test_client_patch.mjs`, and
+  `git diff --check`.
+
+### Milestone 102: Boxd Browser Fanout Hardening 🚧
+> Make warmed/forked Boxd workers run browser shards without paying repeated
+> Docker cache checks or per-example first compile latency.
+
+- [x] Update local and base-VM Boxd CLI to v0.1.5 so `resume`, `pause`, and
+      current fork behavior are available
+- [x] Prepare `bold-wolf` as a base VM with Docker, repo sync, and a warmed
+      `beacon-cdp:boxd` image
+- [x] Add `BEACON_CDP_SHARDS` selected shard lists for multi-VM fanout
+- [x] Add `BEACON_CDP_SERVER_TIMEOUT` so slower CI startup windows are explicit
+      instead of hard-coded in `test_all_cdp.py`
+- [x] Add `BEACON_CDP_SKIP_DOCKER_BUILD=1` for forked workers that already have
+      the warmed image
+- [x] Add `BEACON_CDP_PREBUILD_EXAMPLES=1` so `Dockerfile.ci` can bake root and
+      example `gleam build` outputs into the image
+- [x] Fix app-module discovery so route page modules are not selected instead
+      of the Beacon entrypoint during auto-build
+- [ ] Rebuild `bold-wolf` with `BEACON_CDP_PREBUILD_EXAMPLES=1`, fork workers
+      from that image, and remeasure the 5-VM desktop shard run
+
+**Notes:**
+- Boxd base image cold setup on `bold-wolf`: 8:50.
+- Corrected warmed image rebuild after repo sync: 0:50; cache-only checks on
+  forks were ~0.4-2s but are now skippable.
+- First 5-VM run without baked example build artifacts was not accepted:
+  slowest VM finished in 6:25, but several shards failed on server startup
+  timeout while compiling examples, and one worker observed a Pong timing
+  assertion failure.
+- First prebuilt/forked run finished 22 of 23 shards cleanly; slowest completed
+  in 5:42. Shard 22 exposed a real auto-build bug where
+  `route_server_workspace` selected `pages/accounts.gleam` as the app module.
+- Verification after app-module discovery fix: focused Boxd Docker shard
+  `BEACON_CDP_SHARDS=22` passed in 1:14.
+- Boxd has more aggregate CPU/RAM than the local host (5 x 4 vCPU / 16 GB),
+  but this workload only benefits if first compile work is removed from the
+  timed shard path.
+
+### Milestone 101: Container Browser Shard Runner ✅
+> Run browser conformance as one deterministic shard per Docker container and
+> measure safe local parallelism on the current host.
+
+- [x] Add `Dockerfile.ci` with Gleam 1.14, Chromium, Node/npm, Python, and a
+      project-local `.venv`
+- [x] Add `.dockerignore` that excludes generated build output without hiding
+      source modules such as `src/beacon/build`
+- [x] Add `scripts/run_cdp_shards_docker.sh` plus `make browser-all-docker-shards`
+- [x] Add GitHub Actions jobs for build/test/lint and 23 desktop browser shard
+      jobs
+- [x] Make CDP harness root path container-safe instead of host-path hardcoded
+- [x] Make `examples/ai_chat` self-contained for CI by replacing the external
+      sibling `glean` dependency with deterministic server-side streaming
+- [x] Fix `examples/chat` new-session hydration from the shared message store
+- [x] Make the Pong pause browser assertion check ball position rather than
+      full HTML string equality
+
+**Notes:**
+- Local host capacity: 10 CPUs, 16 GB RAM.
+- Stable local browser shard setting: `BEACON_CDP_TOTAL_SHARDS=23
+  BEACON_CDP_VIEWPORTS=desktop BEACON_CDP_PARALLEL=5 make
+  browser-all-docker-shards`.
+- Verification: Docker `gleam build && gleam test && gleam run -m beacon/lint`
+  — 722 tests passed, 0 lint violations.
+- Verification: Docker focused `chat` browser run — 13 passed, 0 failed, 21
+  skipped.
+- Verification: Docker focused `pong` browser run — 7 passed, 0 failed, 22
+  skipped.
+- Verification: Docker all-example desktop shards, 23 total / 5 concurrent —
+  8:11 elapsed, 361 passed, 0 failed, 506 skipped.
+- Measurement: single-container all-example desktop run — 11:59 elapsed before
+  the final Pong test hardening, giving the stable shard runner an approximate
+  1.46x local speedup on this host.
+- Measurement: 10 concurrent shard containers completed in 5:32 but failed
+  under host pressure; 7 concurrent completed in 7:29 but failed with server
+  startup timeouts. Keep local default at 5 unless the host has more CPU/RAM.
+
+### Milestone 100: Client Contract Diagnostics And Test Sharding ✅
+> Make app-shape mistakes fail at build/lint time and make the browser matrix
+> practical to parallelize in containers.
+
+- [x] Add client-visible update purity diagnostics for stores, PubSub, HTTP/env/BEAM APIs, random calls, FFI, and captured `make_update(...)`
+- [x] Add a build-time client contract report with state shape, skipped imports, generated codecs, and message classification reasons
+- [x] Add `beacon.on_submit_local` for live form snapshots at submit boundaries
+- [x] Add example/app linter rules for impure update, stale `make_update(shared)` patterns, and deprecated route APIs
+- [x] Refactor `examples/chat` and `examples/snake` away from captured store update factories
+- [x] Add `test_all_cdp.py --shard INDEX/TOTAL` plus `make browser-all-shard`
+
+**Notes:**
+- `beacon/build/analyzer` now rejects client-visible `update` calls to known
+  server-only or nondeterministic APIs with actionable “move this to
+  on_update” diagnostics.
+- Build logs now print a client contract report for each app: Model, Local,
+  Server, skipped client imports, generated codecs, and a per-message
+  LOCAL/MODEL/MODEL+LOCAL reason.
+- `beacon.on_submit_local(fn(fields_json) { ... })` sends a live form snapshot
+  through event data so submit handlers do not close over stale server-side
+  Local values.
+- `gleam run -m beacon/lint` now scans `src` and `examples` while skipping
+  generated/build directories, and catches stale example patterns.
+- The CDP harness can shard the selected example list after canonical/filter
+  selection, intended for per-container parallel runs.
+- Verification: `gleam build`, `gleam test` (722 passed, 0 failures),
+  `gleam run -m beacon/lint`.
+- Verification: `gleam build` in `examples/chat` and `examples/snake`.
+- Verification: `BEACON_CDP_VIEWPORTS=desktop BEACON_CDP_SHARD=1/23 make
+  browser-all-shard` — 31 passed, 0 failed, 22 skipped.
 
 ### Milestone 99: Test Quality Hardening ✅
 > Remove false confidence from unit, sim, integration, and CDP coverage.
@@ -98,7 +547,7 @@
 - [x] Add a mobile viewport canonical browser pass
 - [x] Add browser-level WebSocket reconnect/disconnect conformance
 - [x] Add back/forward history conformance for explicit route apps
-- [ ] Decide whether this repo should add a hosted CI workflow or keep the
+- [x] Decide whether this repo should add a hosted CI workflow or keep the
       browser harness as a documented CI entrypoint
 
 **Notes:**
@@ -134,6 +583,8 @@
   skipped.
 - Verification: `gleam build`, `gleam test` (703 passed), and
   `gleam run -m beacon/lint`.
+- Decision: added `.github/workflows/ci.yml` with Docker build/test/lint and
+  desktop all-example browser shards, one shard per job/container.
 
 ### Milestone 96: Higher-Level Auth And API ✅
 > Make auth and API routes feel like Beacon primitives while preserving custom
@@ -188,9 +639,10 @@
 - Added `test_all_cdp.py --canonical`, `make browser-canonical`, and
   `scripts/run_canonical_cdp.sh` so the browser harness starts a temporary
   headless Chrome and runs through the project-local `.venv`.
-- Added reusable CDP assertions for parsed WebSocket frame types. Model events
-  must send `event`/`event_batch`, receive `patch`/`model_sync`, and receive no
-  post-update `mount`; Local-only interactions must send zero model events.
+- Added reusable CDP assertions for parsed WebSocket frame types. Generated
+  browser model events must send `event`, receive `patch`/`model_sync`, and
+  receive no post-update `mount`; Local-only interactions must send zero model
+  events.
 - Extended the DOM monitor with resettable mutation buckets, empty-root samples,
   and cumulative `layout-shift` summaries. Canonical slices now assert bounded
   mutation bursts, zero empty-root-after-content samples, and layout stability.
@@ -304,7 +756,7 @@
 - [x] Added build-pipeline tests proving the new examples analyze as supported client-state bundle shapes
 - [x] Browser/CDP integration proved SSR first paint, hydration takeover, local-only events, no HTML live updates, and no flicker/spam regressions
   - `examples/private_session`: SSR included public content, leaked no server secret in HTML/JS/body, sent `join` then model events, received `mount` + `model_sync` + `patch` frames, and never received post-update `mount` frames
-  - `examples/routed_workspace`: local inspector/tab/draft/compact/filter state caused zero WebSocket traffic, model actions used `event_batch`/`patch`, route navigation used the allowed route `mount`, and normal live updates used no HTML mount frames
+  - `examples/routed_workspace`: local inspector/tab/draft/compact/filter state caused zero WebSocket traffic, model actions used `event` plus `patch`/`model_sync`, route navigation used the allowed route `mount`, and normal live updates used no HTML mount frames
   - DOM instrumentation used a full `MutationObserver`, request/WS interception, `requestAnimationFrame` body samples, and `layout-shift` observation; probes found no empty-root-after-content samples, zero layout shift, no console/page errors, and mutation bursts limited to expected initial/route render work
   - Browser probes found and fixed three client runtime bugs: route navigation stale-model state, missing delegated `on_change`, and local-event replay before model events
 

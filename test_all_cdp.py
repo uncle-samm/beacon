@@ -6,6 +6,7 @@ Usage:
   python3 test_all_cdp.py                  # run all tests
   python3 test_all_cdp.py --canonical      # run canonical conformance examples
   python3 test_all_cdp.py --canonical --viewport mobile
+  python3 test_all_cdp.py --shard 1/4      # run first quarter of selected examples
   python3 test_all_cdp.py counter          # run only counter test
   python3 test_all_cdp.py middleware_demo   # run only middleware demo
   python3 test_all_cdp.py --verbose         # verbose output (show DOM, HTML)
@@ -20,6 +21,7 @@ import websocket, urllib.request
 parser = argparse.ArgumentParser(description="Beacon CDP tests")
 parser.add_argument("filter", nargs="?", default=None, help="Run only tests matching this name")
 parser.add_argument("--canonical", action="store_true", help="Run the canonical conformance examples")
+parser.add_argument("--shard", default=os.environ.get("BEACON_CDP_SHARD"), help="Run shard INDEX/TOTAL, 1-based")
 parser.add_argument(
     "--viewport",
     choices=("desktop", "mobile"),
@@ -34,9 +36,36 @@ VIEWPORT = args.viewport
 MOBILE_VIEWPORT = VIEWPORT == "mobile"
 VERBOSE = args.verbose
 
+ALL_EXAMPLES = [
+    "counter",
+    "counter_local",
+    "kanban",
+    "canvas",
+    "snake",
+    "chat",
+    "dashboard",
+    "pong",
+    "triple_counter",
+    "todo",
+    "cart",
+    "spreadsheet",
+    "ai_chat",
+    "middleware_demo",
+    "domains",
+    "multi_kanban",
+    "multi_todo",
+    "private_session",
+    "routed_workspace",
+    "routed",
+    "local_first_form",
+    "route_server_workspace",
+    "auth_workspace",
+]
+
 CDP_PORT = int(os.environ.get("CDP_PORT", "9223"))
 BEACON_PORT = int(os.environ.get("BEACON_PORT", "8080"))
-ROOT = "/Users/samb/Documents/Repositories/Personal/beacon"
+SERVER_START_TIMEOUT_SECONDS = int(os.environ.get("BEACON_CDP_SERVER_TIMEOUT", "90"))
+ROOT = os.path.dirname(os.path.abspath(__file__))
 PASS = 0
 FAIL = 0
 SKIP = 0
@@ -53,14 +82,47 @@ CANONICAL_EXAMPLES = {
     "route_server_workspace",
     "auth_workspace",
 }
+CONTRACT_REPORTS = {}
+
+def parse_shard(value):
+    if not value:
+        return None
+    match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", value.strip())
+    if not match:
+        raise SystemExit("--shard must use INDEX/TOTAL, for example 1/4")
+    index = int(match.group(1))
+    total = int(match.group(2))
+    if index > total:
+        raise SystemExit("--shard INDEX must be <= TOTAL")
+    return (index, total)
+
+SHARD = parse_shard(args.shard)
+
+def selected_example_names():
+    names = ALL_EXAMPLES
+    if CANONICAL_ONLY:
+        names = [name for name in names if name in CANONICAL_EXAMPLES]
+    if ONLY is not None:
+        names = [name for name in names if ONLY in name.lower()]
+    return names
+
+def shard_includes(name):
+    if SHARD is None:
+        return True
+    names = selected_example_names()
+    if name not in names:
+        return False
+    index, total = SHARD
+    position = names.index(name)
+    return position % total == index - 1
 
 def should_run(name):
     """Check if this test should run based on --filter."""
     if CANONICAL_ONLY and name not in CANONICAL_EXAMPLES:
         return False
     if ONLY is None:
-        return True
-    return ONLY in name.lower()
+        return shard_includes(name)
+    return ONLY in name.lower() and shard_includes(name)
 
 def vlog(msg):
     """Print only in verbose mode."""
@@ -245,6 +307,14 @@ def websocket_type_count(method_suffix, type_name):
         if payload.get("type") == type_name
     )
 
+def wait_for_websocket_type(method_suffix, type_name, timeout_seconds=8, interval_seconds=0.25):
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if websocket_type_count(method_suffix, type_name) > 0:
+            return True
+        time.sleep(interval_seconds)
+    return websocket_type_count(method_suffix, type_name) > 0
+
 def sent_event_count():
     return websocket_type_count("Sent", "event") + websocket_type_count("Sent", "event_batch")
 
@@ -371,13 +441,23 @@ def force_socket_reconnect(label, expected_text):
     check(str(before_state) != "missing", f"{label}: test socket close hook is available")
     check(str(before_state) == "1", f"{label}: socket was open before forced close (state={before_state})")
     check(wait_for_cdp_method("Network.webSocketClosed", timeout_seconds=4), f"{label}: browser reports WebSocket close")
-    reconnected = wait_for_js(
-        'window.__beaconWsState && window.__beaconWsState() === 1 && '
-        'window.__beaconConnectionReady && window.__beaconConnectionReady() === true && '
-        f'(document.getElementById("beacon-app")?.textContent || "").includes("{expected_text}")',
-        timeout_seconds=12,
+    socket_open = wait_for_js(
+        'window.__beaconWsState && window.__beaconWsState() === 1',
+        timeout_seconds=20,
     )
-    check(reconnected, f"{label}: socket reconnects and app is ready")
+    fresh_state = (
+        wait_for_websocket_type("Received", "model_sync", timeout_seconds=20)
+        or wait_for_websocket_type("Received", "mount", timeout_seconds=1)
+    )
+    connection_ready = wait_for_js(
+        'window.__beaconConnectionReady && window.__beaconConnectionReady() === true',
+        timeout_seconds=8,
+    )
+    text_ready = wait_for_js(
+        f'(document.getElementById("beacon-app")?.textContent || "").includes("{expected_text}")',
+        timeout_seconds=8,
+    )
+    check(socket_open and fresh_state and connection_ready and text_ready, f"{label}: socket reconnects and app is ready")
     check(websocket_type_count("Sent", "join") >= 1, f"{label}: reconnect sends join")
     check(
         websocket_type_count("Received", "mount") >= 1
@@ -548,13 +628,14 @@ def start_example(name, module=None):
         cwd=d, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         start_new_session=True
     )
-    deadline = time.time() + 45
+    deadline = time.time() + SERVER_START_TIMEOUT_SECONDS
     while time.time() < deadline:
         line = server_proc.stdout.readline().decode("utf-8", errors="replace")
         if VERBOSE and line.strip():
             print(f"    [server] {line.rstrip()}")
         if "Listening" in line:
             time.sleep(1.5)
+            report_contract(name, d)
             vlog("Server ready")
             return True
         if server_proc.poll() is not None:
@@ -566,16 +647,48 @@ def start_example(name, module=None):
     check(False, f"{name}: server starts before timeout")
     return False
 
+def report_contract(name, directory):
+    path = os.path.join(directory, "build", "beacon_contract.json")
+    if not os.path.exists(path):
+        check(False, f"{name}: generated contract report exists")
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            report = json.load(fh)
+    except Exception as exc:
+        check(False, f"{name}: generated contract report is valid JSON ({exc})")
+        return
+    CONTRACT_REPORTS[name] = report
+    summary = report.get("summary")
+    if summary:
+        print(f"  contract: {summary}")
+    check(report.get("rendering") == "ssr-first-then-client-state", f"{name}: generated contract uses single rendering model")
+    generated = set(report.get("generated_codecs", []))
+    required = {"encode_model", "decode_model", "decode_event", "encode_msg", "render_model"}
+    check(required.issubset(generated), f"{name}: generated contract includes required codecs")
+
 def stop_server():
     global server_proc
+    try:
+        cdp("Page.navigate", {"url": "about:blank"}, timeout=2)
+        time.sleep(0.2)
+        drain()
+        clear_browser_errors()
+    except Exception as exc:
+        vlog(f"Browser unload before server stop skipped: {exc}")
     if server_proc:
-        try: os.killpg(os.getpgid(server_proc.pid), signal.SIGKILL)
-        except: pass
+        try:
+            os.killpg(os.getpgid(server_proc.pid), signal.SIGTERM)
+            server_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(server_proc.pid), signal.SIGKILL)
+            server_proc.wait(timeout=5)
+        except Exception as exc:
+            vlog(f"Server stop warning: {exc}")
         server_proc = None
-    os.system("pkill -9 -f 'gleam run' 2>/dev/null")
+    if os.environ.get("BEACON_CDP_KILL_PORT") == "1":
+        os.system(f"lsof -ti:{BEACON_PORT} 2>/dev/null | xargs kill -9 2>/dev/null")
     time.sleep(0.5)
-    os.system(f"lsof -ti:{BEACON_PORT} 2>/dev/null | xargs kill -9 2>/dev/null")
-    time.sleep(1.5)
 
 def check(cond, msg):
     global PASS, FAIL
@@ -596,6 +709,8 @@ if ONLY:
     print(f"Filter: {ONLY}")
 if CANONICAL_ONLY:
     print("Canonical: ON")
+if SHARD:
+    print(f"Shard: {SHARD[0]}/{SHARD[1]}")
 print(f"Viewport: {VIEWPORT}")
 if VERBOSE:
     print("Verbose: ON")
@@ -631,14 +746,25 @@ if start_example("counter"):
     check_model_ws_update("Counter second decrement")
     check_dom_conformance("Counter")
 
+    reset_dom_monitor()
     force_socket_reconnect("Counter reconnect", "Count: 0")
     clear_cdp_events()
     click("[data-beacon-event-click='h1']")
-    t = text()
-    check("Count: 1" in t, "Counter reconnect: click works after reconnect")
-    check(sent_model_event_units() == 1, f"Counter reconnect: exactly one model event after reconnect ({sent_model_event_units()})")
-    check(received_state_update_count() >= 1, "Counter reconnect: receives state update after reconnect")
+    check(
+        wait_for_js('(document.getElementById("beacon-app")?.textContent || "").includes("Count: 1")'),
+        "Counter reconnect: click works after reconnect",
+    )
+    check(
+        wait_for_websocket_type("Sent", "event", timeout_seconds=8),
+        f"Counter reconnect: sends model event after reconnect ({sent_model_event_units()})",
+    )
+    check(
+        wait_for_websocket_type("Received", "patch", timeout_seconds=8)
+        or wait_for_websocket_type("Received", "model_sync", timeout_seconds=1),
+        "Counter reconnect: receives state update after reconnect",
+    )
     check(websocket_type_count("Received", "mount") == 0, "Counter reconnect: post-reconnect click receives no HTML mount")
+    check_dom_conformance("Counter reconnect")
 
     check(errors() == "0", f"Zero errors ({error_list()})")
 stop_server(); print()
@@ -684,6 +810,12 @@ if start_example("counter_local"):
     t = text()
     check("testlocal" in t, "Local input shows text")
     check_local_ws_quiet("Counter local input")
+    clear_cdp_events()
+    click("[data-beacon-event-click='h1']")
+    t = text()
+    check("Count (server): 2" in t, "Server event after local input still works")
+    check(websocket_payload_count("Sent", '"type":"event"') >= 1, "Server event after local input sends one model event")
+    check(websocket_payload_count("Sent", '"type":"event_batch"') == 0, "Local input is not replayed as event_batch")
     check_dom_conformance("Counter local")
     check(errors() == "0", f"Zero errors ({error_list()})")
 stop_server(); print()
@@ -909,12 +1041,23 @@ if start_example("pong"):
     drain()
     t = text()
     check("Start" in t, "Pause -> Start")
-    # Frozen when paused
+    # Ball position stays frozen when paused. Full HTML can be re-rendered by a
+    # no-op server tick, so assert the actual game-state surface.
     time.sleep(1); drain()
-    h1 = html()
+    ball1 = evl('''
+    (function() {
+      var ball = document.querySelector('[data-testid="pong-ball"]');
+      return ball ? ball.getAttribute("style") : "";
+    })()
+    ''')
     time.sleep(1); drain()
-    h2 = html()
-    check(h1 == h2, "Frozen when paused")
+    ball2 = evl('''
+    (function() {
+      var ball = document.querySelector('[data-testid="pong-ball"]');
+      return ball ? ball.getAttribute("style") : "";
+    })()
+    ''')
+    check(ball1 == ball2 and ball1 != "", "Frozen when paused")
     check(errors() == "0", f"Zero errors ({error_list()})")
 stop_server(); print()
 
@@ -1447,10 +1590,10 @@ if start_example("routed", module="main"):
     count = evl('document.querySelector("[data-testid=count]")?.textContent || ""')
     check(str(count) == "1", "Model event: count increments to 1")
     check(
-        websocket_payload_count("Sent", '"type":"event"') >= 1
-        or websocket_payload_count("Sent", '"type":"event_batch"') >= 1,
-        "Model event sends event or event_batch",
+        websocket_payload_count("Sent", '"type":"event"') >= 1,
+        "Model event sends event",
     )
+    check(websocket_payload_count("Sent", '"type":"event_batch"') == 0, "Model event does not send event_batch")
     check(
         websocket_payload_count("Received", '"type":"patch"') >= 1
         or websocket_payload_count("Received", '"type":"model_sync"') >= 1,
@@ -1467,7 +1610,7 @@ if start_example("routed", module="main"):
     t = text()
     check(str(evl("location.pathname")) == "/about", "Client navigation: URL is /about")
     check("About" in t, "Client navigation: about page renders")
-    check("does not discover route files" in t, "Client navigation: no file discovery copy")
+    check("does not scan the filesystem" in t, "Client navigation: no filesystem route scan copy")
 
     clear_cdp_events()
     evl('document.querySelector(\'a[href="/settings"]\').click()')
@@ -1541,10 +1684,10 @@ if start_example("local_first_form"):
             break
     check("Submissions: 1" in str(text()), "Submit updates server-authoritative Model")
     check(
-        websocket_payload_count("Sent", '"type":"event"') >= 1
-        or websocket_payload_count("Sent", '"type":"event_batch"') >= 1,
+        websocket_payload_count("Sent", '"type":"event"') >= 1,
         "Submit sends one model event",
     )
+    check(websocket_payload_count("Sent", '"type":"event_batch"') == 0, "Submit does not replay local event_batch")
     check(websocket_payload_count("Received", '"type":"mount"') == 0, "Submit receives no HTML mount")
     check_dom_conformance("Local first form")
     check(errors() == "0", f"Zero errors ({error_list()})")

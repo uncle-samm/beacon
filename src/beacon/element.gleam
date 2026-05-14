@@ -77,6 +77,7 @@ pub fn to_string_tree(node: Node(msg)) -> StringTree {
       to_string_tree(child)
     }
     ElementNode(tag, attributes, children) -> {
+      let assert True = is_valid_tag_name(tag)
       let open_tag =
         string_tree.from_string("<")
         |> string_tree.append(tag)
@@ -116,8 +117,7 @@ pub fn to_json(node: Node(msg)) -> json.Json {
         #("t", json.string("text")),
         #("c", json.string(content)),
       ])
-    KeyedNode(key, child) ->
-      to_json(materialize_key(child, key))
+    KeyedNode(key, child) -> to_json(materialize_key(child, key))
     MemoNode(_key, _deps, child) ->
       // Memo is transparent for JSON — serialize the child
       to_json(child)
@@ -173,6 +173,7 @@ pub fn el(
   attributes: List(Attr),
   children: List(Node(msg)),
 ) -> Node(msg) {
+  let assert True = is_valid_tag_name(tag)
   ElementNode(tag: tag, attributes: attributes, children: children)
 }
 
@@ -185,7 +186,24 @@ pub fn keyed(key: String, child: Node(msg)) -> Node(msg) {
 
 /// Create an HTML attribute (key-value pair).
 pub fn attr(name: String, value: String) -> Attr {
+  let assert True = is_valid_attribute_name(name)
   HtmlAttr(name: name, value: value)
+}
+
+/// Return True when a custom HTML attribute name is safe to render.
+///
+/// Inline event attributes (`onclick`, `onload`, etc.) are intentionally not
+/// allowed through the generic attribute escape hatch. Use Beacon event helpers
+/// such as `on_click` instead.
+pub fn is_valid_attribute_name(name: String) -> Bool {
+  name != ""
+  && !string.starts_with(string.lowercase(name), "on")
+  && list.all(string.to_graphemes(name), is_html_name_grapheme)
+}
+
+/// Return True when a tag name is safe to render.
+pub fn is_valid_tag_name(tag: String) -> Bool {
+  tag != "" && list.all(string.to_graphemes(tag), is_html_name_grapheme)
 }
 
 /// Create an event handler attribute. Prefer beacon.on_click(), beacon.on_input(), etc.
@@ -275,20 +293,23 @@ fn attr_to_json(attribute: Attr) -> json.Json {
 fn render_attributes(tree: StringTree, attributes: List(Attr)) -> StringTree {
   list.fold(attributes, tree, fn(acc, attribute) {
     case attribute {
-      HtmlAttr(name, value) ->
+      HtmlAttr(name, value) -> {
+        let assert True = is_valid_attribute_name(name)
         acc
         |> string_tree.append(" ")
         |> string_tree.append(name)
         |> string_tree.append("=\"")
         |> string_tree.append(escape_attr(value))
         |> string_tree.append("\"")
+      }
       EventAttr(event_name, handler_id, debounce_ms) -> {
+        let assert True = is_valid_event_name(event_name)
         let with_event =
           acc
           |> string_tree.append(" data-beacon-event-")
           |> string_tree.append(event_name)
           |> string_tree.append("=\"")
-          |> string_tree.append(handler_id)
+          |> string_tree.append(escape_attr(handler_id))
           |> string_tree.append("\"")
         case debounce_ms {
           Some(delay) if event_name == "input" ->
@@ -301,6 +322,70 @@ fn render_attributes(tree: StringTree, attributes: List(Attr)) -> StringTree {
       }
     }
   })
+}
+
+fn is_valid_event_name(name: String) -> Bool {
+  name != "" && list.all(string.to_graphemes(name), is_html_name_grapheme)
+}
+
+fn is_html_name_grapheme(grapheme: String) -> Bool {
+  case grapheme {
+    "-" | "_" | ":" | "." -> True
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
+    "a"
+    | "b"
+    | "c"
+    | "d"
+    | "e"
+    | "f"
+    | "g"
+    | "h"
+    | "i"
+    | "j"
+    | "k"
+    | "l"
+    | "m"
+    | "n"
+    | "o"
+    | "p"
+    | "q"
+    | "r"
+    | "s"
+    | "t"
+    | "u"
+    | "v"
+    | "w"
+    | "x"
+    | "y"
+    | "z" -> True
+    "A"
+    | "B"
+    | "C"
+    | "D"
+    | "E"
+    | "F"
+    | "G"
+    | "H"
+    | "I"
+    | "J"
+    | "K"
+    | "L"
+    | "M"
+    | "N"
+    | "O"
+    | "P"
+    | "Q"
+    | "R"
+    | "S"
+    | "T"
+    | "U"
+    | "V"
+    | "W"
+    | "X"
+    | "Y"
+    | "Z" -> True
+    _ -> False
+  }
 }
 
 fn is_void_element(tag: String) -> Bool {

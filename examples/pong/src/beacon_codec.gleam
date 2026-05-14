@@ -2,6 +2,7 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import pong
+import beacon/element
 import gleam/json
 import gleam/dynamic/decode
 
@@ -30,6 +31,13 @@ pub fn encode_model(state: pong.Model) -> String {
   |> json.to_string
 }
 
+/// Render the model with the same generated server contract used for SSR.
+pub fn render_model(state: pong.Model) -> String {
+  let model = state
+  pong.view(model)
+  |> element.to_string
+}
+
 /// Decode a Model from JSON string (for applying client patches).
 pub fn decode_model(json_str: String) -> Result(pong.Model, String) {
   let model_decoder = {
@@ -47,5 +55,97 @@ pub fn decode_model(json_str: String) -> Result(pong.Model, String) {
   case json.parse(json_str, model_decoder) {
     Ok(model) -> Ok(model)
     Error(_) -> Error("Failed to decode model")
+  }
+}
+
+/// Decode the generated client event contract. Live event decoding never
+/// renders the server view or reads the handler registry.
+pub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result(pong.Msg, String) {
+  let envelope_decoder = {
+    use msg_json <- decode.field("__beacon_msg", decode.string)
+    decode.success(msg_json)
+  }
+  case json.parse(data, envelope_decoder) {
+    Ok(msg_json) -> decode_msg(msg_json)
+    Error(_) -> Error("Client event missing generated Beacon message envelope")
+  }
+}
+
+
+fn decode_msg(json_str: String) -> Result(pong.Msg, String) {
+  let tag_decoder = {
+    use tag <- decode.field("tag", decode.string)
+    decode.success(tag)
+  }
+  case json.parse(json_str, tag_decoder) {
+    Ok(tag) -> {
+      case tag {
+    "LeftUp" -> {
+      let msg_decoder = {
+      decode.success(pong.LeftUp)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag LeftUp")
+      }
+    }
+    "LeftDown" -> {
+      let msg_decoder = {
+      decode.success(pong.LeftDown)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag LeftDown")
+      }
+    }
+    "RightUp" -> {
+      let msg_decoder = {
+      decode.success(pong.RightUp)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag RightUp")
+      }
+    }
+    "RightDown" -> {
+      let msg_decoder = {
+      decode.success(pong.RightDown)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag RightDown")
+      }
+    }
+    "Tick" -> {
+      let msg_decoder = {
+      decode.success(pong.Tick)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag Tick")
+      }
+    }
+    "StartGame" -> {
+      let msg_decoder = {
+      decode.success(pong.StartGame)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag StartGame")
+      }
+    }
+    "PauseGame" -> {
+      let msg_decoder = {
+      decode.success(pong.PauseGame)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag PauseGame")
+      }
+    }
+        _ -> Error("Unknown generated Beacon message tag " <> tag)
+      }
+    }
+    Error(_) -> Error("Generated Beacon message payload missing tag")
   }
 }

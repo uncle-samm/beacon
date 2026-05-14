@@ -4,7 +4,13 @@ Effects are descriptions of side effects that the Beacon runtime executes. Follo
 
 ## Returning Effects from Update
 
-When using `beacon.app_with_effects`, your `update` function returns a tuple of the new model and an effect:
+Prefer a pure `update` plus `beacon.on_update` for application side effects.
+That shape keeps the generated client renderer predictable: `update` can be
+analyzed and compiled for client rendering, while stores, PubSub, HTTP, env
+reads, randomness, and other BEAM-only work stay on the server.
+
+`beacon.app_with_effects` is still available for server-authoritative effect
+apps where `update` returns a tuple of the new model and an effect:
 
 ```gleam
 fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
@@ -36,7 +42,9 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
 ## Server-Side Effect Handler
 
-For apps using `app_with_local`, use `beacon.on_update` to attach server-only effects that run after update:
+For apps using `app_with_local`, or any app that should keep `update`
+client-visible, use `beacon.on_update` to attach server-only effects that run
+after update:
 
 ```gleam
 beacon.app_with_local(init, init_local, update, view)

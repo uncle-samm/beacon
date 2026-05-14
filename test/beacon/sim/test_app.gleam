@@ -59,7 +59,7 @@ pub fn start_counter_app(
       init_from_request: option.None,
       dev_mode: False,
     )
-  application.start(config)
+  application.start_advanced(config)
 }
 
 /// Ticker app — uses effect.every to auto-increment on a timer.
@@ -114,7 +114,7 @@ pub fn start_ticker_app(
       init_from_request: option.None,
       dev_mode: False,
     )
-  application.start(config)
+  application.start_advanced(config)
 }
 
 /// Generate a unique port in the 20000-50000 range for parallel test execution.

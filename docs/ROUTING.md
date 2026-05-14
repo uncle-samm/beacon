@@ -70,8 +70,8 @@ server-authoritative state sync/patch protocol as every other Beacon app.
 
 You can split pages into modules for clarity, but the imports are explicit.
 Each module can expose a `page` constructor and normal view helpers. Keep the
-root app's public `Model` and `Msg` in the app module. Beacon does not discover
-route files, generate a separate dispatcher module, or start a separate router
+root app's public `Model` and `Msg` in the app module. Beacon does not scan the
+filesystem, generate a separate dispatcher module, or start a separate router
 runtime.
 
 ```gleam

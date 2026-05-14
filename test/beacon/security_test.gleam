@@ -2,6 +2,7 @@
 /// Each test targets a specific vulnerability from the security audit.
 import beacon/ssr
 import beacon/transport
+import beacon/transport/http as transport_http
 import gleam/string
 
 // === Origin Validation Tests ===
@@ -27,6 +28,24 @@ pub fn origin_matching_host_allowed_test() {
       "http://localhost:8080/some/path",
       "localhost:8080",
     )
+}
+
+pub fn response_header_rejects_crlf_value_test() {
+  let assert Error(_) =
+    transport_http.validate_response_header(
+      "x-user",
+      "sam\r\nset-cookie: admin=true",
+    )
+}
+
+pub fn response_header_rejects_invalid_name_test() {
+  let assert Error(_) =
+    transport_http.validate_response_header("x-bad\r\nname", "ok")
+}
+
+pub fn response_header_accepts_rfc_token_name_test() {
+  let assert Ok(Nil) =
+    transport_http.validate_response_header("x-trace-id", "abc123")
 }
 
 // === Token Expiration Tests ===

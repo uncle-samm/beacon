@@ -7,7 +7,7 @@ import gleam/list
 pub type Action {
   /// Open TCP + WebSocket handshake
   Connect
-  /// Send join message, wait for mount response
+  /// Send join message. Normal apps respond with model_sync, not HTML mount.
   Join
   /// Send a single event
   SendEvent(handler_id: String, data: String)
@@ -181,7 +181,7 @@ pub fn connection_churn(cycles: Int) -> Scenario {
   )
 }
 
-/// Patch efficiency scenario: join (gets mount + model_sync), N increments each with response tracking.
+/// Patch efficiency scenario: join gets model_sync, then N increments each with response tracking.
 pub fn patch_efficiency(n_events: Int) -> Scenario {
   let events =
     list.map(list.repeat(Nil, n_events), fn(_) {
@@ -192,8 +192,7 @@ pub fn patch_efficiency(n_events: Int) -> Scenario {
     name: "patch_efficiency(" <> int.to_string(n_events) <> ")",
     actions: list.flatten([
       [Connect, Join],
-      // Mount comes first, then model_sync
-      [WaitForResponse(5000), WaitForResponse(5000)],
+      [WaitForResponse(5000)],
       events,
       [Disconnect],
     ]),
@@ -207,8 +206,6 @@ pub fn verify_count(n_events: Int) -> Scenario {
     name: "verify_count(" <> int.to_string(n_events) <> ")",
     actions: list.flatten([
       [Connect, Join, WaitForResponse(5000)],
-      // Drain mount
-      [WaitForResponse(2000)],
       events,
       [WaitForResponse(5000)],
       [AssertResponseContains(5000, int.to_string(n_events))],
@@ -223,14 +220,13 @@ pub fn reconnect(n_before: Int) -> Scenario {
   Scenario(
     name: "reconnect(" <> int.to_string(n_before) <> ")",
     actions: list.flatten([
-      // First session: connect, drain mount+sync, send events
-      [Connect, Join, WaitForResponse(5000), WaitForResponse(5000)],
+      // First session: connect, receive model_sync, send events.
+      [Connect, Join, WaitForResponse(5000)],
       events,
       [WaitForResponse(5000)],
       [Disconnect, Sleep(500)],
-      // Second session: reconnect, receive mount + model_sync
-      // The model_sync should contain the accumulated count
-      [Connect, Join, WaitForResponse(5000), WaitForResponse(5000)],
+      // Second session: reconnect, receive model_sync.
+      [Connect, Join, WaitForResponse(5000)],
       [Disconnect],
     ]),
   )
@@ -242,8 +238,6 @@ pub fn server_push(wait_ms: Int) -> Scenario {
     Connect,
     Join,
     WaitForResponse(5000),
-    // Drain mount
-    WaitForResponse(2000),
     Sleep(wait_ms),
     // After sleeping, there should be patches from server ticks
     WaitForResponse(3000),

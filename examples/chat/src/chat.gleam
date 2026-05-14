@@ -5,7 +5,6 @@
 /// - Presence tracking (who's online in each room)
 /// - Typing indicators (ephemeral PubSub notifications)
 /// - beacon.on_click, beacon.on_input — no decode_event
-
 import beacon
 import beacon/effect
 import beacon/html
@@ -47,6 +46,7 @@ pub type Msg {
   SendMessage
   SwitchRoom(String)
   RoomUpdated(String)
+  LoadMessages(List(ChatMessage))
   ClearTypingIndicator
 }
 
@@ -66,132 +66,137 @@ pub fn init() -> Model {
   )
 }
 
-/// Create an update function that captures the shared stores.
-pub fn make_update(
-  messages: store.ListStore(ChatMessage),
-  presence: store.ListStore(String),
-) -> fn(Model, Msg) -> #(Model, effect.Effect(Msg)) {
-  fn(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
-    case msg {
-      UpdateInput(text) -> {
-        // Broadcast typing indicator to the room
-        case string.is_empty(text) {
-          True -> Nil
-          False ->
-            pubsub.broadcast(
-              "typing:" <> model.current_room,
-              Nil,
-            )
-        }
-        #(Model(..model, input_text: text), effect.none())
-      }
-      UpdateUsername(text) -> #(
-        Model(..model, username_input: text),
-        effect.none(),
-      )
+pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
+  case msg {
+    UpdateInput(text) -> #(Model(..model, input_text: text), effect.none())
+    UpdateUsername(text) -> #(
+      Model(..model, username_input: text),
+      effect.none(),
+    )
 
-      SetUsername -> {
-        let name = string.trim(model.username_input)
-        case string.is_empty(name) {
-          True -> #(model, effect.none())
-          False -> {
-            // Join presence for current room
-            let session_key =
-              model.current_room
-              <> ":"
-              <> int.to_string(model.session_id)
-            store.append(presence, session_key, name)
-            let online =
-              store.get_all(presence, session_key)
-              |> list.unique()
-            #(
-              Model(
-                ..model,
-                username: name,
-                has_username: True,
-                visible_messages: store.get_all(messages, model.current_room),
-                online_users: online,
-              ),
-              effect.none(),
-            )
-          }
-        }
-      }
-
-      SendMessage -> {
-        let text = string.trim(model.input_text)
-        case string.is_empty(text) {
-          True -> #(model, effect.none())
-          False -> {
-            let message =
-              ChatMessage(
-                sender: model.username,
-                text: text,
-                room: model.current_room,
-                id: unique_int(),
-              )
-            store.append_notify(messages, model.current_room, message, "room:")
-            #(Model(..model, input_text: ""), effect.none())
-          }
-        }
-      }
-
-      SwitchRoom(room) -> {
-        let online = get_room_users(presence, room, model.session_id)
-        #(
-          Model(
-            ..model,
-            current_room: room,
-            visible_messages: store.get_all(messages, room),
-            online_users: online,
-            typing_user: "",
-          ),
+    SetUsername -> {
+      let name = string.trim(model.username_input)
+      case string.is_empty(name) {
+        True -> #(model, effect.none())
+        False -> #(
+          Model(..model, username: name, has_username: True, online_users: [
+            name,
+          ]),
           effect.none(),
         )
       }
+    }
 
-      RoomUpdated(topic) -> {
-        // Check if this is a typing indicator or a message update
-        case string.starts_with(topic, "typing:") {
-          True -> #(
-            Model(..model, typing_user: "Someone"),
-            effect.after(2000, fn() { ClearTypingIndicator }),
-          )
-          False -> {
-            let online =
-              get_room_users(
-                presence,
-                model.current_room,
-                model.session_id,
-              )
-            #(
-              Model(
-                ..model,
-                visible_messages: store.get_all(messages, model.current_room),
-                online_users: online,
-              ),
-              effect.none(),
+    SendMessage -> {
+      let text = string.trim(model.input_text)
+      case string.is_empty(text) {
+        True -> #(model, effect.none())
+        False -> {
+          let message =
+            ChatMessage(
+              sender: model.username,
+              text: text,
+              room: model.current_room,
+              id: model.session_id + list.length(model.visible_messages),
             )
-          }
+          #(
+            Model(
+              ..model,
+              input_text: "",
+              visible_messages: list.append(model.visible_messages, [message]),
+            ),
+            effect.none(),
+          )
         }
       }
-
-      ClearTypingIndicator -> #(
-        Model(..model, typing_user: ""),
-        effect.none(),
-      )
     }
+
+    SwitchRoom(room) -> #(
+      Model(
+        ..model,
+        current_room: room,
+        visible_messages: [],
+        online_users: case string.is_empty(model.username) {
+          True -> []
+          False -> [model.username]
+        },
+        typing_user: "",
+      ),
+      effect.none(),
+    )
+
+    RoomUpdated(topic) -> {
+      case string.starts_with(topic, "typing:") {
+        True -> #(
+          Model(..model, typing_user: "Someone"),
+          effect.after(2000, fn() { ClearTypingIndicator }),
+        )
+        False -> #(model, effect.none())
+      }
+    }
+
+    LoadMessages(messages) -> #(
+      Model(..model, visible_messages: messages),
+      effect.none(),
+    )
+
+    ClearTypingIndicator -> #(Model(..model, typing_user: ""), effect.none())
   }
 }
 
-fn get_room_users(
+fn make_on_update(
+  messages: store.ListStore(ChatMessage),
   presence: store.ListStore(String),
-  room: String,
-  session_id: Int,
-) -> List(String) {
-  let key = room <> ":" <> int.to_string(session_id)
-  store.get_all(presence, key)
-  |> list.unique()
+) -> fn(Model, Msg) -> effect.Effect(Msg) {
+  fn(model: Model, msg: Msg) -> effect.Effect(Msg) {
+    case msg {
+      UpdateInput(text) ->
+        case string.is_empty(text) {
+          True -> effect.none()
+          False ->
+            effect.from(fn(_dispatch) {
+              pubsub.broadcast("typing:" <> model.current_room, Nil)
+            })
+        }
+      SetUsername ->
+        effect.from(fn(dispatch) {
+          let session_key =
+            model.current_room <> ":" <> int.to_string(model.session_id)
+          store.append(presence, session_key, model.username)
+          dispatch(LoadMessages(store.get_all(messages, model.current_room)))
+        })
+      SwitchRoom(room) ->
+        effect.from(fn(dispatch) {
+          dispatch(LoadMessages(store.get_all(messages, room)))
+        })
+      SendMessage ->
+        effect.from(fn(_dispatch) {
+          case list.last(model.visible_messages) {
+            Ok(message) ->
+              store.append_notify(
+                messages,
+                model.current_room,
+                message,
+                "room:",
+              )
+            Error(Nil) -> Nil
+          }
+        })
+      RoomUpdated(topic) ->
+        case string.starts_with(topic, "room:") {
+          True ->
+            effect.from(fn(dispatch) {
+              let room = string.drop_start(topic, 5)
+              case room == model.current_room {
+                True -> dispatch(LoadMessages(store.get_all(messages, room)))
+                False -> Nil
+              }
+            })
+          False -> effect.none()
+        }
+      _ -> effect.none()
+    }
+  }
 }
 
 /// Render the chat view.
@@ -244,32 +249,32 @@ fn view_chat(model: Model) -> beacon.Node(Msg) {
       ]),
       // Online users
       html.div([html.style("margin-top:1rem;font-size:0.85rem;color:#666")], [
-        html.text("Online: " <> case model.online_users {
-          [] -> "just you"
-          users -> string.join(users, ", ")
-        }),
+        html.text(
+          "Online: "
+          <> case model.online_users {
+            [] -> "just you"
+            users -> string.join(users, ", ")
+          },
+        ),
       ]),
     ]),
     // Main
     html.div([html.class("chat-main")], [
       html.h2([], [html.text("#" <> model.current_room)]),
-      html.div(
-        [html.class("chat-messages")],
-        case model.visible_messages {
-          [] -> [
-            html.p([html.class("empty")], [
-              html.text("No messages yet. Say something!"),
-            ]),
-          ]
-          msgs ->
-            list.map(msgs, fn(m) {
-              html.div([html.class("chat-message")], [
-                html.strong([], [html.text(m.sender <> ": ")]),
-                html.text(m.text),
-              ])
-            })
-        },
-      ),
+      html.div([html.class("chat-messages")], case model.visible_messages {
+        [] -> [
+          html.p([html.class("empty")], [
+            html.text("No messages yet. Say something!"),
+          ]),
+        ]
+        msgs ->
+          list.map(msgs, fn(m) {
+            html.div([html.class("chat-message")], [
+              html.strong([], [html.text(m.sender <> ": ")]),
+              html.text(m.text),
+            ])
+          })
+      }),
       // Typing indicator
       case string.is_empty(model.typing_user) {
         True -> html.text("")
@@ -302,11 +307,8 @@ pub fn start() {
   let messages = store.new_list("chat_messages")
   let presence = store.new_list("chat_presence")
 
-  beacon.app_with_effects(
-    fn() { #(init(), effect.none()) },
-    make_update(messages, presence),
-    view,
-  )
+  beacon.app_with_effects(fn() { #(init(), effect.none()) }, update, view)
+  |> beacon.on_update(make_on_update(messages, presence))
   |> beacon.title("Beacon Chat")
   |> beacon.subscriptions(fn(model: Model) {
     // Subscribe to room messages AND typing indicators.

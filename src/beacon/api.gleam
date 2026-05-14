@@ -2,14 +2,18 @@
 ///
 /// These helpers build the handler accepted by `beacon.api_routes` while keeping
 /// raw request/response access available inside each route.
+import beacon/transport/http as transport_http
 import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
+import gleam/bit_array
 import gleam/bytes_tree
 import gleam/http
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
+import gleam/json.{type Json}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import gleam/uri
 
 /// A single API route declaration.
 ///
@@ -80,6 +84,11 @@ pub fn json(status: Int, body: String) -> Response(ResponseBody) {
   |> response.set_body(Bytes(bytes_tree.from_string(body)))
 }
 
+/// Create a JSON response from a typed `gleam/json` value.
+pub fn json_value(status: Int, body: Json) -> Response(ResponseBody) {
+  json(status, json.to_string(body))
+}
+
 /// Create a text response.
 pub fn text(status: Int, body: String) -> Response(ResponseBody) {
   response.new(status)
@@ -91,6 +100,49 @@ pub fn text(status: Int, body: String) -> Response(ResponseBody) {
 pub fn empty(status: Int) -> Response(ResponseBody) {
   response.new(status)
   |> response.set_body(Bytes(bytes_tree.new()))
+}
+
+/// Read a UTF-8 request body with an explicit byte cap.
+pub fn read_text(
+  req: Request(Connection),
+  max_bytes: Int,
+) -> Result(String, String) {
+  case transport_http.read_body(req, max_bytes) {
+    Ok(bits) -> {
+      case bit_array.to_string(bits) {
+        Ok(body) -> Ok(body)
+        Error(Nil) -> Error("Invalid UTF-8 request body")
+      }
+    }
+    Error(reason) -> Error(reason)
+  }
+}
+
+/// Read an `application/x-www-form-urlencoded` request body.
+pub fn read_form(
+  req: Request(Connection),
+  max_bytes: Int,
+) -> Result(List(#(String, String)), String) {
+  case read_text(req, max_bytes) {
+    Ok(body) -> {
+      case uri.parse_query(body) {
+        Ok(fields) -> Ok(fields)
+        Error(Nil) -> Error("Invalid form encoding")
+      }
+    }
+    Error(reason) -> Error(reason)
+  }
+}
+
+/// Find a required form field.
+pub fn form_field(
+  fields: List(#(String, String)),
+  name: String,
+) -> Result(String, String) {
+  case list.find(fields, fn(pair) { pair.0 == name }) {
+    Ok(#(_, value)) -> Ok(value)
+    Error(Nil) -> Error("Missing form field: " <> name)
+  }
 }
 
 fn dispatch(

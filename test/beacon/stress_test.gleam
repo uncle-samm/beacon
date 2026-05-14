@@ -1,33 +1,65 @@
 import beacon/stress
+import beacon/sim/test_app
+import gleam/erlang/process
 
-pub fn stress_100_processes_test() {
+pub fn stress_real_websocket_connections_test() {
+  let port = test_app.unique_port()
+  let assert Ok(_app) = test_app.start_counter_app(port)
+  process.sleep(200)
+
   let config =
     stress.StressConfig(
-      connections: 100,
+      connections: 40,
       host: "localhost",
-      port: 0,
-      hold_duration_ms: 500,
+      port: port,
+      hold_duration_ms: 150,
+      events_per_connection: 0,
     )
   let result = stress.run(config)
-  let assert 100 = result.attempted
-  let assert 100 = result.succeeded
+  let assert 40 = result.attempted
+  let assert 40 = result.succeeded
   let assert 0 = result.failed
-  // Process count during should be higher than before (100 spawned processes)
+  let assert True = result.duration_ms > 0
   let assert True = result.processes_during > result.processes_before
 }
 
-pub fn stress_processes_cleaned_up_test() {
+pub fn stress_real_websocket_processes_cleaned_up_test() {
+  let port = test_app.unique_port()
+  let assert Ok(_app) = test_app.start_counter_app(port)
+  process.sleep(200)
+
   let config =
     stress.StressConfig(
-      connections: 50,
+      connections: 25,
       host: "localhost",
-      port: 0,
-      hold_duration_ms: 200,
+      port: port,
+      hold_duration_ms: 100,
+      events_per_connection: 0,
     )
   let result = stress.run(config)
-  // All 50 should succeed
-  let assert 50 = result.succeeded
-  // After cleanup, process count should not have leaked 50 processes
-  // Allow generous variance for test runner processes
+  let assert 25 = result.succeeded
+  let assert 0 = result.failed
+  // After cleanup, process count should not have leaked the connection workers.
+  // Allow variance for runtime and transport processes still closing.
   let assert True = result.processes_after < result.processes_before + 30
+}
+
+pub fn stress_concurrent_websocket_events_test() {
+  let port = test_app.unique_port()
+  let assert Ok(_app) = test_app.start_counter_app(port)
+  process.sleep(200)
+
+  let config =
+    stress.StressConfig(
+      connections: 12,
+      host: "localhost",
+      port: port,
+      hold_duration_ms: 150,
+      events_per_connection: 8,
+    )
+  let result = stress.run(config)
+  let assert 12 = result.succeeded
+  let assert 0 = result.failed
+  let assert 96 = result.events_attempted
+  let assert True = result.duration_ms > 0
 }

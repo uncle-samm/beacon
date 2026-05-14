@@ -1,5 +1,7 @@
 import beacon
 import beacon/html
+import beacon/log
+import gleam/dynamic/decode
 import gleam/int
 import gleam/json
 
@@ -15,7 +17,7 @@ pub type Msg {
   UpdateDraft(String)
   SelectFilter(String)
   ToggleMenu
-  SubmitSearch
+  SubmitSearch(String)
 }
 
 pub fn init() -> Model {
@@ -31,14 +33,25 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
     UpdateDraft(value) -> #(model, Local(..local, draft: value))
     SelectFilter(value) -> #(model, Local(..local, filter: value))
     ToggleMenu -> #(model, Local(..local, menu_open: !local.menu_open))
-    SubmitSearch -> #(
-      Model(
-        saved_query: local.draft,
-        saved_filter: local.filter,
-        submissions: model.submissions + 1,
-      ),
-      Local(..local, menu_open: False),
-    )
+    SubmitSearch(fields_json) -> {
+      case
+        form_field(fields_json, "draft_query"),
+        form_field(fields_json, "filter")
+      {
+        Ok(query), Ok(filter) -> #(
+          Model(
+            saved_query: query,
+            saved_filter: filter,
+            submissions: model.submissions + 1,
+          ),
+          Local(..local, menu_open: False),
+        )
+        Error(reason), _ | _, Error(reason) -> {
+          log.warning("local_first_form", "Invalid submit: " <> reason)
+          #(model, local)
+        }
+      }
+    }
   }
 }
 
@@ -58,7 +71,7 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
       ]),
       html.form(
         [
-          beacon.on_submit(SubmitSearch),
+          beacon.on_submit_local(SubmitSearch),
           html.style("display:grid;gap:12px;margin:20px 0;"),
         ],
         [
@@ -68,6 +81,7 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
               html.attribute("data-testid", "draft-input"),
               html.type_("text"),
               html.value(local.draft),
+              html.attribute("name", "draft_query"),
               html.placeholder("Type without server traffic"),
               beacon.on_input(UpdateDraft),
             ]),
@@ -78,6 +92,7 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
               [
                 html.attribute("data-testid", "filter-select"),
                 html.value(local.filter),
+                html.attribute("name", "filter"),
                 beacon.on_input(SelectFilter),
               ],
               [
@@ -140,17 +155,19 @@ fn preview(draft: String, filter: String) -> String {
   "\"" <> draft <> "\" in " <> filter
 }
 
+fn form_field(fields_json: String, field: String) -> Result(String, String) {
+  let decoder = {
+    use value <- decode.field(field, decode.string)
+    decode.success(value)
+  }
+  case json.parse(fields_json, decoder) {
+    Ok(value) -> Ok(value)
+    Error(_) -> Error("missing string field `" <> field <> "`")
+  }
+}
+
 pub fn main() {
   beacon.app_with_local(init, init_local, update, view)
   |> beacon.title("Local First Form")
-  |> beacon.model_encoder(fn(state) {
-    let #(model, _local) = state
-    json.object([
-      #("saved_query", json.string(model.saved_query)),
-      #("saved_filter", json.string(model.saved_filter)),
-      #("submissions", json.int(model.submissions)),
-    ])
-    |> json.to_string
-  })
   |> beacon.start(8080)
 }

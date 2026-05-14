@@ -15,7 +15,7 @@ Codex reads this file (`AGENTS.md`) for project-local guidance. There is no repo
 | `docs/PROGRESS.md` | **Current milestone + completed work — read FIRST every session** |
 | `docs/TIGERSTYLE.md` | Full TigerStyle engineering principles |
 | `docs/SECURITY.md` | SecurityLimits, origin validation, rate limiting, CSP, tokens |
-| `docs/FILE_BASED_ROUTING.md` | Explicit route-aware apps, dynamic params, no route discovery |
+| `docs/ROUTING.md` | Explicit route-aware apps, dynamic params, no route discovery |
 | `docs/WIRE_PROTOCOL.md` | All 13 WebSocket message types with JSON examples |
 | `docs/EFFECTS.md` | Effects, timers, async patterns |
 | `docs/MIDDLEWARE.md` | HTTP middleware pipeline, scoping, built-ins |

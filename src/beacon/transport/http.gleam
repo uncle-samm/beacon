@@ -79,35 +79,70 @@ pub fn write_response(
     "beacon.http",
     "Writing HTTP response status " <> int.to_string(resp.status),
   )
-  let body_bits = case resp.body {
-    server.Bytes(tree) -> bytes_tree.to_bit_array(tree)
-  }
-  let body_size = bit_array.byte_size(body_bits)
+  case validate_response_headers(resp.headers) {
+    Error(reason) -> {
+      log.error("beacon.http", "Refusing unsafe response headers: " <> reason)
+      Error(reason)
+    }
+    Ok(Nil) -> {
+      let body_bits = case resp.body {
+        server.Bytes(tree) -> bytes_tree.to_bit_array(tree)
+      }
+      let body_size = bit_array.byte_size(body_bits)
 
-  // Build response header string
-  let status_line =
-    "HTTP/1.1 "
-    <> int.to_string(resp.status)
-    <> " "
-    <> reason_phrase(resp.status)
-    <> "\r\n"
-  let header_lines =
-    list.map(resp.headers, fn(h) { h.0 <> ": " <> h.1 <> "\r\n" })
-  let has_content_length =
-    list.any(resp.headers, fn(h) { h.0 == "content-length" })
-  let cl_line = case has_content_length {
-    True -> ""
-    False -> "content-length: " <> int.to_string(body_size) <> "\r\n"
-  }
-  let header_str =
-    string.concat(
-      list.flatten([[status_line], header_lines, [cl_line, "\r\n"]]),
-    )
-  let header_bits = <<header_str:utf8>>
+      let status_line =
+        "HTTP/1.1 "
+        <> int.to_string(resp.status)
+        <> " "
+        <> reason_phrase(resp.status)
+        <> "\r\n"
+      let header_lines =
+        list.map(resp.headers, fn(h) { h.0 <> ": " <> h.1 <> "\r\n" })
+      let has_content_length =
+        list.any(resp.headers, fn(h) {
+          string.lowercase(h.0) == "content-length"
+        })
+      let cl_line = case has_content_length {
+        True -> ""
+        False -> "content-length: " <> int.to_string(body_size) <> "\r\n"
+      }
+      let header_str =
+        string.concat(
+          list.flatten([[status_line], header_lines, [cl_line, "\r\n"]]),
+        )
+      let header_bits = <<header_str:utf8>>
 
-  // Send headers + body in one write
-  let full = bit_array.append(header_bits, body_bits)
-  server.send_bytes(socket, full)
+      let full = bit_array.append(header_bits, body_bits)
+      server.send_bytes(socket, full)
+    }
+  }
+}
+
+/// Validate one HTTP response header before serializing it to the wire.
+///
+/// Header names must be RFC 7230 tokens. Header values must not contain CR, LF,
+/// or NUL because those bytes enable response splitting.
+pub fn validate_response_header(
+  name: String,
+  value: String,
+) -> Result(Nil, String) {
+  case is_valid_header_name(name), is_valid_header_value(value) {
+    False, _ -> {
+      log.warning("beacon.http", "Invalid HTTP response header name: " <> name)
+      Error("Invalid HTTP response header name: " <> name)
+    }
+    _, False -> {
+      log.warning(
+        "beacon.http",
+        "Invalid HTTP response header value for " <> name,
+      )
+      Error("Invalid HTTP response header value for " <> name)
+    }
+    True, True -> {
+      log.debug("beacon.http", "Validated HTTP response header: " <> name)
+      Ok(Nil)
+    }
+  }
 }
 
 /// Read the request body from the connection.
@@ -178,6 +213,104 @@ pub fn write_error(socket: server.Socket, status: Int, body: String) -> Nil {
 }
 
 // --- Internal helpers ---
+
+fn validate_response_headers(
+  headers: List(#(String, String)),
+) -> Result(Nil, String) {
+  case headers {
+    [] -> Ok(Nil)
+    [#(name, value), ..rest] -> {
+      case validate_response_header(name, value) {
+        Error(reason) -> Error(reason)
+        Ok(Nil) -> validate_response_headers(rest)
+      }
+    }
+  }
+}
+
+fn is_valid_header_name(name: String) -> Bool {
+  name != "" && list.all(string.to_graphemes(name), is_header_token_grapheme)
+}
+
+fn is_header_token_grapheme(grapheme: String) -> Bool {
+  case grapheme {
+    "!"
+    | "#"
+    | "$"
+    | "%"
+    | "&"
+    | "'"
+    | "*"
+    | "+"
+    | "-"
+    | "."
+    | "^"
+    | "_"
+    | "`"
+    | "|"
+    | "~" -> True
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
+    "a"
+    | "b"
+    | "c"
+    | "d"
+    | "e"
+    | "f"
+    | "g"
+    | "h"
+    | "i"
+    | "j"
+    | "k"
+    | "l"
+    | "m"
+    | "n"
+    | "o"
+    | "p"
+    | "q"
+    | "r"
+    | "s"
+    | "t"
+    | "u"
+    | "v"
+    | "w"
+    | "x"
+    | "y"
+    | "z" -> True
+    "A"
+    | "B"
+    | "C"
+    | "D"
+    | "E"
+    | "F"
+    | "G"
+    | "H"
+    | "I"
+    | "J"
+    | "K"
+    | "L"
+    | "M"
+    | "N"
+    | "O"
+    | "P"
+    | "Q"
+    | "R"
+    | "S"
+    | "T"
+    | "U"
+    | "V"
+    | "W"
+    | "X"
+    | "Y"
+    | "Z" -> True
+    _ -> False
+  }
+}
+
+fn is_valid_header_value(value: String) -> Bool {
+  !string.contains(value, "\r")
+  && !string.contains(value, "\n")
+  && !string.contains(value, "\u{0000}")
+}
 
 fn build_request(
   socket: server.Socket,

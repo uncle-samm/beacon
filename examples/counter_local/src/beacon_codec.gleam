@@ -2,6 +2,7 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import counter_local
+import beacon/element
 import gleam/json
 import gleam/dynamic/decode
 
@@ -25,6 +26,14 @@ pub fn encode_model(state: #(counter_local.Model, counter_local.Local)) -> Strin
   |> json.to_string
 }
 
+/// Render the model with the same generated server contract used for SSR.
+pub fn render_model(state: #(counter_local.Model, counter_local.Local)) -> String {
+  let model = state.0
+  let local = state.1
+  counter_local.view(model, local)
+  |> element.to_string
+}
+
 /// Decode a #(Model, Local) from JSON string (for applying client patches).
 pub fn decode_model(json_str: String) -> Result(#(counter_local.Model, counter_local.Local), String) {
   let state_decoder = {
@@ -36,5 +45,71 @@ pub fn decode_model(json_str: String) -> Result(#(counter_local.Model, counter_l
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
     Error(_) -> Error("Failed to decode model+local")
+  }
+}
+
+/// Decode the generated client event contract. Live event decoding never
+/// renders the server view or reads the handler registry.
+pub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result(counter_local.Msg, String) {
+  let envelope_decoder = {
+    use msg_json <- decode.field("__beacon_msg", decode.string)
+    decode.success(msg_json)
+  }
+  case json.parse(data, envelope_decoder) {
+    Ok(msg_json) -> decode_msg(msg_json)
+    Error(_) -> Error("Client event missing generated Beacon message envelope")
+  }
+}
+
+
+fn decode_msg(json_str: String) -> Result(counter_local.Msg, String) {
+  let tag_decoder = {
+    use tag <- decode.field("tag", decode.string)
+    decode.success(tag)
+  }
+  case json.parse(json_str, tag_decoder) {
+    Ok(tag) -> {
+      case tag {
+    "Increment" -> {
+      let msg_decoder = {
+      decode.success(counter_local.Increment)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag Increment")
+      }
+    }
+    "Decrement" -> {
+      let msg_decoder = {
+      decode.success(counter_local.Decrement)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag Decrement")
+      }
+    }
+    "SetInput" -> {
+      let msg_decoder = {
+      use arg0 <- decode.field("arg0", decode.string)
+      decode.success(counter_local.SetInput(arg0))
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag SetInput")
+      }
+    }
+    "ToggleMenu" -> {
+      let msg_decoder = {
+      decode.success(counter_local.ToggleMenu)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag ToggleMenu")
+      }
+    }
+        _ -> Error("Unknown generated Beacon message tag " <> tag)
+      }
+    }
+    Error(_) -> Error("Generated Beacon message payload missing tag")
   }
 }

@@ -78,13 +78,8 @@ pub fn render_page(config: SsrConfig(model, msg)) -> RenderedPage {
   // This matches LiveView's behavior: expensive data loading
   // can be deferred to the live mount phase.
 
-  // Step 2: Render view
-  // Reset handler counter so IDs always start at h0 (prevents accumulation
-  // across keep-alive requests on the same HTTP process)
-  handler.start_render()
-  let view_tree = config.view(model)
-  let _view_registry = handler.finish_render()
-  let view_html = element.to_string(view_tree)
+  // Step 2: Render view through the generated renderer when available.
+  let view_html = render_view_html(config, model)
 
   // Step 3: Create session token
   let token =
@@ -152,10 +147,7 @@ fn render_page_for_model(
   path: String,
   model: model,
 ) -> RenderedPage {
-  handler.start_render()
-  let view_tree = config.view(model)
-  let _view_registry = handler.finish_render()
-  let view_html = element.to_string(view_tree)
+  let view_html = render_view_html(config, model)
 
   let token =
     create_session_token_for_model(
@@ -181,6 +173,26 @@ fn render_page_for_model(
     cookie_secure: !config.dev_mode,
   )
 }
+
+fn render_view_html(config: SsrConfig(model, msg), model: model) -> String {
+  handler.start_render()
+  let view_html = case try_load_codec_renderer() {
+    Ok(render) -> {
+      log.debug("beacon.ssr", "Rendering via generated beacon_codec.render_model/1")
+      render(model)
+    }
+    Error(_) -> {
+      log.debug("beacon.ssr", "Rendering via configured direct SSR view")
+      let view_tree = config.view(model)
+      element.to_string(view_tree)
+    }
+  }
+  let _view_registry = handler.finish_render()
+  view_html
+}
+
+@external(erlang, "beacon_runtime_ffi", "try_load_codec_renderer")
+fn try_load_codec_renderer() -> Result(fn(model) -> String, Nil)
 
 fn render_not_found_page(config: SsrConfig(model, msg)) -> RenderedPage {
   let view_html = error_page.not_found() |> element.to_string

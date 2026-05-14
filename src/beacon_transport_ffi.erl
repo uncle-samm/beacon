@@ -62,9 +62,12 @@ read_http_request_with_limits(Socket, MaxHeaders, MaxHeaderBytes, TimeoutMs) ->
         {error, Reason} ->
             {error, format_reason(Reason)};
         ok ->
-            case gen_tcp:recv(Socket, 0, TimeoutMs) of
+            DeadlineMs = erlang:monotonic_time(millisecond) + TimeoutMs,
+            case recv_before_deadline(Socket, DeadlineMs) of
                 {ok, {http_request, Method, {abs_path, Path}, _Version}} ->
-                    case read_headers(Socket, [], MaxHeaders, MaxHeaderBytes, 0, TimeoutMs) of
+                    RequestLineBytes =
+                        byte_size(method_to_binary(Method)) + byte_size(Path),
+                    case read_headers(Socket, [], MaxHeaders, MaxHeaderBytes, RequestLineBytes, DeadlineMs) of
                         {ok, Headers} ->
                             inet:setopts(Socket, [{packet, raw}]),
                             {ok, {method_to_binary(Method), Path, Headers}};
@@ -83,8 +86,16 @@ read_http_request_with_limits(Socket, MaxHeaders, MaxHeaderBytes, TimeoutMs) ->
             end
     end.
 
-read_headers(Socket, Acc, MaxHeaders, MaxHeaderBytes, BytesRead, TimeoutMs) ->
-    case gen_tcp:recv(Socket, 0, TimeoutMs) of
+recv_before_deadline(Socket, DeadlineMs) ->
+    NowMs = erlang:monotonic_time(millisecond),
+    RemainingMs = DeadlineMs - NowMs,
+    case RemainingMs =< 0 of
+        true -> {error, <<"timeout">>};
+        false -> gen_tcp:recv(Socket, 0, RemainingMs)
+    end.
+
+read_headers(Socket, Acc, MaxHeaders, MaxHeaderBytes, BytesRead, DeadlineMs) ->
+    case recv_before_deadline(Socket, DeadlineMs) of
         {ok, {http_header, _, Name, _, Value}} ->
             Key = normalize_header_name(Name),
             NewBytesRead = BytesRead + byte_size(Key) + byte_size(Value),
@@ -103,7 +114,7 @@ read_headers(Socket, Acc, MaxHeaders, MaxHeaderBytes, BytesRead, TimeoutMs) ->
                                 MaxHeaders,
                                 MaxHeaderBytes,
                                 NewBytesRead,
-                                TimeoutMs
+                                DeadlineMs
                             )
                     end
             end;
@@ -192,7 +203,7 @@ ws_decode_frame(Data) ->
             Unmasked = unmask(Payload, Mask),
             {ok, {Opcode, Unmasked, Remaining}};
         %% Unmasked frame from client — protocol violation
-        <<_Fin:1, _Rsv:3, _Opcode:4, 0:1, _/binary>> when byte_size(Data) >= 2 ->
+        <<_Fin:1, _Rsv:3, _Opcode:4, 0:1, _Len:7, _/binary>> when byte_size(Data) >= 2 ->
             {error, <<"protocol_violation_unmasked">>};
         %% Incomplete frame
         _ ->

@@ -111,22 +111,17 @@ fn handle_recompile() -> Nil {
 
 /// Run `gleam build` and return success/failure.
 fn run_build() -> Result(Nil, String) {
-  let result = run_command("gleam build 2>&1")
-  case
-    string_contains(result, "Compiled in")
-    || string_contains(result, "compiled")
-  {
-    True -> Ok(Nil)
-    False -> Error(result)
+  case run_program(".", "gleam", ["build"]) {
+    Ok(_output) -> Ok(Nil)
+    Error(reason) -> Error(reason)
   }
 }
 
 /// Run client-side JS build.
 fn run_client_build() -> Result(Nil, String) {
-  let result = run_command("gleam run -m beacon/build 2>&1")
-  case string_contains(result, "Done!") {
-    True -> Ok(Nil)
-    False -> Error(result)
+  case run_program(".", "gleam", ["run", "-m", "beacon/build"]) {
+    Ok(_output) -> Ok(Nil)
+    Error(reason) -> Error(reason)
   }
 }
 
@@ -149,8 +144,12 @@ fn do_join(dirs: List(String), acc: String) -> String {
 
 // === FFI ===
 
-@external(erlang, "beacon_dev_ffi", "run_command")
-fn run_command(cmd: String) -> String
+@external(erlang, "beacon_dev_ffi", "run_program")
+fn run_program(
+  cwd: String,
+  program: String,
+  args: List(String),
+) -> Result(String, String)
 
 @external(erlang, "beacon_dev_ffi", "sleep")
 fn sleep(ms: Int) -> Nil
@@ -163,9 +162,6 @@ fn get_file_timestamps(dirs: List(String)) -> List(#(String, Int))
 
 @external(erlang, "beacon_dev_ffi", "do_hot_swap")
 fn do_hot_swap() -> Result(Int, String)
-
-@external(erlang, "beacon_dev_ffi", "string_contains")
-fn string_contains(haystack: String, needle: String) -> Bool
 
 @external(erlang, "beacon_dev_ffi", "int_to_string")
 fn int_to_string(n: Int) -> String

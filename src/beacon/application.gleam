@@ -39,7 +39,8 @@ pub type AppConfig(model, msg) {
     /// View function.
     view: fn(model) -> Node(msg),
     /// Decode client events to app messages.
-    /// If None, uses the handler registry (automatic via on_click/on_input).
+    /// Public Beacon apps use generated beacon_codec.decode_event/4.
+    /// Supplying this manually is an advanced non-browser transport hook.
     decode_event: Option(
       fn(String, String, String, String) -> Result(msg, error.BeaconError),
     ),
@@ -100,8 +101,13 @@ pub type App {
   )
 }
 
-/// Start a fully supervised Beacon application.
-/// This is the recommended way to start Beacon in production.
+/// Start a Beacon application.
+///
+/// Normal applications must use the generated Beacon contract:
+/// `beacon_codec.encode_model/1`, `beacon_codec.decode_event/4`, and
+/// `beacon_codec.render_model/1`. Supplying a manual event decoder to this
+/// entry point is rejected so browser apps cannot accidentally bypass generated
+/// client/server contract checks.
 ///
 /// Creates a supervision tree:
 /// - State manager (ETS-backed)
@@ -111,6 +117,53 @@ pub type App {
 /// Uses `one_for_one` strategy: if one child crashes, only that child restarts.
 pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
   log.configure()
+  case verify_public_application_contract(config) {
+    Error(err) -> Error(err)
+    Ok(Nil) -> start_verified(config)
+  }
+}
+
+/// Start an explicitly advanced Beacon application.
+///
+/// This is for test harnesses and non-browser transports that intentionally
+/// provide their own event decoder. Normal apps should use `beacon.start`, which
+/// generates and verifies the contract before the port is opened.
+pub fn start_advanced(
+  config: AppConfig(model, msg),
+) -> Result(App, error.BeaconError) {
+  log.configure()
+  case config.decode_event {
+    Some(_) -> {
+      log.warning(
+        "beacon.application",
+        "Starting with manual decode_event via start_advanced; generated browser contract checks are caller-owned",
+      )
+      start_verified(config)
+    }
+    None -> {
+      case runtime.verify_generated_contract() {
+        Ok(Nil) -> start_verified(config)
+        Error(err) -> Error(err)
+      }
+    }
+  }
+}
+
+fn verify_public_application_contract(
+  config: AppConfig(model, msg),
+) -> Result(Nil, error.BeaconError) {
+  case config.decode_event {
+    Some(_) ->
+      Error(error.ConfigError(
+        reason: "Manual decode_event is not accepted by application.start. Use generated contracts through beacon.start, or call application.start_advanced for an explicit non-browser/test transport.",
+      ))
+    None -> runtime.verify_generated_contract()
+  }
+}
+
+fn start_verified(
+  config: AppConfig(model, msg),
+) -> Result(App, error.BeaconError) {
   // Start PubSub for distributed broadcasting
   pubsub.start()
   log.info(
@@ -233,6 +286,23 @@ pub fn start(config: AppConfig(model, msg)) -> Result(App, error.BeaconError) {
 pub fn start_supervised(
   config: AppConfig(model, msg),
 ) -> Result(App, error.BeaconError) {
+  start_supervised_with(config, start)
+}
+
+/// Start an explicitly advanced Beacon application with the OTP supervisor.
+///
+/// This has the same contract caveat as `start_advanced`: manual decoders are
+/// caller-owned and should not be used for normal browser apps.
+pub fn start_supervised_advanced(
+  config: AppConfig(model, msg),
+) -> Result(App, error.BeaconError) {
+  start_supervised_with(config, start_advanced)
+}
+
+fn start_supervised_with(
+  config: AppConfig(model, msg),
+  start_fn: fn(AppConfig(model, msg)) -> Result(App, error.BeaconError),
+) -> Result(App, error.BeaconError) {
   log.configure()
   log.info(
     "beacon.application",
@@ -258,7 +328,7 @@ pub fn start_supervised(
   case sup_result {
     Ok(sup_started) -> {
       log.info("beacon.application", "Supervisor started")
-      case start(config) {
+      case start_fn(config) {
         Ok(_app) -> {
           log.info("beacon.application", "Application fully started")
           Ok(App(supervisor_pid: sup_started.pid))

@@ -18,6 +18,8 @@ pub type StressConfig {
     port: Int,
     /// Duration to hold connections open (milliseconds).
     hold_duration_ms: Int,
+    /// Number of model events to send on each connection after join.
+    events_per_connection: Int,
   )
 }
 
@@ -40,6 +42,10 @@ pub type StressResult {
     memory_before: Int,
     /// Memory after test (bytes).
     memory_after: Int,
+    /// Wall-clock duration for the full stress run.
+    duration_ms: Int,
+    /// Number of event frames attempted across all connections.
+    events_attempted: Int,
   )
 }
 
@@ -60,10 +66,15 @@ pub fn run(config: StressConfig) -> StressResult {
   let stats_before = debug.stats()
   let result_subject = process.new_subject()
 
-  // Spawn connection processes
+  let start_us = monotonic_us()
+
+  // Spawn real WebSocket connection processes.
   spawn_connections(
     config.connections,
+    config.host,
+    config.port,
     config.hold_duration_ms,
+    config.events_per_connection,
     result_subject,
     1,
   )
@@ -86,6 +97,7 @@ pub fn run(config: StressConfig) -> StressResult {
 
   process.sleep(200)
   let stats_after = debug.stats()
+  let duration_ms = { monotonic_us() - start_us } / 1000
 
   let result =
     StressResult(
@@ -97,6 +109,8 @@ pub fn run(config: StressConfig) -> StressResult {
       processes_after: stats_after.process_count,
       memory_before: stats_before.memory_bytes,
       memory_after: stats_after.memory_bytes,
+      duration_ms: duration_ms,
+      events_attempted: config.connections * config.events_per_connection,
     )
 
   log.info(
@@ -124,8 +138,11 @@ pub fn run(config: StressConfig) -> StressResult {
 /// Spawn N connection processes.
 fn spawn_connections(
   remaining: Int,
+  host: String,
+  port: Int,
   hold_ms: Int,
-  subject: process.Subject(Int),
+  events_per_connection: Int,
+  subject: process.Subject(Bool),
   index: Int,
 ) -> Nil {
   case remaining <= 0 {
@@ -134,17 +151,38 @@ fn spawn_connections(
       let i = index
       let _ =
         process.spawn(fn() {
-          process.sleep(hold_ms)
-          process.send(subject, i)
+          let result =
+            open_ws_and_exercise(host, port, hold_ms, events_per_connection)
+          case result {
+            Ok(Nil) -> process.send(subject, True)
+            Error(reason) -> {
+              log.warning(
+                "beacon.stress",
+                "Connection "
+                  <> int.to_string(i)
+                  <> " failed during stress run: "
+                  <> reason,
+              )
+              process.send(subject, False)
+            }
+          }
         })
-      spawn_connections(remaining - 1, hold_ms, subject, index + 1)
+      spawn_connections(
+        remaining - 1,
+        host,
+        port,
+        hold_ms,
+        events_per_connection,
+        subject,
+        index + 1,
+      )
     }
   }
 }
 
 /// Count results from the result subject.
 fn count_results(
-  selector: process.Selector(Int),
+  selector: process.Selector(Bool),
   remaining: Int,
   count: Int,
   timeout: Int,
@@ -153,12 +191,24 @@ fn count_results(
     True -> count
     False -> {
       case process.selector_receive(selector, timeout) {
-        Ok(_) -> count_results(selector, remaining - 1, count + 1, timeout)
+        Ok(True) -> count_results(selector, remaining - 1, count + 1, timeout)
+        Ok(False) -> count_results(selector, remaining - 1, count, timeout)
         Error(Nil) -> count
       }
     }
   }
 }
+
+@external(erlang, "beacon_stress_ffi", "open_ws_and_exercise")
+fn open_ws_and_exercise(
+  host: String,
+  port: Int,
+  hold_ms: Int,
+  events_per_connection: Int,
+) -> Result(Nil, String)
+
+@external(erlang, "beacon_stress_ffi", "monotonic_us")
+fn monotonic_us() -> Int
 
 /// CLI entry point for stress testing.
 pub fn main() {
@@ -169,6 +219,7 @@ pub fn main() {
       host: "localhost",
       port: 8080,
       hold_duration_ms: 1000,
+      events_per_connection: 10,
     )
   let result = run(config)
   log.info(

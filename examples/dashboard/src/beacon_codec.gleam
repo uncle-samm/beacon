@@ -2,6 +2,7 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import dashboard
+import beacon/element
 import gleam/json
 import gleam/dynamic/decode
 
@@ -27,6 +28,13 @@ pub fn encode_model(state: dashboard.Model) -> String {
   |> json.to_string
 }
 
+/// Render the model with the same generated server contract used for SSR.
+pub fn render_model(state: dashboard.Model) -> String {
+  let model = state
+  dashboard.view(model)
+  |> element.to_string
+}
+
 /// Decode a Model from JSON string (for applying client patches).
 pub fn decode_model(json_str: String) -> Result(dashboard.Model, String) {
   let model_decoder = {
@@ -41,5 +49,43 @@ pub fn decode_model(json_str: String) -> Result(dashboard.Model, String) {
   case json.parse(json_str, model_decoder) {
     Ok(model) -> Ok(model)
     Error(_) -> Error("Failed to decode model")
+  }
+}
+
+/// Decode the generated client event contract. Live event decoding never
+/// renders the server view or reads the handler registry.
+pub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result(dashboard.Msg, String) {
+  let envelope_decoder = {
+    use msg_json <- decode.field("__beacon_msg", decode.string)
+    decode.success(msg_json)
+  }
+  case json.parse(data, envelope_decoder) {
+    Ok(msg_json) -> decode_msg(msg_json)
+    Error(_) -> Error("Client event missing generated Beacon message envelope")
+  }
+}
+
+
+fn decode_msg(json_str: String) -> Result(dashboard.Msg, String) {
+  let tag_decoder = {
+    use tag <- decode.field("tag", decode.string)
+    decode.success(tag)
+  }
+  case json.parse(json_str, tag_decoder) {
+    Ok(tag) -> {
+      case tag {
+    "RefreshStats" -> {
+      let msg_decoder = {
+      decode.success(dashboard.RefreshStats)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag RefreshStats")
+      }
+    }
+        _ -> Error("Unknown generated Beacon message tag " <> tag)
+      }
+    }
+    Error(_) -> Error("Generated Beacon message payload missing tag")
   }
 }

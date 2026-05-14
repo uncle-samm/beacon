@@ -26,7 +26,8 @@ Exceeding `max_events_per_second` (default 50) returns `{"type":"error","reason"
 
 ## Token Expiration
 
-Tokens expire after 24 hours. Expired or invalid tokens cause the server to fall back to the current model state and log a warning.
+Tokens expire after 24 hours. Expired or invalid tokens are rejected and logged;
+the connection must rejoin with a valid session.
 
 ## Model Size Limits
 

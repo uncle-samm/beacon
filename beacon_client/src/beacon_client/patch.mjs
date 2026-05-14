@@ -21,6 +21,9 @@ export function diffModels(oldModel, newModel) {
   if (typeof oldModel !== "object" || typeof newModel !== "object") {
     return [{ op: "replace", path: "", value: newModel }];
   }
+  if (containsUnsafeKey(oldModel) || containsUnsafeKey(newModel)) {
+    return [{ op: "replace", path: "", value: newModel }];
+  }
 
   const ops = [];
   diffObject(oldModel, newModel, "", ops);
@@ -32,8 +35,8 @@ function diffObject(oldObj, newObj, basePath, ops) {
   const oldKeys = Object.keys(oldObj);
   for (let i = 0; i < oldKeys.length; i++) {
     const key = oldKeys[i];
-    if (!(key in newObj)) {
-      ops.push({ op: "remove", path: basePath + "/" + key });
+    if (!Object.prototype.hasOwnProperty.call(newObj, key)) {
+      ops.push({ op: "remove", path: basePath + "/" + escapePathSegment(key) });
     }
   }
 
@@ -41,11 +44,11 @@ function diffObject(oldObj, newObj, basePath, ops) {
   const newKeys = Object.keys(newObj);
   for (let i = 0; i < newKeys.length; i++) {
     const key = newKeys[i];
-    const path = basePath + "/" + key;
+    const path = basePath + "/" + escapePathSegment(key);
     const oldVal = oldObj[key];
     const newVal = newObj[key];
 
-    if (!(key in oldObj)) {
+    if (!Object.prototype.hasOwnProperty.call(oldObj, key)) {
       // New key added
       ops.push({ op: "replace", path, value: newVal });
     } else if (Array.isArray(oldVal) && Array.isArray(newVal)) {
@@ -124,9 +127,14 @@ function deepEqual(a, b) {
   if (keysA.length !== keysB.length) return false;
   for (let i = 0; i < keysA.length; i++) {
     const key = keysA[i];
+    if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
     if (!deepEqual(a[key], b[key])) return false;
   }
   return true;
+}
+
+function escapePathSegment(segment) {
+  return String(segment).replace(/~/g, "~0").replace(/\//g, "~1");
 }
 
 /**
@@ -157,8 +165,8 @@ function applyOp(model, op) {
     return model;
   }
 
-  // Parse path into segments
-  const segments = path.split("/").filter((s) => s !== "");
+  const segments = parsePath(path);
+  assertSafeSegments(segments);
 
   // Clone the path to the target
   const result = shallowClonePath(model, segments);
@@ -170,11 +178,6 @@ function applyOp(model, op) {
   }
 
   const lastKey = segments[segments.length - 1];
-
-  // Guard against prototype pollution — never allow setting dangerous keys
-  if (UNSAFE_KEYS.has(lastKey)) {
-    return model;
-  }
 
   switch (op.op) {
     case "replace":
@@ -208,6 +211,7 @@ function shallowClonePath(obj, segments) {
   let current = result;
   for (let i = 0; i < segments.length - 1; i++) {
     const key = segments[i];
+    if (!Object.prototype.hasOwnProperty.call(current, key)) break;
     const child = current[key];
     if (typeof child === "object" && child !== null) {
       current[key] = Array.isArray(child) ? [...child] : { ...child };
@@ -225,4 +229,35 @@ function shallowClonePath(obj, segments) {
     }
   }
   return result;
+}
+
+function parsePath(path) {
+  return path
+    .split("/")
+    .filter((s) => s !== "")
+    .map((segment) => segment.replace(/~1/g, "/").replace(/~0/g, "~"));
+}
+
+function assertSafeSegments(segments) {
+  for (let i = 0; i < segments.length; i++) {
+    if (UNSAFE_KEYS.has(segments[i])) {
+      throw new Error(`Unsafe patch path segment: ${segments[i]}`);
+    }
+  }
+}
+
+function containsUnsafeKey(value) {
+  if (typeof value !== "object" || value === null) return false;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      if (containsUnsafeKey(value[i])) return true;
+    }
+    return false;
+  }
+  const keys = Object.keys(value);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (UNSAFE_KEYS.has(key) || containsUnsafeKey(value[key])) return true;
+  }
+  return false;
 }

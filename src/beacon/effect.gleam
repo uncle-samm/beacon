@@ -18,6 +18,8 @@ pub opaque type Effect(msg) {
 type Callback(msg) {
   SimpleCallback(run: fn(fn(msg) -> Nil) -> Nil)
   KeyedCallback(key: String, run: fn(fn(msg) -> Nil) -> Nil)
+  SpawnedCallback(run: fn(fn(msg) -> Nil) -> process.Pid)
+  KeyedSpawnedCallback(key: String, run: fn(fn(msg) -> Nil) -> process.Pid)
   CancelKeyCallback(key: String)
 }
 
@@ -52,6 +54,8 @@ pub fn keyed(key: String, inner: Effect(msg)) -> Effect(msg) {
       case callback {
         SimpleCallback(run) -> KeyedCallback(key: key, run: run)
         KeyedCallback(_, run) -> KeyedCallback(key: key, run: run)
+        SpawnedCallback(run) -> KeyedSpawnedCallback(key: key, run: run)
+        KeyedSpawnedCallback(_, run) -> KeyedSpawnedCallback(key: key, run: run)
         CancelKeyCallback(cancel_key) -> CancelKeyCallback(key: cancel_key)
       }
     }),
@@ -91,6 +95,14 @@ pub fn map(effect: Effect(a), f: fn(a) -> b) -> Effect(b) {
           KeyedCallback(key: key, run: fn(dispatch: fn(b) -> Nil) {
             run(fn(a) { dispatch(f(a)) })
           })
+        SpawnedCallback(run) ->
+          SpawnedCallback(run: fn(dispatch: fn(b) -> Nil) {
+            run(fn(a) { dispatch(f(a)) })
+          })
+        KeyedSpawnedCallback(key, run) ->
+          KeyedSpawnedCallback(key: key, run: fn(dispatch: fn(b) -> Nil) {
+            run(fn(a) { dispatch(f(a)) })
+          })
         CancelKeyCallback(key) -> CancelKeyCallback(key: key)
       }
     })
@@ -104,14 +116,37 @@ pub fn perform(
   dispatch: fn(msg) -> Nil,
   dispatch_keyed: fn(String, Int, msg) -> Nil,
 ) -> Nil {
-  list.each(effect.callbacks, fn(callback) {
+  let _ = perform_tracked(effect, dispatch, dispatch_keyed)
+  Nil
+}
+
+/// Execute callbacks and return framework-owned spawned process IDs.
+/// The runtime uses this to kill timers/background work during shutdown.
+pub fn perform_tracked(
+  effect: Effect(msg),
+  dispatch: fn(msg) -> Nil,
+  dispatch_keyed: fn(String, Int, msg) -> Nil,
+) -> List(process.Pid) {
+  list.fold(effect.callbacks, [], fn(pids, callback) {
     case callback {
-      SimpleCallback(run) -> run(dispatch)
+      SimpleCallback(run) -> {
+        run(dispatch)
+        pids
+      }
       KeyedCallback(key, run) -> {
         let generation = register_key_generation(key)
         run(fn(message) { dispatch_keyed(key, generation, message) })
+        pids
       }
-      CancelKeyCallback(key) -> cancel_key_generation(key)
+      SpawnedCallback(run) -> [run(dispatch), ..pids]
+      KeyedSpawnedCallback(key, run) -> {
+        let generation = register_key_generation(key)
+        [run(fn(message) { dispatch_keyed(key, generation, message) }), ..pids]
+      }
+      CancelKeyCallback(key) -> {
+        cancel_key_generation(key)
+        pids
+      }
     }
   })
 }
@@ -131,9 +166,8 @@ pub fn perform(
 /// ```
 pub fn background(callback: fn(fn(msg) -> Nil) -> Nil) -> Effect(msg) {
   Effect(callbacks: [
-    SimpleCallback(run: fn(dispatch) {
-      let _ = process.spawn(fn() { callback(dispatch) })
-      Nil
+    SpawnedCallback(run: fn(dispatch) {
+      process.spawn_unlinked(fn() { callback(dispatch) })
     }),
   ])
 }
@@ -157,18 +191,18 @@ const max_timers = 10
 /// ```
 pub fn every(interval_ms: Int, make_msg: fn() -> msg) -> Effect(msg) {
   Effect(callbacks: [
-    SimpleCallback(run: fn(dispatch) {
+    SpawnedCallback(run: fn(dispatch) {
       let current = get_timer_count()
       case current >= max_timers {
         True -> {
           log_timer_limit_warning(current)
-          Nil
+          process.spawn_unlinked(fn() { Nil })
         }
         False -> {
           increment_timer_count()
-          let _ =
-            process.spawn(fn() { timer_loop(interval_ms, make_msg, dispatch) })
-          Nil
+          process.spawn_unlinked(fn() {
+            timer_loop(interval_ms, make_msg, dispatch)
+          })
         }
       }
     }),
@@ -218,13 +252,11 @@ fn timer_loop(
 /// ```
 pub fn after(delay_ms: Int, make_msg: fn() -> msg) -> Effect(msg) {
   Effect(callbacks: [
-    SimpleCallback(run: fn(dispatch) {
-      let _ =
-        process.spawn(fn() {
-          process.sleep(delay_ms)
-          dispatch(make_msg())
-        })
-      Nil
+    SpawnedCallback(run: fn(dispatch) {
+      process.spawn_unlinked(fn() {
+        process.sleep(delay_ms)
+        dispatch(make_msg())
+      })
     }),
   ])
 }

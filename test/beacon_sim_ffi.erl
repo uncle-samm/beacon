@@ -1,6 +1,7 @@
 -module(beacon_sim_ffi).
 -export([
-    new_metrics/0, increment/2, increment_by/3, record_latency/2, record_payload/2, collect/1, destroy/1,
+    new_metrics/0, increment/2, increment_by/3, record_latency/2, record_payload/2,
+    mark_event_send_start/1, take_event_send_start/0, collect/1, destroy/1,
     monotonic_us/0, snapshot_memory/0, snapshot_processes/0,
     message_queue_len/1
 ]).
@@ -75,6 +76,18 @@ validate_atom_name(Name) ->
 record_latency({_Counters, Latencies}, LatencyUs) ->
     ets:insert(Latencies, {latency, LatencyUs}),
     nil.
+
+mark_event_send_start(SentAtUs) ->
+    erlang:put(beacon_sim_event_send_start_us, SentAtUs),
+    nil.
+
+take_event_send_start() ->
+    case erlang:get(beacon_sim_event_send_start_us) of
+        undefined -> 0;
+        SentAtUs ->
+            erlang:erase(beacon_sim_event_send_start_us),
+            SentAtUs
+    end.
 
 %% Store the latest received WebSocket payload for behavioral assertions.
 record_payload({Counters, _Latencies}, Payload) ->

@@ -585,7 +585,7 @@ pub fn sim_concurrent_mutation_test() {
 
   let assert True = verify.succeeded == 1
 
-  // patch_efficiency(1) receives: mount, model_sync(count:0), event, patch/sync(count:1)
+  // patch_efficiency(1) receives: model_sync(count:0), event, patch/sync(count:1)
   let m2 = metrics.collect(mt2)
   // Must have received at least 1 model_sync (initial state) proving protocol works
   let assert True = m2.model_syncs_received >= 1
@@ -636,10 +636,7 @@ pub fn sim_state_correctness_test() {
       scenario: scenario.Scenario(name: "verify_final_count", actions: [
         scenario.Connect,
         scenario.Join,
-        // Mount
         scenario.WaitForResponse(5000),
-        // model_sync proves state was preserved across connections
-        scenario.WaitForModelSync(5000),
         scenario.Disconnect,
       ]),
       stagger_ms: 0,
@@ -756,8 +753,8 @@ pub fn sim_wire_tracking_test() {
   // Bytes tracking must work
   let assert True = m.bytes_sent > 0
   let assert True = m.bytes_received > 0
-  // Should have mount + model_sync + patches
-  let assert True = m.mounts_received >= 1
+  // Normal SSR+client-state apps do not send HTML mount over WebSocket.
+  let assert 0 = m.mounts_received
   let assert True = m.model_syncs_received >= 1
 
   metrics.destroy(mt)

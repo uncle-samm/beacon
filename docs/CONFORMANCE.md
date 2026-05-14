@@ -58,6 +58,57 @@ For a narrower full-matrix loop, use `make browser-all-desktop`,
 PYTHONUNBUFFERED=1 .venv/bin/python test_all_cdp.py canvas --viewport desktop
 ```
 
+For container-parallel CI, shard the selected example list with `--shard`:
+
+```sh
+BEACON_CDP_VIEWPORTS=desktop BEACON_CDP_SHARD=1/4 make browser-all-shard
+PYTHONUNBUFFERED=1 .venv/bin/python test_all_cdp.py --canonical --shard 2/4
+```
+
+Sharding is deterministic over the harness example order and applies after the
+optional canonical/filter selection.
+
+For local per-container sharding, use the Docker runner:
+
+```sh
+BEACON_CDP_TOTAL_SHARDS=23 BEACON_CDP_VIEWPORTS=desktop BEACON_CDP_PARALLEL=5 make browser-all-docker-shards
+```
+
+The Docker runner also supports selected shard lists and warmed images:
+
+```sh
+BEACON_CDP_SHARDS="1,6,11" BEACON_CDP_TOTAL_SHARDS=23 make browser-all-docker-shards
+BEACON_CDP_PREBUILD_EXAMPLES=1 BEACON_CDP_TOTAL_SHARDS=23 make browser-all-docker-shards
+BEACON_CDP_SKIP_DOCKER_BUILD=1 BEACON_CDP_DOCKER_IMAGE=beacon-cdp:boxd make browser-all-docker-shards
+```
+
+Latest measured local timings on the 10 CPU / 16 GB development host:
+
+- Sequential desktop all-example container run: 11:59, with the final failure
+  fixed by the current Pong pause-position assertion.
+- Docker shards, 23 total / 5 concurrent: 8:11, 361 passed, 0 failed, 506
+  skipped.
+- Docker shards, 23 total / 10 concurrent: 5:32, unstable under host pressure.
+- Docker shards, 23 total / 7 concurrent: 7:29, unstable under host pressure.
+
+Latest Boxd measurement with five 4 vCPU / 16 GB VMs, forked from one warmed
+base image but before example build artifacts were baked into the image:
+
+- Slowest VM: 6:25 for its selected shard list.
+- Aggregate run was not accepted: several examples timed out at startup during
+  first compile, and Pong had one timing assertion failure on one worker.
+- Conclusion: Boxd has enough aggregate CPU/RAM, but the runner must use
+  `BEACON_CDP_PREBUILD_EXAMPLES=1` on the base image and
+  `BEACON_CDP_SKIP_DOCKER_BUILD=1` on forks before comparing throughput.
+
+Latest Boxd measurement after baking example build artifacts and skipping the
+Docker image probe on forks:
+
+- 22 of 23 shards passed; slowest VM completed in 5:42.
+- The remaining shard exposed a real Beacon auto-build bug:
+  `route_server_workspace` selected an imported route page as the app module.
+- After fixing app-module discovery, focused shard 22 passed in 1:14.
+
 CDP example startup is part of the assertion surface. If an attempted example
 server exits or fails to become ready before timeout, the browser run fails.
 
@@ -88,7 +139,8 @@ following guarantees:
 `routed_workspace`, `route_server_workspace`, and `auth_workspace` slices. The
 browser harness runs through the project-local `.venv` and
 `requirements-dev.txt`. `make browser-all` removes the canonical filter and
-runs every example slice implemented in the harness.
+runs every example slice implemented in the harness. `--shard INDEX/TOTAL`
+splits that same list for per-container parallel runs.
 
 The permanent harness now asserts:
 
