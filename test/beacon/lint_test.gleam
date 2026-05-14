@@ -231,8 +231,7 @@ Use start_router with route files.
 "
   let violations = lint.lint_doc_source("docs/OLD.md", source)
   let assert [_, _] = violations
-  let assert True =
-    list.any(violations, fn(v) { v.rule == "stale-docs-model" })
+  let assert True = list.any(violations, fn(v) { v.rule == "stale-docs-model" })
 }
 
 // --- Helper ---

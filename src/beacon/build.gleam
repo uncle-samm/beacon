@@ -12,6 +12,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option
+import gleam/result
 import gleam/string
 import simplifile
 
@@ -263,6 +264,24 @@ pub fn resolve_transitive_external_sources(
   }
 }
 
+/// Resolve transitive user modules from already-extracted client source.
+/// Each child is extracted before its imports are followed so server-only
+/// imports cannot drag private modules into the generated JavaScript app.
+pub fn resolve_transitive_client_external_sources(
+  source: String,
+  source_root: String,
+) -> Result(List(#(String, String, String)), String) {
+  case resolve_external_sources(source, source_root) {
+    Error(reason) -> Error(reason)
+    Ok(direct_sources) -> {
+      case walk_client_external_sources(direct_sources, source_root, [], []) {
+        Ok(#(sources, _seen)) -> Ok(sources)
+        Error(reason) -> Error(reason)
+      }
+    }
+  }
+}
+
 /// Resolve all transitive Beacon framework sources reachable from copied source text.
 /// Only `beacon/*` imports are followed; the root `beacon` module is generated separately.
 pub fn resolve_transitive_framework_sources(
@@ -314,6 +333,56 @@ fn walk_external_sources(
                 [module_path, ..seen],
                 [#(alias, module_path, ext_source), ..acc],
               )
+          }
+        }
+      }
+    }
+  }
+}
+
+fn walk_client_external_sources(
+  pending: List(#(String, String, String)),
+  source_root: String,
+  seen: List(String),
+  acc: List(#(String, String, String)),
+) -> Result(#(List(#(String, String, String)), List(String)), String) {
+  case pending {
+    [] -> Ok(#(list.reverse(acc), seen))
+    [ext, ..rest] -> {
+      let #(alias, module_path, ext_source) = ext
+      case list.contains(seen, module_path) {
+        True -> walk_client_external_sources(rest, source_root, seen, acc)
+        False -> {
+          case analyzer.extract_client_source(ext_source) {
+            Error(reason) ->
+              Error(
+                "Failed to extract client source for "
+                <> module_path
+                <> ": "
+                <> reason,
+              )
+            Ok(client_source) -> {
+              case string.trim(client_source) {
+                "" ->
+                  walk_client_external_sources(
+                    rest,
+                    source_root,
+                    [module_path, ..seen],
+                    acc,
+                  )
+                _ ->
+                  case resolve_external_sources(client_source, source_root) {
+                    Error(reason) -> Error(reason)
+                    Ok(child_sources) ->
+                      walk_client_external_sources(
+                        list.append(child_sources, rest),
+                        source_root,
+                        [module_path, ..seen],
+                        [#(alias, module_path, client_source), ..acc],
+                      )
+                  }
+              }
+            }
           }
         }
       }
@@ -909,6 +978,121 @@ fn create_build_directories(dir: String) -> Result(Nil, String) {
   }
 }
 
+fn generated_client_toml(client_sources: List(String)) -> Result(String, String) {
+  let base_deps = [
+    "gleam_stdlib = \">= 0.44.0 and < 2.0.0\"",
+    "gleam_json = \">= 3.1.0 and < 4.0.0\"",
+  ]
+  use root_toml <- result_try(case simplifile.read("gleam.toml") {
+    Ok(text) -> Ok(text)
+    Error(err) ->
+      Error(
+        "Failed to read gleam.toml for client dependencies: "
+        <> string.inspect(err),
+      )
+  })
+  use app_deps <- result_try(client_dependency_lines_from_sources(
+    dependency_lines_from_toml(root_toml),
+    client_sources,
+  ))
+  let deps = list.unique(list.append(base_deps, app_deps))
+  Ok(
+    "name = \"beacon_client_app\"\nversion = \"0.1.0\"\ntarget = \"javascript\"\n\n[dependencies]\n"
+    <> string.join(deps, "\n")
+    <> "\n",
+  )
+}
+
+fn client_dependency_lines_from_sources(
+  dependency_lines: List(String),
+  client_sources: List(String),
+) -> Result(List(String), String) {
+  let source_text = string.join(client_sources, "\n")
+  let requirements =
+    []
+    |> append_requirement_if_imported(
+      source_text,
+      "gleam/regexp",
+      "gleam_regexp",
+    )
+    |> append_requirement_if_imported(
+      source_text,
+      "gleam/javascript",
+      "gleam_javascript",
+    )
+    |> append_requirement_if_imported(source_text, "gleam/fetch", "gleam_fetch")
+
+  requirements
+  |> list.fold(Ok([]), fn(acc_result, requirement) {
+    case acc_result {
+      Error(reason) -> Error(reason)
+      Ok(acc) -> {
+        let #(module_path, package_name) = requirement
+        case find_dependency_line(dependency_lines, package_name) {
+          Ok(line) -> Ok([line, ..acc])
+          Error(_) ->
+            Error(
+              "Client-visible source imports "
+              <> module_path
+              <> " but gleam.toml has no "
+              <> package_name
+              <> " dependency. Add the dependency or remove the client-visible import.",
+            )
+        }
+      }
+    }
+  })
+  |> result.map(list.reverse)
+}
+
+fn append_requirement_if_imported(
+  requirements: List(#(String, String)),
+  source_text: String,
+  module_path: String,
+  package_name: String,
+) -> List(#(String, String)) {
+  case string.contains(source_text, "import " <> module_path) {
+    True -> [#(module_path, package_name), ..requirements]
+    False -> requirements
+  }
+}
+
+fn find_dependency_line(
+  dependency_lines: List(String),
+  package_name: String,
+) -> Result(String, Nil) {
+  dependency_lines
+  |> list.find(fn(line) {
+    string.starts_with(line, package_name <> " =")
+    || string.starts_with(line, package_name <> "=")
+  })
+}
+
+fn dependency_lines_from_toml(toml: String) -> List(String) {
+  let #(deps, _in_section) =
+    toml
+    |> string.split("\n")
+    |> list.fold(#([], False), fn(acc, raw_line) {
+      let #(lines, in_section) = acc
+      let line = string.trim(raw_line)
+      case line {
+        "" -> #(lines, in_section)
+        "[dependencies]" -> #(lines, True)
+        _ ->
+          case string.starts_with(line, "#"), string.starts_with(line, "[") {
+            True, _ -> #(lines, in_section)
+            _, True -> #(lines, False)
+            _, _ ->
+              case in_section && string.contains(line, "=") {
+                True -> #([line, ..lines], in_section)
+                False -> #(lines, in_section)
+              }
+          }
+      }
+    })
+  list.reverse(deps)
+}
+
 /// Build an enhanced JS bundle with user's pure update/view compiled to JS.
 /// This enables LOCAL events to run client-side without server round-trips.
 fn build_enhanced_bundle(
@@ -932,12 +1116,6 @@ fn build_enhanced_bundle(
     Error(reason) -> Error("Directory setup failed: " <> reason)
   })
 
-  let toml =
-    "name = \"beacon_client_app\"\nversion = \"0.1.0\"\ntarget = \"javascript\"\n\n[dependencies]\ngleam_stdlib = \">= 0.44.0 and < 2.0.0\"\ngleam_json = \">= 3.1.0 and < 4.0.0\"\n"
-  use Nil <- result_try(case simplifile.write(dir <> "/gleam.toml", toml) {
-    Ok(Nil) -> Ok(Nil)
-    Error(err) -> Error("Failed to write gleam.toml: " <> string.inspect(err))
-  })
   use Nil <- result_try(
     case simplifile.write(dir <> "/src/app.gleam", client_source) {
       Ok(Nil) -> Ok(Nil)
@@ -971,19 +1149,23 @@ fn build_enhanced_bundle(
   )
 
   let app_base_dir = source_root(path)
-  use import_sources <- result_try(resolve_transitive_external_sources(
-    source,
+  use external_sources <- result_try(resolve_transitive_client_external_sources(
+    client_source,
     app_base_dir,
   ))
-  use sibling_sources <- result_try(resolve_sibling_sources(path))
-  let import_paths = list.map(import_sources, fn(s) { s.1 })
-  let extra_siblings =
-    list.filter(sibling_sources, fn(s) { !list.contains(import_paths, s.1) })
-  let external_sources = list.append(import_sources, extra_siblings)
   use client_sources <- result_try(client_external_sources(external_sources))
+  let all_client_sources = [
+    client_source,
+    ..list.map(client_sources, fn(ext) { ext.2 })
+  ]
+  use toml <- result_try(generated_client_toml(all_client_sources))
+  use Nil <- result_try(case simplifile.write(dir <> "/gleam.toml", toml) {
+    Ok(Nil) -> Ok(Nil)
+    Error(err) -> Error("Failed to write gleam.toml: " <> string.inspect(err))
+  })
   use Nil <- result_try(write_client_external_sources(client_sources, dir))
   use framework_sources <- result_try(resolve_transitive_framework_sources(
-    [client_source, ..list.map(client_sources, fn(ext) { ext.2 })],
+    all_client_sources,
     beacon_root,
   ))
   list.each(framework_sources, fn(ext) {
@@ -1103,29 +1285,28 @@ fn client_external_sources(
     [] -> Ok([])
     [source, ..rest] -> {
       let #(alias, module_path, source_text) = source
-      let client_source = case analyzer.has_server_boundary(source_text) {
-        True -> {
-          case analyzer.extract_client_source(source_text) {
-            Ok(extracted) -> Ok(extracted)
-            Error(reason) ->
-              Error(
-                "Failed to extract client source for "
-                <> module_path
-                <> ": "
-                <> reason,
-              )
-          }
-        }
-        False -> Ok(source_text)
+      let client_source = case analyzer.extract_client_source(source_text) {
+        Ok(extracted) -> Ok(extracted)
+        Error(reason) ->
+          Error(
+            "Failed to extract client source for "
+            <> module_path
+            <> ": "
+            <> reason,
+          )
       }
 
       case client_source {
         Error(reason) -> Error(reason)
         Ok(text) -> {
-          case client_external_sources(rest) {
-            Error(reason) -> Error(reason)
-            Ok(rest_sources) ->
-              Ok([#(alias, module_path, text), ..rest_sources])
+          case string.trim(text) {
+            "" -> client_external_sources(rest)
+            _ ->
+              case client_external_sources(rest) {
+                Error(reason) -> Error(reason)
+                Ok(rest_sources) ->
+                  Ok([#(alias, module_path, text), ..rest_sources])
+              }
           }
         }
       }
@@ -1301,6 +1482,7 @@ fn generate_js_beacon() -> String {
 import beacon/element.{type Attr}
 import beacon_client/handler
 import gleam/option.{None}
+import gleam/string
 
 /// A node in the virtual DOM tree.
 pub type Node(msg) = element.Node(msg)
@@ -1364,7 +1546,116 @@ pub fn on_drop(callback: fn(String) -> msg) -> Attr {
   let id = handler.register_parameterized(callback)
   element.EventAttr(event_name: \"drop\", handler_id: id, debounce_ms: None)
 }
+
+pub fn keyed(key: String, child: Node(msg)) -> Node(msg) {
+  element.keyed(key, child)
+}
+
+pub fn preserve_children() -> Attr {
+  element.attr(\"data-beacon-preserve-children\", \"true\")
+}
+
+pub fn hook_watch(attr_names: List(String)) -> Attr {
+  element.attr(\"data-beacon-hook-watch\", string.join(attr_names, \",\"))
+}
 "
+}
+
+fn is_route_path_type(field: analyzer.TypeField) -> Bool {
+  field.type_name == "AppRoute" && field.module != ""
+}
+
+fn route_module_for_field(
+  field: analyzer.TypeField,
+  custom_types: List(analyzer.CustomTypeInfo),
+  enum_types: List(analyzer.EnumTypeInfo),
+) -> String {
+  case find_custom_type(custom_types, field.type_name, field.module) {
+    Ok(custom_type) -> custom_type.module
+    Error(_) ->
+      case find_enum_type(enum_types, field.type_name, field.module) {
+        Ok(enum_type) -> enum_type.module
+        Error(_) ->
+          case field.type_name {
+            "AppRoute" -> "route"
+            _ -> field.module
+          }
+      }
+  }
+}
+
+fn is_tuple_type_name(name: String) -> Bool {
+  string.starts_with(name, "#(") && string.ends_with(name, ")")
+}
+
+fn tuple_element_types(name: String) -> List(String) {
+  name
+  |> string.drop_start(2)
+  |> string.drop_end(1)
+  |> string.split(",")
+  |> list.map(string.trim)
+}
+
+fn tuple_decoder_expr(name: String) -> String {
+  let types = tuple_element_types(name)
+  let binds =
+    types
+    |> list.index_map(fn(type_name, idx) {
+      "  use item"
+      <> int.to_string(idx)
+      <> " <- decode.subfield(["
+      <> int.to_string(idx)
+      <> "], "
+      <> primitive_decoder_for_type(type_name)
+      <> ")"
+    })
+  let values =
+    types
+    |> list.index_map(fn(_type_name, idx) { "item" <> int.to_string(idx) })
+  "{\n"
+  <> string.join(binds, "\n")
+  <> "\n  decode.success(#("
+  <> string.join(values, ", ")
+  <> "))\n}"
+}
+
+fn primitive_decoder_for_type(type_name: String) -> String {
+  case type_name {
+    "Int" -> "decode.int"
+    "Float" -> "decode.float"
+    "Bool" -> "decode.bool"
+    "String" -> "decode.string"
+    _ -> "decode.dynamic"
+  }
+}
+
+fn tuple_json_expr(value: String, name: String) -> String {
+  let types = tuple_element_types(name)
+  let names =
+    types
+    |> list.index_map(fn(_type_name, idx) { "item" <> int.to_string(idx) })
+  let entries =
+    types
+    |> list.index_map(fn(type_name, idx) {
+      primitive_json_for_type("item" <> int.to_string(idx), type_name)
+    })
+  "json.array("
+  <> value
+  <> ", fn(item) { let #("
+  <> string.join(names, ", ")
+  <> ") = item\n      json.array(["
+  <> string.join(entries, ", ")
+  <> "], fn(x) { x }) })"
+}
+
+fn primitive_json_for_type(value: String, type_name: String) -> String {
+  case type_name {
+    "Int" -> "json.int(" <> value <> ")"
+    "Float" -> "json.float(" <> value <> ")"
+    "Bool" -> "json.bool(" <> value <> ")"
+    "String" -> "json.string(" <> value <> ")"
+    _ -> "json.null()"
+  }
 }
 
 /// Generate a decoder expression for a field type (client-side entry point).
@@ -1373,12 +1664,54 @@ fn decoder_for_field(
   custom_types: List(analyzer.CustomTypeInfo),
   enum_types: List(analyzer.EnumTypeInfo),
 ) -> String {
-  case field.type_name {
-    "Int" -> "decode.int"
-    "Float" -> "decode.float"
-    "Bool" -> "decode.bool"
-    "String" -> "decode.string"
-    "List" ->
+  case is_route_path_type(field) {
+    True ->
+      "decode.map(decode.string, "
+      <> route_module_for_field(field, custom_types, enum_types)
+      <> ".from_path)"
+    False ->
+      case field.type_name {
+        "Int" -> "decode.int"
+        "Float" -> "decode.float"
+        "Bool" -> "decode.bool"
+        "String" -> "decode.string"
+        "Option" -> {
+          let inner_decoder = case field.inner_type {
+            "Int" -> "decode.int"
+            "Float" -> "decode.float"
+            "Bool" -> "decode.bool"
+            "String" -> "decode.string"
+            inner ->
+              case find_custom_type(custom_types, inner, field.inner_module) {
+                Ok(ct) -> decoder_name(ct.module, ct.name) <> "()"
+                Error(_) -> "decode.dynamic"
+              }
+          }
+          "decode.optional(" <> inner_decoder <> ")"
+        }
+        "List" -> decoder_for_list_field(field, custom_types)
+        _ ->
+          case find_enum_type(enum_types, field.type_name, field.module) {
+            Ok(_) -> "decode.string"
+            Error(_) ->
+              case
+                find_custom_type(custom_types, field.type_name, field.module)
+              {
+                Ok(ct) -> decoder_name(ct.module, ct.name) <> "()"
+                Error(_) -> "decode.dynamic"
+              }
+          }
+      }
+  }
+}
+
+fn decoder_for_list_field(
+  field: analyzer.TypeField,
+  custom_types: List(analyzer.CustomTypeInfo),
+) -> String {
+  case is_tuple_type_name(field.inner_type) {
+    True -> "decode.list(" <> tuple_decoder_expr(field.inner_type) <> ")"
+    False ->
       case field.inner_type {
         "Int" -> "decode.list(decode.int)"
         "Float" -> "decode.list(decode.float)"
@@ -1391,41 +1724,20 @@ fn decoder_for_field(
             Error(_) -> "decode.list(decode.dynamic)"
           }
       }
-    _ ->
-      // Check if it's an enum type → decode as string
-      case find_enum_type(enum_types, field.type_name, field.module) {
-        Ok(_) -> "decode.string"
-        Error(_) ->
-          // Check if it's a custom record type → use its decoder
-          case find_custom_type(custom_types, field.type_name, field.module) {
-            Ok(ct) -> decoder_name(ct.module, ct.name) <> "()"
-            Error(_) -> "decode.dynamic"
-          }
-      }
   }
 }
 
 /// Generate a decoder function for a custom type (e.g., Card).
 fn generate_custom_decoder(
   ct: analyzer.CustomTypeInfo,
+  custom_types: List(analyzer.CustomTypeInfo),
   enum_types: List(analyzer.EnumTypeInfo),
 ) -> String {
   let qualified = qualify_type_client(ct.module, ct.name)
   let fn_name = decoder_name(ct.module, ct.name)
   let fields =
     list.map(ct.fields, fn(f) {
-      let decoder = case f.type_name {
-        "Int" -> "decode.int"
-        "Float" -> "decode.float"
-        "Bool" -> "decode.bool"
-        "String" -> "decode.string"
-        _ ->
-          // Check if it's an enum type → use string decoder + converter
-          case find_enum_type(enum_types, f.type_name, f.module) {
-            Ok(_) -> "decode.string"
-            Error(_) -> "decode.string"
-          }
-      }
+      let decoder = decoder_for_field(f, custom_types, enum_types)
       "  use "
       <> f.name
       <> " <- decode.field(\""
@@ -1513,6 +1825,17 @@ fn generate_entry_point(
             Ok(ct) -> Ok(ct)
             Error(_) -> Error(Nil)
           }
+        "Option" ->
+          case
+            find_custom_type(
+              analysis.custom_types,
+              f.inner_type,
+              f.inner_module,
+            )
+          {
+            Ok(ct) -> Ok(ct)
+            Error(_) -> Error(Nil)
+          }
         _ ->
           case find_custom_type(analysis.custom_types, f.type_name, f.module) {
             Ok(ct) -> Ok(ct)
@@ -1523,7 +1846,7 @@ fn generate_entry_point(
     |> list.unique
   let custom_decoder_fns =
     list.map(needed_types, fn(ct) {
-      generate_custom_decoder(ct, analysis.enum_types)
+      generate_custom_decoder(ct, analysis.custom_types, analysis.enum_types)
     })
 
   // Generate enum decoders
@@ -1672,36 +1995,45 @@ fn default_client_value_for_field(
   field: analyzer.TypeField,
   analysis: analyzer.Analysis,
 ) -> String {
-  case field.type_name {
-    "Int" -> "0"
-    "Float" -> "0.0"
-    "Bool" -> "False"
-    "String" -> "\"\""
-    "List" -> "[]"
-    _ ->
-      case find_enum_type(analysis.enum_types, field.type_name, field.module) {
-        Ok(enum_type) -> default_client_enum_value(enum_type)
-        Error(_) ->
+  case is_route_path_type(field) {
+    True ->
+      route_module_for_field(field, analysis.custom_types, analysis.enum_types)
+      <> ".from_path(\"/\")"
+    False ->
+      case field.type_name {
+        "Int" -> "0"
+        "Float" -> "0.0"
+        "Bool" -> "False"
+        "String" -> "\"\""
+        "Option" -> "option.None"
+        "List" -> "[]"
+        _ ->
           case
-            find_custom_type(
-              analysis.custom_types,
-              field.type_name,
-              field.module,
-            )
+            find_enum_type(analysis.enum_types, field.type_name, field.module)
           {
-            Ok(custom_type) ->
-              default_client_custom_value(custom_type, analysis)
-            Error(_) -> {
-              log.warning(
-                "beacon.build",
-                "Unknown type '"
-                  <> field.type_name
-                  <> "' for field '"
-                  <> field.name
-                  <> "' — using string placeholder in init stub",
-              )
-              "\"\""
-            }
+            Ok(enum_type) -> default_client_enum_value(enum_type)
+            Error(_) ->
+              case
+                find_custom_type(
+                  analysis.custom_types,
+                  field.type_name,
+                  field.module,
+                )
+              {
+                Ok(custom_type) ->
+                  default_client_custom_value(custom_type, analysis)
+                Error(_) -> {
+                  log.warning(
+                    "beacon.build",
+                    "Unknown type '"
+                      <> field.type_name
+                      <> "' for field '"
+                      <> field.name
+                      <> "' — using string placeholder in init stub",
+                  )
+                  "\"\""
+                }
+              }
           }
       }
   }
@@ -1797,7 +2129,7 @@ fn generate_client_encode_msg(analysis: analyzer.Analysis) -> String {
       client_msg_type(analysis),
       client_event_variants(analysis),
       analysis,
-      uses_client_msg_allowlist(analysis),
+      !list.is_empty(analysis.client_msg_variants),
     )
 
   "\n" <> nested <> "\n" <> top <> "\n"
@@ -1864,20 +2196,27 @@ fn generate_client_msg_encoder_fn(
   <> "\n  }\n  json.to_string(payload)\n}\n"
 }
 
-fn uses_client_msg_allowlist(analysis: analyzer.Analysis) -> Bool {
-  case analysis.client_msg_variants {
-    [] -> False
-    variants ->
-      list.length(variants) != list.length(analysis.msg_variants)
-      || list.any(analysis.msg_variants, fn(msg_variant) {
-        !list.any(variants, fn(client_variant) {
-          client_variant.name == msg_variant.name
-        })
-      })
+fn client_event_json_expr(
+  value: String,
+  field: analyzer.TypeField,
+  analysis: analyzer.Analysis,
+) -> String {
+  case is_route_path_type(field) {
+    True ->
+      "json.string("
+      <> route_module_for_field(
+        field,
+        analysis.custom_types,
+        analysis.enum_types,
+      )
+      <> ".to_path("
+      <> value
+      <> "))"
+    False -> client_event_json_expr_known_route(value, field, analysis)
   }
 }
 
-fn client_event_json_expr(
+fn client_event_json_expr_known_route(
   value: String,
   field: analyzer.TypeField,
   analysis: analyzer.Analysis,
@@ -1920,25 +2259,7 @@ fn client_event_json_expr(
       <> inner_encoder
       <> "\n        option.None -> json.null() }"
     }
-    "List" ->
-      case field.inner_type {
-        "Int" -> "json.array(" <> value <> ", json.int)"
-        "Float" -> "json.array(" <> value <> ", json.float)"
-        "Bool" -> "json.array(" <> value <> ", json.bool)"
-        "String" -> "json.array(" <> value <> ", json.string)"
-        inner ->
-          case
-            find_custom_type(analysis.custom_types, inner, field.inner_module)
-          {
-            Ok(ct) ->
-              "json.array("
-              <> value
-              <> ", client_"
-              <> encoder_name(ct.module, ct.name)
-              <> ")"
-            Error(_) -> "json.array(" <> value <> ", fn(_) { json.null() })"
-          }
-      }
+    "List" -> client_event_list_json_expr(value, field, analysis)
     _ ->
       case find_enum_type(analysis.enum_types, field.type_name, field.module) {
         Ok(et) ->
@@ -1967,6 +2288,35 @@ fn client_event_json_expr(
   }
 }
 
+fn client_event_list_json_expr(
+  value: String,
+  field: analyzer.TypeField,
+  analysis: analyzer.Analysis,
+) -> String {
+  case is_tuple_type_name(field.inner_type) {
+    True -> tuple_json_expr(value, field.inner_type)
+    False ->
+      case field.inner_type {
+        "Int" -> "json.array(" <> value <> ", json.int)"
+        "Float" -> "json.array(" <> value <> ", json.float)"
+        "Bool" -> "json.array(" <> value <> ", json.bool)"
+        "String" -> "json.array(" <> value <> ", json.string)"
+        inner ->
+          case
+            find_custom_type(analysis.custom_types, inner, field.inner_module)
+          {
+            Ok(ct) ->
+              "json.array("
+              <> value
+              <> ", client_"
+              <> encoder_name(ct.module, ct.name)
+              <> ")"
+            Error(_) -> "json.array(" <> value <> ", fn(_) { json.null() })"
+          }
+      }
+  }
+}
+
 /// Generate JSON encoder field expressions for the client-side encode_model.
 /// Uses `app.Model` field accessors with `json.*` encoders.
 /// Prefix is "model" or "local" depending on where the fields come from.
@@ -1983,53 +2333,7 @@ fn generate_field_encoders(
   let field_strs =
     list.map(fields, fn(f) {
       let accessor = prefix <> "." <> f.name
-      let encoder = case f.type_name {
-        "Int" -> "json.int(" <> accessor <> ")"
-        "Float" -> "json.float(" <> accessor <> ")"
-        "Bool" -> "json.bool(" <> accessor <> ")"
-        "String" -> "json.string(" <> accessor <> ")"
-        "List" ->
-          case f.inner_type {
-            "Int" -> "json.array(" <> accessor <> ", json.int)"
-            "Float" -> "json.array(" <> accessor <> ", json.float)"
-            "Bool" -> "json.array(" <> accessor <> ", json.bool)"
-            "String" -> "json.array(" <> accessor <> ", json.string)"
-            inner ->
-              case
-                find_custom_type(analysis.custom_types, inner, f.inner_module)
-              {
-                Ok(ct) ->
-                  "json.array("
-                  <> accessor
-                  <> ", client_"
-                  <> encoder_name(ct.module, ct.name)
-                  <> ")"
-                Error(_) ->
-                  "json.array(" <> accessor <> ", fn(_) { json.null() })"
-              }
-          }
-        _ ->
-          case find_enum_type(analysis.enum_types, f.type_name, f.module) {
-            Ok(et) ->
-              "json.string(client_"
-              <> encoder_name(et.module, et.name)
-              <> "("
-              <> accessor
-              <> "))"
-            Error(_) ->
-              case
-                find_custom_type(analysis.custom_types, f.type_name, f.module)
-              {
-                Ok(ct) ->
-                  "client_"
-                  <> encoder_name(ct.module, ct.name)
-                  <> "("
-                  <> accessor
-                  <> ")"
-                Error(_) -> "json.string(\"<unsupported>\")"
-              }
-          }
-      }
+      let encoder = client_event_json_expr(accessor, f, analysis)
       "    #(\"" <> f.name <> "\", " <> encoder <> "),"
     })
   string.join(field_strs, "\n")
@@ -2038,28 +2342,9 @@ fn generate_field_encoders(
 /// Generate client-side encoder functions for custom types used in Model/Local fields.
 fn generate_client_custom_encoders(analysis: analyzer.Analysis) -> String {
   // Collect all custom types referenced by Model or Local fields
-  let all_fields = analysis.model_fields
+  let all_fields = list.append(analysis.model_fields, analysis.local_fields)
   let needed_types =
-    list.filter_map(all_fields, fn(f) {
-      case f.type_name {
-        "List" ->
-          case
-            find_custom_type(
-              analysis.custom_types,
-              f.inner_type,
-              f.inner_module,
-            )
-          {
-            Ok(ct) -> Ok(ct)
-            Error(_) -> Error(Nil)
-          }
-        _ ->
-          case find_custom_type(analysis.custom_types, f.type_name, f.module) {
-            Ok(ct) -> Ok(ct)
-            Error(_) -> Error(Nil)
-          }
-      }
-    })
+    collect_custom_types_from_fields(all_fields, analysis.custom_types, [])
     |> list.unique
   let type_encoders =
     list.map(needed_types, fn(ct) {
@@ -2067,22 +2352,7 @@ fn generate_client_custom_encoders(analysis: analyzer.Analysis) -> String {
       let fn_name = "client_" <> encoder_name(ct.module, ct.name)
       let field_encoders =
         list.map(ct.fields, fn(f) {
-          let encoder = case f.type_name {
-            "Int" -> "json.int(s." <> f.name <> ")"
-            "Float" -> "json.float(s." <> f.name <> ")"
-            "Bool" -> "json.bool(s." <> f.name <> ")"
-            "String" -> "json.string(s." <> f.name <> ")"
-            _ ->
-              case find_enum_type(analysis.enum_types, f.type_name, f.module) {
-                Ok(et) ->
-                  "json.string(client_"
-                  <> encoder_name(et.module, et.name)
-                  <> "(s."
-                  <> f.name
-                  <> "))"
-                Error(_) -> "json.string(s." <> f.name <> ")"
-              }
-          }
+          let encoder = client_event_json_expr("s." <> f.name, f, analysis)
           "    #(\"" <> f.name <> "\", " <> encoder <> "),"
         })
       "fn "
@@ -2380,12 +2650,7 @@ fn find_custom_type(
     list.find(custom_types, fn(ct) { ct.name == name && ct.module == module })
   {
     Ok(ct) -> Ok(ct)
-    Error(_) ->
-      // Backward compat: if module is empty, try any matching name
-      case module {
-        "" -> list.find(custom_types, fn(ct) { ct.name == name })
-        _ -> Error(Nil)
-      }
+    Error(_) -> list.find(custom_types, fn(ct) { ct.name == name })
   }
 }
 
@@ -2399,15 +2664,18 @@ fn find_enum_type(
     list.find(enum_types, fn(ct) { ct.name == name && ct.module == module })
   {
     Ok(et) -> Ok(et)
-    Error(_) ->
-      case module {
-        "" -> list.find(enum_types, fn(et) { et.name == name })
-        _ -> Error(Nil)
-      }
+    Error(_) -> list.find(enum_types, fn(et) { et.name == name })
   }
 }
 
 fn used_enum_types(analysis: analyzer.Analysis) -> List(analyzer.EnumTypeInfo) {
+  let visible_custom_types =
+    collect_custom_types_from_fields(
+      list.append(analysis.model_fields, analysis.local_fields),
+      analysis.custom_types,
+      [],
+    )
+
   list.filter(analysis.enum_types, fn(enum_type) {
     list.any(analysis.model_fields, fn(field) {
       field_references_enum(field, enum_type, "")
@@ -2415,12 +2683,64 @@ fn used_enum_types(analysis: analyzer.Analysis) -> List(analyzer.EnumTypeInfo) {
     || list.any(analysis.local_fields, fn(field) {
       field_references_enum(field, enum_type, "")
     })
-    || list.any(analysis.custom_types, fn(custom_type) {
+    || list.any(visible_custom_types, fn(custom_type) {
       list.any(custom_type.fields, fn(field) {
         field_references_enum(field, enum_type, custom_type.module)
       })
     })
   })
+}
+
+fn collect_custom_types_from_fields(
+  fields: List(analyzer.TypeField),
+  custom_types: List(analyzer.CustomTypeInfo),
+  seen_types: List(String),
+) -> List(analyzer.CustomTypeInfo) {
+  case fields {
+    [] -> []
+    [field, ..rest] -> {
+      let field_types =
+        collect_custom_types_from_field(field, custom_types, seen_types)
+      let rest_types =
+        collect_custom_types_from_fields(rest, custom_types, seen_types)
+      list.unique(list.append(field_types, rest_types))
+    }
+  }
+}
+
+fn collect_custom_types_from_field(
+  field: analyzer.TypeField,
+  custom_types: List(analyzer.CustomTypeInfo),
+  seen_types: List(String),
+) -> List(analyzer.CustomTypeInfo) {
+  let custom_type = case field.type_name {
+    "List" | "Option" ->
+      find_custom_type(custom_types, field.inner_type, field.inner_module)
+    _ -> find_custom_type(custom_types, field.type_name, field.module)
+  }
+
+  case custom_type {
+    Ok(ct) -> collect_custom_type_and_children(ct, custom_types, seen_types)
+    Error(_) -> []
+  }
+}
+
+fn collect_custom_type_and_children(
+  ct: analyzer.CustomTypeInfo,
+  custom_types: List(analyzer.CustomTypeInfo),
+  seen_types: List(String),
+) -> List(analyzer.CustomTypeInfo) {
+  let key = ct.module <> "|" <> ct.name
+  case list.contains(seen_types, key) {
+    True -> []
+    False -> {
+      let next_seen = [key, ..seen_types]
+      [
+        ct,
+        ..collect_custom_types_from_fields(ct.fields, custom_types, next_seen)
+      ]
+    }
+  }
 }
 
 fn field_references_enum(
@@ -2451,11 +2771,7 @@ pub fn generate_external_imports(
   include_server_fields: Bool,
 ) -> String {
   let local_fields = analysis.local_fields
-  let initial_fields =
-    list.append(analysis.model_fields, case include_server_fields {
-      True -> list.append(analysis.server_fields, local_fields)
-      False -> local_fields
-    })
+  let initial_fields = list.append(analysis.model_fields, local_fields)
 
   let modules_from_fields =
     collect_external_modules_from_fields(
@@ -2465,22 +2781,35 @@ pub fn generate_external_imports(
     )
     |> list.unique
 
-  let modules_with_server = case analysis.has_server, analysis.server_module {
-    True, mod if mod != "" ->
+  let modules_with_server = case
+    include_server_fields,
+    analysis.has_server,
+    analysis.server_module
+  {
+    True, True, mod if mod != "" ->
       case list.contains(modules_from_fields, mod) {
         True -> modules_from_fields
         False -> [mod, ..modules_from_fields]
       }
-    _, _ -> modules_from_fields
+    _, _, _ -> modules_from_fields
   }
 
   let enum_modules =
-    list.filter_map(analysis.enum_types, fn(et) {
+    list.filter_map(used_enum_types(analysis), fn(et) {
       case et.module {
         "" -> Error(Nil)
         mod -> Ok(mod)
       }
     })
+    |> list.unique
+
+  let route_modules =
+    initial_fields
+    |> list.filter(is_route_path_type)
+    |> list.map(fn(field) {
+      route_module_for_field(field, analysis.custom_types, analysis.enum_types)
+    })
+    |> list.filter(fn(module_name) { module_name != "" })
     |> list.unique
 
   let boundary_modules =
@@ -2493,7 +2822,12 @@ pub fn generate_external_imports(
 
   let modules_to_import =
     list.unique(
-      list.flatten([modules_with_server, enum_modules, boundary_modules]),
+      list.flatten([
+        modules_with_server,
+        enum_modules,
+        route_modules,
+        boundary_modules,
+      ]),
     )
 
   list.filter_map(modules_to_import, fn(alias) {
@@ -2610,45 +2944,93 @@ fn generate_server_field_encoder(
   analysis: analyzer.Analysis,
 ) -> String {
   let accessor = prefix <> "." <> f.name
-  case f.type_name {
-    "Int" -> "json.int(" <> accessor <> ")"
-    "Float" -> "json.float(" <> accessor <> ")"
-    "Bool" -> "json.bool(" <> accessor <> ")"
-    "String" -> "json.string(" <> accessor <> ")"
-    "Option" -> {
-      // Option(T) -> case val { Some(v) -> encode(v), None -> json.null() }
-      let inner_encoder = case f.inner_type {
-        "Int" -> "json.int(v)"
-        "Float" -> "json.float(v)"
-        "Bool" -> "json.bool(v)"
-        "String" -> "json.string(v)"
-        inner ->
-          case find_enum_type(analysis.enum_types, inner, f.inner_module) {
+  case is_route_path_type(f) {
+    True ->
+      "json.string("
+      <> route_module_for_field(f, analysis.custom_types, analysis.enum_types)
+      <> ".to_path("
+      <> accessor
+      <> "))"
+    False ->
+      case f.type_name {
+        "Int" -> "json.int(" <> accessor <> ")"
+        "Float" -> "json.float(" <> accessor <> ")"
+        "Bool" -> "json.bool(" <> accessor <> ")"
+        "String" -> "json.string(" <> accessor <> ")"
+        "Option" -> server_option_json_expr(accessor, f, analysis)
+        "List" -> server_list_json_expr(accessor, f, analysis)
+        _ ->
+          case find_enum_type(analysis.enum_types, f.type_name, f.module) {
             Ok(et) ->
-              "json.string(" <> encoder_name(et.module, et.name) <> "(v))"
+              "json.string("
+              <> encoder_name(et.module, et.name)
+              <> "("
+              <> accessor
+              <> "))"
             Error(_) ->
               case
-                find_custom_type(analysis.custom_types, inner, f.inner_module)
+                find_custom_type(analysis.custom_types, f.type_name, f.module)
               {
-                Ok(ct) -> encoder_name(ct.module, ct.name) <> "(v)"
-                Error(_) -> "json.string(v)"
+                Ok(ct) ->
+                  encoder_name(ct.module, ct.name) <> "(" <> accessor <> ")"
+                Error(_) -> {
+                  log.warning(
+                    "beacon.build",
+                    "Unknown type '"
+                      <> f.type_name
+                      <> "' for field '"
+                      <> f.name
+                      <> "' — using string.inspect (may not round-trip correctly)",
+                  )
+                  "json.string(gleam_string.inspect(" <> accessor <> "))"
+                }
               }
           }
       }
-      "case "
-      <> accessor
-      <> " { option.Some(v) -> "
-      <> inner_encoder
-      <> "\n      option.None -> json.null() }"
-    }
-    "List" ->
+  }
+}
+
+fn server_option_json_expr(
+  accessor: String,
+  f: analyzer.TypeField,
+  analysis: analyzer.Analysis,
+) -> String {
+  let inner_encoder = case f.inner_type {
+    "Int" -> "json.int(v)"
+    "Float" -> "json.float(v)"
+    "Bool" -> "json.bool(v)"
+    "String" -> "json.string(v)"
+    inner ->
+      case find_enum_type(analysis.enum_types, inner, f.inner_module) {
+        Ok(et) -> "json.string(" <> encoder_name(et.module, et.name) <> "(v))"
+        Error(_) ->
+          case find_custom_type(analysis.custom_types, inner, f.inner_module) {
+            Ok(ct) -> encoder_name(ct.module, ct.name) <> "(v)"
+            Error(_) -> "json.string(v)"
+          }
+      }
+  }
+  "case "
+  <> accessor
+  <> " { option.Some(v) -> "
+  <> inner_encoder
+  <> "\n      option.None -> json.null() }"
+}
+
+fn server_list_json_expr(
+  accessor: String,
+  f: analyzer.TypeField,
+  analysis: analyzer.Analysis,
+) -> String {
+  case is_tuple_type_name(f.inner_type) {
+    True -> tuple_json_expr(accessor, f.inner_type)
+    False ->
       case f.inner_type {
         "Int" -> "json.array(" <> accessor <> ", json.int)"
         "Float" -> "json.array(" <> accessor <> ", json.float)"
         "Bool" -> "json.array(" <> accessor <> ", json.bool)"
         "String" -> "json.array(" <> accessor <> ", json.string)"
         "" -> {
-          // Unknown inner type (e.g., tuples, complex generics)
           log.warning(
             "beacon.build",
             "List field '"
@@ -2679,32 +3061,6 @@ fn generate_server_field_encoder(
               "json.array("
               <> accessor
               <> ", fn(x) { json.string(gleam_string.inspect(x)) })"
-            }
-          }
-      }
-    _ ->
-      // Check if it's an enum type
-      case find_enum_type(analysis.enum_types, f.type_name, f.module) {
-        Ok(et) ->
-          "json.string("
-          <> encoder_name(et.module, et.name)
-          <> "("
-          <> accessor
-          <> "))"
-        Error(_) ->
-          // Check if it's a custom record type
-          case find_custom_type(analysis.custom_types, f.type_name, f.module) {
-            Ok(ct) -> encoder_name(ct.module, ct.name) <> "(" <> accessor <> ")"
-            Error(_) -> {
-              log.warning(
-                "beacon.build",
-                "Unknown type '"
-                  <> f.type_name
-                  <> "' for field '"
-                  <> f.name
-                  <> "' — using string.inspect (may not round-trip correctly)",
-              )
-              "json.string(gleam_string.inspect(" <> accessor <> "))"
             }
           }
       }
@@ -2748,39 +3104,12 @@ fn generate_codec_module(
   // Generate encoder for each custom type used in Model fields
   // Handles both List(CustomType) and direct CustomType fields
   let custom_encoders =
-    list.filter_map(analysis.model_fields, fn(f) {
-      case f.type_name {
-        "List" ->
-          case
-            find_custom_type(
-              analysis.custom_types,
-              f.inner_type,
-              f.inner_module,
-            )
-          {
-            Ok(ct) -> Ok(generate_type_encoder(module_name, ct, analysis))
-            Error(_) -> Error(Nil)
-          }
-        "Option" ->
-          // Option(CustomType) needs an encoder for the inner type
-          case
-            find_custom_type(
-              analysis.custom_types,
-              f.inner_type,
-              f.inner_module,
-            )
-          {
-            Ok(ct) -> Ok(generate_type_encoder(module_name, ct, analysis))
-            Error(_) -> Error(Nil)
-          }
-        _ ->
-          // Direct custom type field (e.g., food: Point)
-          case find_custom_type(analysis.custom_types, f.type_name, f.module) {
-            Ok(ct) -> Ok(generate_type_encoder(module_name, ct, analysis))
-            Error(_) -> Error(Nil)
-          }
-      }
-    })
+    collect_custom_types_from_fields(
+      analysis.model_fields,
+      analysis.custom_types,
+      [],
+    )
+    |> list.map(fn(ct) { generate_type_encoder(module_name, ct, analysis) })
     |> list.unique
 
   // Generate encoders for enum types used in Model fields or custom type fields
@@ -2854,37 +3183,18 @@ fn generate_codec_module(
   let server_custom_decoders = case analysis.has_server {
     True -> []
     False ->
-      list.filter_map(analysis.model_fields, fn(f) {
-        case f.type_name {
-          "List" ->
-            case
-              find_custom_type(
-                analysis.custom_types,
-                f.inner_type,
-                f.inner_module,
-              )
-            {
-              Ok(ct) ->
-                Ok(generate_server_custom_decoder(
-                  module_name,
-                  ct,
-                  analysis.enum_types,
-                ))
-              Error(_) -> Error(Nil)
-            }
-          _ ->
-            case
-              find_custom_type(analysis.custom_types, f.type_name, f.module)
-            {
-              Ok(ct) ->
-                Ok(generate_server_custom_decoder(
-                  module_name,
-                  ct,
-                  analysis.enum_types,
-                ))
-              Error(_) -> Error(Nil)
-            }
-        }
+      collect_custom_types_from_fields(
+        analysis.model_fields,
+        analysis.custom_types,
+        [],
+      )
+      |> list.map(fn(ct) {
+        generate_server_custom_decoder(
+          module_name,
+          ct,
+          analysis.custom_types,
+          analysis.enum_types,
+        )
       })
       |> list.unique
   }
@@ -3425,18 +3735,26 @@ fn default_event_value(
   field: analyzer.TypeField,
   analysis: analyzer.Analysis,
 ) -> String {
-  case field.type_name {
-    "Int" -> "0"
-    "Float" -> "0.0"
-    "Bool" -> "False"
-    "String" -> "\"\""
-    "List" -> "[]"
-    "Option" -> "option.None"
-    "Msg" if field.module != "" -> default_msg_value(field.module, analysis)
-    _ ->
-      case find_enum_type(analysis.enum_types, field.type_name, field.module) {
-        Ok(et) -> default_client_enum_value(et)
-        Error(_) -> "\"\""
+  case is_route_path_type(field) {
+    True ->
+      route_module_for_field(field, analysis.custom_types, analysis.enum_types)
+      <> ".from_path(\"/\")"
+    False ->
+      case field.type_name {
+        "Int" -> "0"
+        "Float" -> "0.0"
+        "Bool" -> "False"
+        "String" -> "\"\""
+        "List" -> "[]"
+        "Option" -> "option.None"
+        "Msg" if field.module != "" -> default_msg_value(field.module, analysis)
+        _ ->
+          case
+            find_enum_type(analysis.enum_types, field.type_name, field.module)
+          {
+            Ok(et) -> default_client_enum_value(et)
+            Error(_) -> "\"\""
+          }
       }
   }
 }
@@ -3447,46 +3765,64 @@ fn server_decoder_for_field(
   custom_types: List(analyzer.CustomTypeInfo),
   enum_types: List(analyzer.EnumTypeInfo),
 ) -> String {
-  case field.type_name {
-    "Int" -> "decode.int"
-    "Float" -> "decode.float"
-    "Bool" -> "decode.bool"
-    "String" -> "decode.string"
-    "Option" ->
-      case field.inner_type {
-        "Int" -> "decode.optional(decode.int)"
-        "Float" -> "decode.optional(decode.float)"
-        "Bool" -> "decode.optional(decode.bool)"
-        "String" -> "decode.optional(decode.string)"
-        inner ->
-          case find_custom_type(custom_types, inner, field.inner_module) {
-            Ok(ct) ->
-              "decode.optional(server_"
-              <> decoder_name(ct.module, ct.name)
-              <> "())"
-            Error(_) -> "decode.optional(decode.string)"
+  case is_route_path_type(field) {
+    True ->
+      "decode.map(decode.string, "
+      <> route_module_for_field(field, custom_types, enum_types)
+      <> ".from_path)"
+    False ->
+      case field.type_name {
+        "Int" -> "decode.int"
+        "Float" -> "decode.float"
+        "Bool" -> "decode.bool"
+        "String" -> "decode.string"
+        "Option" ->
+          case field.inner_type {
+            "Int" -> "decode.optional(decode.int)"
+            "Float" -> "decode.optional(decode.float)"
+            "Bool" -> "decode.optional(decode.bool)"
+            "String" -> "decode.optional(decode.string)"
+            inner ->
+              case find_custom_type(custom_types, inner, field.inner_module) {
+                Ok(ct) ->
+                  "decode.optional(server_"
+                  <> decoder_name(ct.module, ct.name)
+                  <> "())"
+                Error(_) -> "decode.optional(decode.string)"
+              }
           }
-      }
-    "List" ->
-      case field.inner_type {
-        "Int" -> "decode.list(decode.int)"
-        "Float" -> "decode.list(decode.float)"
-        "Bool" -> "decode.list(decode.bool)"
-        "String" -> "decode.list(decode.string)"
-        inner ->
-          case find_custom_type(custom_types, inner, field.inner_module) {
-            Ok(ct) ->
-              "decode.list(server_" <> decoder_name(ct.module, ct.name) <> "())"
-            Error(_) -> "decode.list(decode.dynamic)"
+        "List" ->
+          case is_tuple_type_name(field.inner_type) {
+            True ->
+              "decode.list(" <> tuple_decoder_expr(field.inner_type) <> ")"
+            False ->
+              case field.inner_type {
+                "Int" -> "decode.list(decode.int)"
+                "Float" -> "decode.list(decode.float)"
+                "Bool" -> "decode.list(decode.bool)"
+                "String" -> "decode.list(decode.string)"
+                inner ->
+                  case
+                    find_custom_type(custom_types, inner, field.inner_module)
+                  {
+                    Ok(ct) ->
+                      "decode.list(server_"
+                      <> decoder_name(ct.module, ct.name)
+                      <> "())"
+                    Error(_) -> "decode.list(decode.dynamic)"
+                  }
+              }
           }
-      }
-    _ ->
-      case find_enum_type(enum_types, field.type_name, field.module) {
-        Ok(_) -> "decode.string"
-        Error(_) ->
-          case find_custom_type(custom_types, field.type_name, field.module) {
-            Ok(ct) -> "server_" <> decoder_name(ct.module, ct.name) <> "()"
-            Error(_) -> "decode.dynamic"
+        _ ->
+          case find_enum_type(enum_types, field.type_name, field.module) {
+            Ok(_) -> "decode.string"
+            Error(_) ->
+              case
+                find_custom_type(custom_types, field.type_name, field.module)
+              {
+                Ok(ct) -> "server_" <> decoder_name(ct.module, ct.name) <> "()"
+                Error(_) -> "decode.dynamic"
+              }
           }
       }
   }
@@ -3497,30 +3833,14 @@ fn server_decoder_for_field(
 fn generate_server_custom_decoder(
   module_name: String,
   ct: analyzer.CustomTypeInfo,
+  custom_types: List(analyzer.CustomTypeInfo),
   enum_types: List(analyzer.EnumTypeInfo),
 ) -> String {
   let qualified = qualify_type_server(module_name, ct.module, ct.name)
   let fn_name = "server_" <> decoder_name(ct.module, ct.name)
   let fields =
     list.map(ct.fields, fn(f) {
-      let decoder = case f.type_name {
-        "Int" -> "decode.int"
-        "Float" -> "decode.float"
-        "Bool" -> "decode.bool"
-        "String" -> "decode.string"
-        "Option" ->
-          case f.inner_type {
-            "Int" -> "decode.optional(decode.int)"
-            "Float" -> "decode.optional(decode.float)"
-            "Bool" -> "decode.optional(decode.bool)"
-            _ -> "decode.optional(decode.string)"
-          }
-        _ ->
-          case find_enum_type(enum_types, f.type_name, f.module) {
-            Ok(_) -> "decode.string"
-            Error(_) -> "decode.string"
-          }
-      }
+      let decoder = server_decoder_for_field(f, custom_types, enum_types)
       "  use "
       <> f.name
       <> " <- decode.field(\""

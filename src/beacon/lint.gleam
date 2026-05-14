@@ -118,10 +118,7 @@ fn lint_doc_file(path: String) -> List(Violation) {
   }
 }
 
-pub fn lint_doc_source(
-  file_path: String,
-  source: String,
-) -> List(Violation) {
+pub fn lint_doc_source(file_path: String, source: String) -> List(Violation) {
   let forbidden = [
     "FILE_BASED_ROUTING",
     "file-" <> "based routing",
@@ -257,17 +254,13 @@ fn check_client_update_contract(
 fn client_update_error_message(err: analyzer.PurityError) -> String {
   case err {
     analyzer.UpdateSideEffect(call) ->
-      "Client-visible update calls `"
-      <> call
-      <> "`; move this to on_update."
+      "Client-visible update calls `" <> call <> "`; move this to on_update."
     analyzer.CapturedUpdateFactory(name) ->
       "Client-visible "
       <> name
       <> "(...) captures server state; use pure update plus on_update."
     analyzer.ServerImport(module_path) ->
-      "Client-visible module imports server-only `"
-      <> module_path
-      <> "`."
+      "Client-visible module imports server-only `" <> module_path <> "`."
     analyzer.ErlangExternal(function_name) ->
       "Client-visible function `"
       <> function_name

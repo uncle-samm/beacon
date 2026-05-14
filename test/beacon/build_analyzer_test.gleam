@@ -94,6 +94,7 @@ pub type Msg {
   Increment
   AdminReset
 }
+
 pub type ClientMsg {
   Increment
 }
@@ -112,6 +113,54 @@ pub fn view(model: Model) { model }
   let assert 1 = list.length(analysis.client_msg_variants)
   let assert "Increment" =
     find_variant(analysis.client_msg_variants, "Increment").name
+}
+
+pub fn entry_client_msg_allowlist_applies_to_imported_msg_test() {
+  let app_source =
+    "
+import app/msg
+
+pub type Model { Model(count: Int) }
+pub type ClientMsg {
+  Increment
+}
+
+pub fn update(model: Model, _msg: msg.Msg) -> Model { model }
+pub fn view(model: Model) { model }
+"
+  let msg_source =
+    "
+pub type Msg {
+  Increment
+  AdminReset
+}
+"
+  let assert Ok(analysis) =
+    analyzer.analyze_multi(app_source, [#("msg", "app/msg", msg_source)])
+  let assert "msg" = analysis.msg_module
+  let assert 1 = list.length(analysis.msg_variants)
+  let assert 1 = list.length(analysis.client_msg_variants)
+  let assert "Increment" =
+    find_variant(analysis.client_msg_variants, "Increment").name
+  let assert False =
+    list.any(analysis.msg_variants, fn(v) { v.name == "AdminReset" })
+}
+
+pub fn tuple_list_field_type_is_preserved_test() {
+  let source =
+    "
+pub type Model {
+  Model(github_installations: List(#(String, String, String)))
+}
+pub type Msg { NoOp }
+pub fn update(model: Model, _msg: Msg) -> Model { model }
+pub fn view(model: Model) { model }
+"
+  let assert Ok(analysis) = analyzer.analyze(source)
+  let assert Ok(field) =
+    list.find(analysis.model_fields, fn(f) { f.name == "github_installations" })
+  let assert "List" = field.type_name
+  let assert "#(String, String, String)" = field.inner_type
 }
 
 pub fn state_diagnostics_describe_model_local_server_shape_test() {
@@ -456,9 +505,9 @@ pub fn start() {
   let assert True = string.contains(extracted, "pub fn view(")
   // Should NOT contain start
   let assert False = string.contains(extracted, "pub fn start()")
-  // Should contain safe imports
-  let assert True = string.contains(extracted, "import beacon")
-  let assert True = string.contains(extracted, "import gleam/int")
+  // Should drop unused imports, even when they are client-safe.
+  let assert False = string.contains(extracted, "import beacon")
+  let assert False = string.contains(extracted, "import gleam/int")
 }
 
 pub fn skips_server_imports_in_extraction_test() {
@@ -483,12 +532,101 @@ pub fn update(model: Model, msg: Msg) -> Model {
 pub fn view(model: Model) { model }
 "
   let assert Ok(extracted) = analyzer.extract_client_source(source)
-  // Should contain safe imports
-  let assert True = string.contains(extracted, "import beacon")
-  let assert True = string.contains(extracted, "import gleam/int")
+  // Should drop unused safe imports too
+  let assert False = string.contains(extracted, "import beacon")
+  let assert False = string.contains(extracted, "import gleam/int")
   // Should NOT contain server-only imports
   let assert False = string.contains(extracted, "import beacon/store")
   let assert False = string.contains(extracted, "import beacon/effect")
+}
+
+pub fn keeps_referenced_client_imports_and_drops_server_siblings_test() {
+  let source =
+    "import beacon/html
+import gleam/string
+import agent/manager
+
+pub type Model {
+  Model(name: String)
+}
+
+pub type Msg {
+  NoOp
+}
+
+pub fn view(model: Model) {
+  html.div([], [html.text(string.uppercase(model.name))])
+}
+
+pub fn init_server() {
+  manager.start()
+}
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert True = string.contains(extracted, "import gleam/string")
+  let assert False = string.contains(extracted, "import agent/manager")
+}
+
+pub fn drops_server_state_route_page_helpers_from_client_extraction_test() {
+  let source =
+    "import app/server_state.{type ServerState, ServerState}
+import beacon/route as beacon_route
+
+pub type Model {
+  Model(route: String)
+}
+
+pub type Msg {
+  RouteChanged(String)
+}
+
+fn app_view(model: Model) {
+  model
+}
+
+fn render_route_page(
+  state: #(Model, Nil, ServerState),
+  route_info: beacon_route.Route,
+) {
+  let #(model, _local, _server) = state
+  app_view(Model(..model, route: route_info.path))
+}
+
+fn route_pages() -> List(beacon_route.Page(#(Model, Nil, ServerState), Msg)) {
+  [beacon_route.page(\"/\", fn(r) { RouteChanged(r.path) }, render_route_page)]
+}
+
+pub fn view(model: Model) {
+  app_view(model)
+}
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert True = string.contains(extracted, "pub fn view(")
+  let assert False = string.contains(extracted, "import app/server_state")
+  let assert False = string.contains(extracted, "import beacon/route")
+  let assert False = string.contains(extracted, "render_route_page")
+  let assert False = string.contains(extracted, "route_pages")
+  let assert False = string.contains(extracted, "ServerState")
+}
+
+pub fn keeps_private_helper_referenced_as_function_value_test() {
+  let source =
+    "import gleam/list
+
+pub type Model {
+  Model(lines: List(String))
+}
+
+fn render_line(line: String) {
+  line
+}
+
+pub fn view(model: Model) {
+  list.map(model.lines, render_line)
+}
+"
+  let assert Ok(extracted) = analyzer.extract_client_source(source)
+  let assert True = string.contains(extracted, "fn render_line")
 }
 
 pub fn keeps_client_safe_log_import_in_extraction_test() {

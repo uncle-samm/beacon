@@ -178,7 +178,10 @@ fn render_view_html(config: SsrConfig(model, msg), model: model) -> String {
   handler.start_render()
   let view_html = case try_load_codec_renderer() {
     Ok(render) -> {
-      log.debug("beacon.ssr", "Rendering via generated beacon_codec.render_model/1")
+      log.debug(
+        "beacon.ssr",
+        "Rendering via generated beacon_codec.render_model/1",
+      )
       render(model)
     }
     Error(_) -> {

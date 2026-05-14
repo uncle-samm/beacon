@@ -3298,6 +3298,29 @@
 #### Milestone 71: Streaming & Progressive Loading
 > TODO: Streaming HTML responses, progressive hydration, lazy loading.
 
+#### Milestone 72: Sprite Dash Vendor Contract Fixes
+> Upstream fixes from the 2026-05-14 sprite-dash-gleam vendor refresh.
+
+##### 72.1 Imported app shape support
+- [x] Imported primary `Msg` now honors entry-module `ClientMsg` allowlists, so consumers can keep `Msg` in `app/msg` without constructor collisions.
+- [x] Multi-module `Model + ServerState` apps keep private server state in server analysis/codecs while excluding it from the generated JavaScript client bundle.
+- [x] Client-only transitive resolution now walks extracted client source, preventing server-only modules such as DB, auth, agent managers, and NIF/FFI helpers from entering the JS app.
+
+##### 72.2 Codec and route robustness
+- [x] Generated codecs handle route `AppRoute` fields through the real route module (`from_path`/`to_path`), including when `Model` imports the route type from another module.
+- [x] Generated codecs handle `Option`, list-of-tuples, and imported/custom type lookup when module aliases differ from actual type names.
+- [x] Server codec imports the private server-state module for the server type without chasing private server fields into client imports.
+
+##### 72.3 Runtime and client reliability
+- [x] `dev_mode` now propagates into the verified `AppConfig` path.
+- [x] Browser events that arrive before the first model sync are queued and flushed after hydration instead of being dropped.
+- [x] Route navigation advances the server event clock and uses the connection-aware update path, avoiding stale route-state patches.
+
+##### 72.4 Regression coverage
+- [x] Added analyzer tests for imported `ClientMsg` allowlists, tuple list field preservation, server-state route helper stripping, referenced client imports, and private helpers passed as function values.
+- [x] Added build tests for extracted-client transitive resolution and server import boundaries.
+- [x] Verified `gleam run -m beacon/build src/sprite_dash.gleam` in a temp sprite-dash checkout using this Beacon tree.
+
 ---
 
 ## Blockers & Deferred Items

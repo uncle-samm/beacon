@@ -29,6 +29,7 @@ let eventSendCount = 0;
 let eventSendWindowStart = 0;
 const MAX_EVENTS_PER_SECOND = 30;
 const MAX_PENDING_SEND_QUEUE = 100;
+const MAX_PENDING_EARLY_EVENTS = 50;
 const INPUT_DEBOUNCE_MS = 80;
 const pendingInputEvents = new Map();
 
@@ -87,6 +88,7 @@ let clientInitialized = false;
 let renderPending = false;  // RAF throttle: true when a render is scheduled
 let clientModelJson = null;  // Cached JSON representation for patch diffing
 let pendingSendQueue = [];
+let pendingEarlyEvents = [];
 let readyForServerEvents = false;
 let syncRequestInFlight = false;
 let pendingModelEventClock = 0;
@@ -433,6 +435,7 @@ function handleModelSync(modelJson, version, ackClock) {
       console.log("[beacon] Model synced v" + version);
       trace("model_sync", { version, ackClock });
       readyForServerEvents = true;
+      flushPendingEarlyEvents();
       flushPendingSendQueue();
       mark("model-sync-end");
       measure("model-sync", "model-sync-start", "model-sync-end");
@@ -512,6 +515,26 @@ function requestFullSync(reason) {
   console.warn("[beacon] Requesting full model sync: " + reason);
   trace("sync_request", { reason });
   send({ type: "request_sync" });
+}
+
+function enqueueEarlyEvent(eventName, hid, data, tp, clock) {
+  if (pendingEarlyEvents.length >= MAX_PENDING_EARLY_EVENTS) {
+    console.error("[beacon] Early event queue full; dropping " + eventName + " before model_sync.");
+    trace("early_event.full", { eventName, size: pendingEarlyEvents.length });
+    return;
+  }
+  pendingEarlyEvents.push({ eventName, hid, data, tp, clock });
+  trace("early_event.enqueue", { eventName, size: pendingEarlyEvents.length });
+}
+
+function flushPendingEarlyEvents() {
+  if (!clientInitialized || pendingEarlyEvents.length === 0) return;
+  const queued = pendingEarlyEvents;
+  pendingEarlyEvents = [];
+  for (const evt of queued) {
+    dispatchEvent(evt.eventName, evt.hid, evt.data, evt.tp, evt.clock);
+  }
+  trace("early_event.flush", { count: queued.length });
 }
 
 function handleServerNavigate(path) {
@@ -812,7 +835,8 @@ function dispatchEvent(eventName, hid, data, tp, forcedClock) {
       console.error("[beacon] Event dropped because generated event decoding is unavailable.");
     }
   } else {
-    console.error("[beacon] Event dropped before model_sync; generated event decoding requires hydrated client state.");
+    console.warn("[beacon] Event queued before model_sync; generated event decoding will replay after hydration.");
+    enqueueEarlyEvent(eventName, hid, data, tp, clock);
   }
 }
 

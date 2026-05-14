@@ -1,5 +1,5 @@
-import beacon/stress
 import beacon/sim/test_app
+import beacon/stress
 import gleam/erlang/process
 
 pub fn stress_real_websocket_connections_test() {

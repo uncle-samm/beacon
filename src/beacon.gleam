@@ -789,7 +789,7 @@ fn start_with_verified_contract(
         Some(ws_init_fn) -> Some(fn(req) { #(ws_init_fn(req), effect.none()) })
         None -> None
       },
-      dev_mode: False,
+      dev_mode: builder.dev_mode,
     )
   case application.start(config) {
     Ok(_app) -> {

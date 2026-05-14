@@ -517,12 +517,7 @@ pub fn live_update_does_not_render_server_view_test() {
             // Intentionally crash to prove a failed render is not committed.
             crash_for_test()
           }
-          False ->
-            element.el(
-              "button",
-              [],
-              [element.text("ok")],
-            )
+          False -> element.el("button", [], [element.text("ok")])
         }
       },
       decode_event: option.Some(counter_decode_event),

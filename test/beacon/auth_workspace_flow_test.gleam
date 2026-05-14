@@ -1,6 +1,7 @@
 /// End-to-end auth workspace flow over real HTTP and WebSocket sockets.
 /// This test composes API routes, HttpOnly cookies, CSRF, ws_auth, ws_init,
 /// route-aware SSR, and server-private state in one app shape.
+import beacon
 import beacon/application
 import beacon/cookie
 import beacon/effect
@@ -22,9 +23,9 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
-import beacon
 
 const login_csrf = "auth-flow-login-csrf"
+
 const csrf_secret = "auth-flow-csrf-secret"
 
 type Model {
@@ -51,8 +52,10 @@ type Msg {
 pub fn full_auth_cookie_csrf_ws_flow_test() {
   let port = 21_000 + unique_port_offset()
   let store = session.new_store("auth_flow_" <> int.to_string(port))
-  let csrf_store = form.create_csrf_store("auth_flow_csrf_" <> int.to_string(port))
-  let assert Ok(_app) = application.start_advanced(test_config(port, store, csrf_store))
+  let csrf_store =
+    form.create_csrf_store("auth_flow_csrf_" <> int.to_string(port))
+  let assert Ok(_app) =
+    application.start_advanced(test_config(port, store, csrf_store))
   process.sleep(150)
 
   let base = "http://localhost:" <> int.to_string(port)
@@ -61,7 +64,8 @@ pub fn full_auth_cookie_csrf_ws_flow_test() {
     http_request("GET", base <> "/app", [], "")
   let assert 200 = login_status
   let assert True = string.contains(login_html, "Sign in")
-  let assert False = header_contains(login_headers, "set-cookie", "beacon_session")
+  let assert False =
+    header_contains(login_headers, "set-cookie", "beacon_session")
 
   let assert Ok(#(missing_csrf_status, _missing_headers, _missing_body)) =
     http_request(
@@ -168,7 +172,10 @@ fn test_config(
     deserialize_model: None,
     middlewares: [],
     static_dir: None,
-    route_patterns: list.map(["/", "/login", "/app", "/settings", "/admin"], route.pattern),
+    route_patterns: list.map(
+      ["/", "/login", "/app", "/settings", "/admin"],
+      route.pattern,
+    ),
     on_route_change: Some(fn(r: route.Route) { RouteChanged(r.path) }),
     on_route_leave: None,
     dynamic_subscriptions: None,
@@ -226,16 +233,17 @@ fn update(
 ) -> #(#(Model, Server), effect.Effect(Msg)) {
   let #(model, server) = combined
   case msg {
-    RouteChanged(path) ->
-      #(#(Model(..model, route: path), server), effect.none())
-    Refresh ->
+    RouteChanged(path) -> #(
+      #(Model(..model, route: path), server),
+      effect.none(),
+    )
+    Refresh -> #(
       #(
-        #(
-          Model(..model, status: "Refreshed " <> model.user),
-          Server(..server, audit_count: server.audit_count + 1),
-        ),
-        effect.none(),
-      )
+        Model(..model, status: "Refreshed " <> model.user),
+        Server(..server, audit_count: server.audit_count + 1),
+      ),
+      effect.none(),
+    )
   }
 }
 
@@ -248,7 +256,10 @@ fn view(combined: #(Model, Server)) -> beacon.Node(Msg) {
         html.section([html.attribute("data-testid", "login-panel")], [
           html.h2([], [html.text("Sign in")]),
           html.form(
-            [html.attribute("method", "post"), html.attribute("action", "/api/login")],
+            [
+              html.attribute("method", "post"),
+              html.attribute("action", "/api/login"),
+            ],
             [
               html.input([
                 html.type_("hidden"),
@@ -266,9 +277,12 @@ fn view(combined: #(Model, Server)) -> beacon.Node(Msg) {
           html.p([], [html.text(model.display_name)]),
           html.p([], [html.text(model.role)]),
           html.p([], [html.text(model.status)]),
-          html.button([beacon.on_click(Refresh), html.attribute("data-testid", "refresh")], [
-            html.text("Refresh"),
-          ]),
+          html.button(
+            [beacon.on_click(Refresh), html.attribute("data-testid", "refresh")],
+            [
+              html.text("Refresh"),
+            ],
+          ),
         ])
     },
   ])
@@ -352,7 +366,8 @@ fn handle_profile(
             Ok(token), Ok(display_name) ->
               case token == expected {
                 True -> {
-                  let _sess = session.set(store, sess, "display_name", display_name)
+                  let _sess =
+                    session.set(store, sess, "display_name", display_name)
                   json_response(200, "{\"ok\":true}")
                 }
                 False -> text_response(403, "Invalid CSRF token")
@@ -436,7 +451,9 @@ fn session_from_request(
   }
 }
 
-fn read_form(req: Request(Connection)) -> Result(List(#(String, String)), String) {
+fn read_form(
+  req: Request(Connection),
+) -> Result(List(#(String, String)), String) {
   case transport_http.read_body(req, 4096) {
     Ok(bits) -> {
       case bit_array.to_string(bits) {

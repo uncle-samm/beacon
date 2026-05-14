@@ -213,101 +213,104 @@ pub fn start(
     Some(event_decoder) -> {
       let result =
         actor.new_with_initialiser(5000, fn(subject) {
-      let initial_effect_processes = run_effects(initial_effects, subject)
-      let state =
-        RuntimeState(
-          model: initial_model,
-          update: config.update,
-          decode_event: Some(event_decoder),
-          connections: dict.new(),
-          self: subject,
-          event_clock: 0,
-          serialize_model: case config.serialize_model {
-            Some(f) -> Some(f)
-            None -> discover_model_encoder()
-          },
-          deserialize_model: config.deserialize_model,
-          secret_key: config.secret_key,
-          route_patterns: config.route_patterns,
-          on_route_change: config.on_route_change,
-          on_route_leave: config.on_route_leave,
-          current_route: None,
-          listener_subject: None,
-          current_subscriptions: [],
-          dynamic_subscriptions: config.dynamic_subscriptions,
-          on_notify: config.on_notify,
-          on_notification: config.on_notification,
-          cached_model: FullModelCache(json: None),
-          effect_processes: initial_effect_processes,
-        )
-      log.info("beacon.runtime", "Runtime initialising")
+          let initial_effect_processes = run_effects(initial_effects, subject)
+          let state =
+            RuntimeState(
+              model: initial_model,
+              update: config.update,
+              decode_event: Some(event_decoder),
+              connections: dict.new(),
+              self: subject,
+              event_clock: 0,
+              serialize_model: case config.serialize_model {
+                Some(f) -> Some(f)
+                None -> discover_model_encoder()
+              },
+              deserialize_model: config.deserialize_model,
+              secret_key: config.secret_key,
+              route_patterns: config.route_patterns,
+              on_route_change: config.on_route_change,
+              on_route_leave: config.on_route_leave,
+              current_route: None,
+              listener_subject: None,
+              current_subscriptions: [],
+              dynamic_subscriptions: config.dynamic_subscriptions,
+              on_notify: config.on_notify,
+              on_notification: config.on_notification,
+              cached_model: FullModelCache(json: None),
+              effect_processes: initial_effect_processes,
+            )
+          log.info("beacon.runtime", "Runtime initialising")
 
-      actor.initialised(state)
-      |> actor.returning(subject)
-      |> Ok
-    })
-    |> actor.on_message(handle_message)
-    |> actor.start
+          actor.initialised(state)
+          |> actor.returning(subject)
+          |> Ok
+        })
+        |> actor.on_message(handle_message)
+        |> actor.start
 
       case result {
-    Ok(started) -> {
-      log.info("beacon.runtime", "Runtime actor started successfully")
-      let subject = started.data
-      // Start dynamic PubSub listener if subscriptions are configured
-      log.info(
-        "beacon.runtime",
-        "Dynamic subs: "
-          <> case config.dynamic_subscriptions {
-          Some(_) -> "YES"
-          None -> "NO"
-        }
-          <> ", on_notify: "
-          <> case config.on_notify {
-          Some(_) -> "YES"
-          None -> "NO"
-        }
-          <> ", on_notification: "
-          <> case config.on_notification {
-          Some(_) -> "YES"
-          None -> "NO"
-        },
-      )
-      case config.dynamic_subscriptions {
-        Some(compute) -> {
-          let initial_topics = compute(initial_model)
-          let listener =
-            start_pubsub_listener(
-              subject,
-              config.on_notify,
-              config.on_notification,
-              initial_topics,
-            )
-          process.send(
-            subject,
-            SetListenerSubject(listener: listener, initial_subs: initial_topics),
+        Ok(started) -> {
+          log.info("beacon.runtime", "Runtime actor started successfully")
+          let subject = started.data
+          // Start dynamic PubSub listener if subscriptions are configured
+          log.info(
+            "beacon.runtime",
+            "Dynamic subs: "
+              <> case config.dynamic_subscriptions {
+              Some(_) -> "YES"
+              None -> "NO"
+            }
+              <> ", on_notify: "
+              <> case config.on_notify {
+              Some(_) -> "YES"
+              None -> "NO"
+            }
+              <> ", on_notification: "
+              <> case config.on_notification {
+              Some(_) -> "YES"
+              None -> "NO"
+            },
           )
+          case config.dynamic_subscriptions {
+            Some(compute) -> {
+              let initial_topics = compute(initial_model)
+              let listener =
+                start_pubsub_listener(
+                  subject,
+                  config.on_notify,
+                  config.on_notification,
+                  initial_topics,
+                )
+              process.send(
+                subject,
+                SetListenerSubject(
+                  listener: listener,
+                  initial_subs: initial_topics,
+                ),
+              )
+            }
+            None -> Nil
+          }
+          Ok(subject)
         }
-        None -> Nil
+        Error(actor.InitTimeout) -> {
+          log.error("beacon.runtime", "Failed to start runtime: init timed out")
+          Error(error.RuntimeError(reason: "Runtime init timed out"))
+        }
+        Error(actor.InitFailed(reason)) -> {
+          log.error("beacon.runtime", "Failed to start runtime: " <> reason)
+          Error(error.RuntimeError(reason: "Runtime init failed: " <> reason))
+        }
+        Error(actor.InitExited(_reason)) -> {
+          log.error(
+            "beacon.runtime",
+            "Failed to start runtime: init process exited",
+          )
+          Error(error.RuntimeError(reason: "Runtime init process exited"))
+        }
       }
-      Ok(subject)
     }
-    Error(actor.InitTimeout) -> {
-      log.error("beacon.runtime", "Failed to start runtime: init timed out")
-      Error(error.RuntimeError(reason: "Runtime init timed out"))
-    }
-    Error(actor.InitFailed(reason)) -> {
-      log.error("beacon.runtime", "Failed to start runtime: " <> reason)
-      Error(error.RuntimeError(reason: "Runtime init failed: " <> reason))
-    }
-    Error(actor.InitExited(_reason)) -> {
-      log.error(
-        "beacon.runtime",
-        "Failed to start runtime: init process exited",
-      )
-      Error(error.RuntimeError(reason: "Runtime init process exited"))
-    }
-      }
-  }
   }
 }
 
@@ -391,93 +394,68 @@ fn handle_message(
         "Join uses generated event contract; server handler registry is absent",
       )
       case dict.get(state.connections, conn_id) {
-            Ok(subject) -> {
-              // Send model JSON — client hydrates the existing SSR DOM from here.
-              let mount_serializer = case discover_model_encoder() {
-                Some(f) -> Some(f)
-                None -> state.serialize_model
-              }
-              case mount_serializer {
-                Some(serialize) -> {
-                  let model_json = serialize(model_to_use)
-                  // Check model size before sending to client
-                  case check_model_size(model_json, "join_model_sync") {
-                    True -> {
-                      send_to_connection(
-                        conn_id,
-                        subject,
-                        transport.SendModelSync(
-                          model_json: model_json,
-                          version: state.event_clock,
-                          ack_clock: state.event_clock,
-                        ),
-                      )
-                      // Cache the sent model JSON for future patch diffing
-                      log.debug(
-                        "beacon.runtime",
-                        "Sent join model_sync to " <> conn_id,
-                      )
-                    }
-                    False -> {
-                      log.error(
-                        "beacon.runtime",
-                        "Model too large to send on join for "
-                          <> conn_id
-                          <> " — client will not receive model_sync",
-                      )
-                    }
-                  }
-                  // Update model state and cache JSON even if too large; the
-                  // cache is needed for future patch diffing.
-                  let final_state =
-                    RuntimeState(
-                      ..state,
-                      model: model_to_use,
-                      current_route: matched_route,
-                      cached_model: FullModelCache(json: Some(model_json)),
-                    )
-                  let effect_processes =
-                    run_effects_with_context(
-                      route_effects,
-                      final_state.self,
-                      option.Some(conn_id),
-                      final_state.connections,
-                    )
-                  actor.continue(track_effect_processes(
-                    final_state,
-                    effect_processes,
-                  ))
-                }
-                None -> {
-                  log.warning(
-                    "beacon.runtime",
-                    "No model encoder available during mount — client won't receive model_sync. "
-                      <> "Ensure beacon_codec.gleam is generated and compiled.",
+        Ok(subject) -> {
+          // Send model JSON — client hydrates the existing SSR DOM from here.
+          let mount_serializer = case discover_model_encoder() {
+            Some(f) -> Some(f)
+            None -> state.serialize_model
+          }
+          case mount_serializer {
+            Some(serialize) -> {
+              let model_json = serialize(model_to_use)
+              // Check model size before sending to client
+              case check_model_size(model_json, "join_model_sync") {
+                True -> {
+                  send_to_connection(
+                    conn_id,
+                    subject,
+                    transport.SendModelSync(
+                      model_json: model_json,
+                      version: state.event_clock,
+                      ack_clock: state.event_clock,
+                    ),
                   )
-                  let final_state =
-                    RuntimeState(
-                      ..state,
-                      model: model_to_use,
-                      current_route: matched_route,
-                    )
-                  let effect_processes =
-                    run_effects_with_context(
-                      route_effects,
-                      final_state.self,
-                      option.Some(conn_id),
-                      final_state.connections,
-                    )
-                  actor.continue(track_effect_processes(
-                    final_state,
-                    effect_processes,
-                  ))
+                  // Cache the sent model JSON for future patch diffing
+                  log.debug(
+                    "beacon.runtime",
+                    "Sent join model_sync to " <> conn_id,
+                  )
+                }
+                False -> {
+                  log.error(
+                    "beacon.runtime",
+                    "Model too large to send on join for "
+                      <> conn_id
+                      <> " — client will not receive model_sync",
+                  )
                 }
               }
+              // Update model state and cache JSON even if too large; the
+              // cache is needed for future patch diffing.
+              let final_state =
+                RuntimeState(
+                  ..state,
+                  model: model_to_use,
+                  current_route: matched_route,
+                  cached_model: FullModelCache(json: Some(model_json)),
+                )
+              let effect_processes =
+                run_effects_with_context(
+                  route_effects,
+                  final_state.self,
+                  option.Some(conn_id),
+                  final_state.connections,
+                )
+              actor.continue(track_effect_processes(
+                final_state,
+                effect_processes,
+              ))
             }
-            Error(Nil) -> {
+            None -> {
               log.warning(
                 "beacon.runtime",
-                "Client " <> conn_id <> " not found in connections for join",
+                "No model encoder available during mount — client won't receive model_sync. "
+                  <> "Ensure beacon_codec.gleam is generated and compiled.",
               )
               let final_state =
                 RuntimeState(
@@ -489,7 +467,7 @@ fn handle_message(
                 run_effects_with_context(
                   route_effects,
                   final_state.self,
-                  option.None,
+                  option.Some(conn_id),
                   final_state.connections,
                 )
               actor.continue(track_effect_processes(
@@ -498,6 +476,28 @@ fn handle_message(
               ))
             }
           }
+        }
+        Error(Nil) -> {
+          log.warning(
+            "beacon.runtime",
+            "Client " <> conn_id <> " not found in connections for join",
+          )
+          let final_state =
+            RuntimeState(
+              ..state,
+              model: model_to_use,
+              current_route: matched_route,
+            )
+          let effect_processes =
+            run_effects_with_context(
+              route_effects,
+              final_state.self,
+              option.None,
+              final_state.connections,
+            )
+          actor.continue(track_effect_processes(final_state, effect_processes))
+        }
+      }
     }
 
     ClientEventReceived(
@@ -660,8 +660,13 @@ fn handle_message(
       case state.on_route_change, matched_route {
         option.Some(make_msg), option.Some(resolved_route) -> {
           let msg = make_msg(resolved_route)
-          let new_state =
-            run_update(RuntimeState(..state, current_route: matched_route), msg)
+          let nav_state =
+            RuntimeState(
+              ..state,
+              current_route: matched_route,
+              event_clock: state.event_clock + 1,
+            )
+          let new_state = run_update_for(nav_state, msg, option.Some(conn_id))
           actor.continue(
             RuntimeState(..new_state, current_route: matched_route),
           )
@@ -784,12 +789,7 @@ fn run_update_for(
 
   // Execute effects — pass connection context for targeted sends
   let effect_processes =
-    run_effects_with_context(
-      effects,
-      state.self,
-      conn_id,
-      state.connections,
-    )
+    run_effects_with_context(effects, state.self, conn_id, state.connections)
 
   // Diff dynamic subscriptions after model change
   update_dynamic_subscriptions(track_effect_processes(

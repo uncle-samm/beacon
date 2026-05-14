@@ -72,6 +72,65 @@ pub fn source_freshness_detects_newer_nested_app_source_test() {
   }
 }
 
+pub fn transitive_client_source_resolution_skips_empty_server_modules_test() {
+  let temp_root = "build/beacon_test_client_transitive"
+  let src_root = temp_root <> "/src"
+  let server_path = src_root <> "/app/server_state.gleam"
+  let manager_path = src_root <> "/agent/manager.gleam"
+  let source =
+    "import app/server_state.{type ServerState}
+
+pub type Model {
+  Model(count: Int)
+}
+
+fn server_page(state: #(Model, Nil, ServerState)) {
+  let #(model, _local, _server) = state
+  model
+}
+
+pub fn view(model: Model) {
+  model
+}
+"
+
+  case simplifile.delete(temp_root) {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+  }
+  let assert Ok(Nil) = simplifile.create_directory_all(src_root <> "/app")
+  let assert Ok(Nil) = simplifile.create_directory_all(src_root <> "/agent")
+  let assert Ok(Nil) =
+    simplifile.write(
+      server_path,
+      "import agent/manager
+
+pub type ServerState {
+  ServerState(manager: manager.Manager)
+}
+",
+    )
+  let assert Ok(Nil) =
+    simplifile.write(
+      manager_path,
+      "pub type Manager {
+  Manager(secret: String)
+}
+",
+    )
+
+  let assert Ok(sources) =
+    build.resolve_transitive_client_external_sources(source, src_root)
+  let module_paths = list.map(sources, fn(source) { source.1 })
+  let assert False = list.contains(module_paths, "app/server_state")
+  let assert False = list.contains(module_paths, "agent/manager")
+
+  case simplifile.delete(temp_root) {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+  }
+}
+
 pub fn source_freshness_treats_missing_manifest_as_stale_test() {
   let temp_root = "build/beacon_test_missing_manifest_freshness"
   let src_root = temp_root <> "/src"
@@ -111,7 +170,7 @@ pub fn resolve_transitive_external_sources_recurses_through_user_modules_test() 
   let assert Ok(Nil) =
     simplifile.write(
       models_path,
-      "import types/enums\npub type AgentRunStatus { Pending Running Done }\n",
+      "import types/enums\npub type AgentRunStatus { AgentRunStatus(type_: enums.AgentType) }\n",
     )
   let assert Ok(Nil) =
     simplifile.write(enums_path, "pub type AgentType { Codex Gemini }\n")
@@ -227,10 +286,15 @@ pub type AgentRunStatus {
     ])
 
   let imports = build.generate_external_imports(analysis, app_source, False)
-  let assert True =
+  let assert False =
     string.contains(imports, "import app/server_state as server_state")
   let assert True = string.contains(imports, "import types/models as models")
   let assert True = string.contains(imports, "import types/enums as enums")
+
+  let server_imports =
+    build.generate_external_imports(analysis, app_source, True)
+  let assert True =
+    string.contains(server_imports, "import app/server_state as server_state")
 }
 
 // Note: Server field exclusion is tested in build_codec_test.gleam

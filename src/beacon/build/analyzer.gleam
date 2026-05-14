@@ -510,9 +510,13 @@ pub fn analyze_multi(
                   {
                     Ok(client_msg) -> variants_from_msg_type(client_msg)
                     Error(_) ->
-                      case update_fn {
-                        Ok(func) -> classify_variants(msg_type, func, False)
-                        Error(_) -> variants_from_msg_type(msg_type)
+                      case analysis.client_msg_variants {
+                        [_, ..] -> analysis.client_msg_variants
+                        [] ->
+                          case update_fn {
+                            Ok(func) -> classify_variants(msg_type, func, False)
+                            Error(_) -> variants_from_msg_type(msg_type)
+                          }
                       }
                   }
                   [MsgTypeInfo(module: alias, variants: variants)]
@@ -608,21 +612,25 @@ pub fn analyze_multi(
                       {
                         Ok(client_msg) -> variants_from_msg_type(client_msg)
                         Error(_) ->
-                          case update_fn {
-                            Ok(func) ->
-                              classify_variants(
-                                msg_type,
-                                func,
-                                analysis.has_local,
-                              )
-                            Error(_) -> variants_from_msg_type(msg_type)
+                          case analysis.client_msg_variants {
+                            [_, ..] -> analysis.client_msg_variants
+                            [] ->
+                              case update_fn {
+                                Ok(func) ->
+                                  classify_variants(
+                                    msg_type,
+                                    func,
+                                    analysis.has_local,
+                                  )
+                                Error(_) -> variants_from_msg_type(msg_type)
+                              }
                           }
                       }
                       let client_variants = case
                         find_custom_type(ext_module, "ClientMsg")
                       {
                         Ok(client_msg) -> variants_from_msg_type(client_msg)
-                        Error(_) -> []
+                        Error(_) -> analysis.client_msg_variants
                       }
                       Ok(#(alias, msg_type.name, variants, client_variants))
                     }
@@ -938,12 +946,40 @@ fn type_parts(
           let im = module_name_or_empty(inner_mod, field_name, True)
           #(n, inner_name, m, im)
         }
+        [glance.TupleType(elements: elements, ..)] -> {
+          let m = module_name_or_empty(mod, field_name, False)
+          #(n, tuple_type_name(elements), m, "")
+        }
         _ -> {
           let m = module_name_or_empty(mod, field_name, False)
           #(n, "", m, "")
         }
       }
+    glance.TupleType(elements: elements, ..) -> #(
+      "Tuple",
+      tuple_type_name(elements),
+      "",
+      "",
+    )
     _ -> #("Unknown", "", "", "")
+  }
+}
+
+fn tuple_type_name(elements: List(glance.Type)) -> String {
+  "#("
+  <> {
+    elements
+    |> list.map(tuple_element_type_name)
+    |> string.join(", ")
+  }
+  <> ")"
+}
+
+fn tuple_element_type_name(type_: glance.Type) -> String {
+  case type_ {
+    glance.NamedType(name: name, ..) -> name
+    glance.TupleType(elements: elements, ..) -> tuple_type_name(elements)
+    _ -> "Unknown"
   }
 }
 
@@ -1890,21 +1926,15 @@ fn extract_client_source_with_update(
     Ok(module) -> {
       let source_bytes = string_to_bytes(source)
 
-      // Collect safe imports
-      let import_texts =
-        list.filter_map(module.imports, fn(def) {
-          let import_ = def.definition
-          case is_server_only_import(import_.module) {
-            True -> Error(Nil)
-            False -> Ok(slice_source(source_bytes, import_.location))
-          }
-        })
-
       // Collect all type definitions (Model, Local, Msg, custom types)
-      // Exclude Server type — it is private server-side state, never sent to client
+      // Exclude Server/ServerState types — private server-side state is never
+      // sent to client bundles or codecs.
       let type_texts =
         list.filter_map(module.custom_types, fn(def) {
-          case def.definition.name == "Server" {
+          case
+            def.definition.name == "Server"
+            || def.definition.name == "ServerState"
+          {
             True -> Error(Nil)
             False -> Ok(slice_source(source_bytes, def.definition.location))
           }
@@ -1918,7 +1948,7 @@ fn extract_client_source_with_update(
 
       // Collect pure functions (skip server-only, skip @external(erlang),
       // skip functions that reference server-only APIs in their body)
-      let function_texts =
+      let function_candidates =
         list.filter_map(module.functions, fn(def) {
           let func = def.definition
           // Skip server-only functions by name
@@ -1929,9 +1959,13 @@ fn extract_client_source_with_update(
                 True -> Error(Nil)
                 False -> {
                   let func_text = slice_source(source_bytes, func.location)
+                  let is_public = case func.publicity {
+                    glance.Public -> True
+                    _ -> False
+                  }
                   // Always extract view/init/init_local — client needs them
                   case list.contains(always_extract_functions, func.name) {
-                    True -> Ok(func_text)
+                    True -> Ok(#(func.name, is_public, func_text))
                     False -> {
                       // Skip computed fields — pub fn(Model) -> T (not Node return)
                       let is_computed = case func.publicity, func.parameters {
@@ -1973,7 +2007,7 @@ fn extract_client_source_with_update(
                               // Skip if the body references server-only modules
                               case function_references_server_code(func_text) {
                                 True -> Error(Nil)
-                                False -> Ok(func_text)
+                                False -> Ok(#(func.name, is_public, func_text))
                               }
                           }
                         }
@@ -1983,6 +2017,18 @@ fn extract_client_source_with_update(
                 }
               }
             }
+          }
+        })
+
+      let function_texts =
+        list.filter_map(function_candidates, fn(candidate) {
+          let #(name, is_public, func_text) = candidate
+          case
+            is_public
+            || function_is_referenced_by_candidate(name, function_candidates)
+          {
+            True -> Ok(func_text)
+            False -> Error(Nil)
           }
         })
 
@@ -2019,6 +2065,36 @@ fn extract_client_source_with_update(
           }
         })
 
+      let body_text =
+        list.flatten([type_texts, alias_texts, constant_texts, function_texts])
+        |> string.join("\n\n")
+
+      // Collect safe imports that are still referenced by the extracted client
+      // code. Server-only functions are stripped above, so their imports must
+      // not keep server graphs reachable in the generated JS project.
+      let import_texts =
+        list.filter_map(module.imports, fn(def) {
+          let import_ = def.definition
+          let import_text = slice_source(source_bytes, import_.location)
+          let alias_name = case import_.alias {
+            option.Some(glance.Named(name)) -> name
+            option.Some(glance.Discarded(name)) -> name
+            option.None -> {
+              case string.split(import_.module, "/") |> list.last {
+                Ok(name) -> name
+                Error(_) -> import_.module
+              }
+            }
+          }
+          case
+            is_server_only_import(import_.module)
+            || !import_referenced(import_text, alias_name, body_text)
+          {
+            True -> Error(Nil)
+            False -> Ok(import_text)
+          }
+        })
+
       // Assemble the client module
       let parts =
         list.flatten([
@@ -2041,6 +2117,65 @@ fn extract_client_source_with_update(
 /// Check if a function body references server-only code.
 /// Checks if the function text references any module that was skipped
 /// from the safe imports list, or uses known server-only patterns.
+fn import_referenced(
+  import_text: String,
+  alias_name: String,
+  body_text: String,
+) -> Bool {
+  string.contains(body_text, alias_name <> ".")
+  || imported_unqualified_name_referenced(import_text, body_text)
+}
+
+fn imported_unqualified_name_referenced(
+  import_text: String,
+  body_text: String,
+) -> Bool {
+  case string.split(import_text, "{") {
+    [_, rest] -> {
+      let names_text = case string.split(rest, "}") {
+        [names, ..] -> names
+        _ -> ""
+      }
+      names_text
+      |> string.split(",")
+      |> list.any(fn(raw_name) {
+        let name =
+          raw_name
+          |> string.trim
+          |> strip_prefix("type ")
+          |> strip_import_alias
+        name != "" && string.contains(body_text, name)
+      })
+    }
+    _ -> False
+  }
+}
+
+fn function_is_referenced_by_candidate(
+  name: String,
+  candidates: List(#(String, Bool, String)),
+) -> Bool {
+  candidates
+  |> list.any(fn(candidate) {
+    let #(other_name, _is_public, other_text) = candidate
+    other_name != name && string.contains(other_text, name)
+  })
+}
+
+fn strip_prefix(text: String, prefix: String) -> String {
+  case string.starts_with(text, prefix) {
+    True -> string.drop_start(text, string.length(prefix))
+    False -> text
+  }
+}
+
+fn strip_import_alias(text: String) -> String {
+  case string.split(text, " as ") {
+    [name, ..] -> string.trim(name)
+    _ -> text
+  }
+}
+
 fn function_references_server_code(func_text: String) -> Bool {
   // Check for common server-only module references
   string.contains(func_text, "store.")
@@ -2052,7 +2187,11 @@ fn function_references_server_code(func_text: String) -> Bool {
   || string.contains(func_text, "request.")
   || string.contains(func_text, "response.")
   || string.contains(func_text, "middleware.")
-  || string.contains(func_text, "Server")
+  || string.contains(func_text, "Server(")
+  || string.contains(func_text, ": Server")
+  || string.contains(func_text, "server: Server")
+  || string.contains(func_text, "ServerState")
+  || string.contains(func_text, "beacon_route.Page")
   || string.contains(func_text, "bytes_tree.")
   || string.contains(func_text, "message.user(")
   || string.contains(func_text, "message.assistant(")

@@ -1366,9 +1366,13 @@ fn serve_js_file(
         True ->
           base_response
           |> response.set_header("content-encoding", "gzip")
-          |> response.set_body(Bytes(bytes_tree.from_bit_array(gzip_compress(
-            bit_array.from_string(contents),
-          ))))
+          |> response.set_body(
+            Bytes(
+              bytes_tree.from_bit_array(
+                gzip_compress(bit_array.from_string(contents)),
+              ),
+            ),
+          )
         False ->
           base_response
           |> response.set_body(Bytes(bytes_tree.from_string(contents)))
