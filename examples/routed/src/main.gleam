@@ -21,8 +21,8 @@ pub type Msg {
   SetName(String)
 }
 
-pub fn init() -> Model {
-  Model(path: "/", home: home.init(), name: "", visits: 0)
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(Model(path: "/", home: home.init(), name: "", visits: 0), effect.none())
 }
 
 pub fn init_server() -> Server {
@@ -31,14 +31,15 @@ pub fn init_server() -> Server {
 
 pub fn update(
   model: Model,
+  _local: Nil,
   server: Server,
   msg: Msg,
-) -> #(Model, Server, effect.Effect(Msg)) {
+) -> #(Model, Nil, Server) {
   case msg {
     RouteChanged(path) -> #(
       Model(..model, path: path, visits: model.visits + 1),
+      Nil,
       server,
-      effect.none(),
     )
     Home(child_msg) -> {
       let #(model, server) =
@@ -54,9 +55,9 @@ pub fn update(
           },
           home.update_server,
         )
-      #(model, server, effect.none())
+      #(model, Nil, server)
     }
-    SetName(name) -> #(Model(..model, name: name), server, effect.none())
+    SetName(name) -> #(Model(..model, name: name), Nil, server)
   }
 }
 
@@ -75,7 +76,7 @@ pub fn update_client(model: Model, msg: Msg) -> Model {
   }
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   // Invariant: `model.path` is initialized to "/" and later updated only from
   // `route_pages()` entries through RouteChanged.
   let assert Ok(page) = route.dispatch_view(pages(), model, model.path)
@@ -119,34 +120,34 @@ fn pages() -> List(route.Page(Model, Msg)) {
   ]
 }
 
-fn server_pages() -> List(route.Page(#(Model, Server), Msg)) {
+fn server_pages() -> List(route.Page(#(Model, Nil, Server), Msg)) {
   [
     home.page(
       fn(r: route.Route) { RouteChanged(r.path) },
-      fn(state: #(Model, Server)) {
-        let #(model, _server) = state
+      fn(state: #(Model, Nil, Server)) {
+        let #(model, _local, _server) = state
         model.home
       },
       Home,
     ),
     about.page(
       fn(r: route.Route) { RouteChanged(r.path) },
-      fn(state: #(Model, Server), _route) {
-        let #(_model, _server) = state
+      fn(state: #(Model, Nil, Server), _route) {
+        let #(_model, _local, _server) = state
         about.view()
       },
     ),
     settings.page(
       fn(r: route.Route) { RouteChanged(r.path) },
-      fn(state: #(Model, Server), _route) {
-        let #(model, _server) = state
+      fn(state: #(Model, Nil, Server), _route) {
+        let #(model, _local, _server) = state
         settings.view(model.name, SetName)
       },
     ),
     stats.page(
       fn(r: route.Route) { RouteChanged(r.path) },
-      fn(state: #(Model, Server), _route) {
-        let #(model, _server) = state
+      fn(state: #(Model, Nil, Server), _route) {
+        let #(model, _local, _server) = state
         stats.view(model.visits)
       },
     ),
@@ -154,7 +155,7 @@ fn server_pages() -> List(route.Page(#(Model, Server), Msg)) {
 }
 
 pub fn main() {
-  beacon.app_with_server(init, init_server, update, view)
+  beacon.app(init, beacon.no_local, init_server, update, view)
   |> beacon.title("Beacon Routed")
   |> beacon.route_pages(server_pages())
   |> beacon.start(8080)

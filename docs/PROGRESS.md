@@ -8,10 +8,79 @@
 ## Current Status
 
 **Active Milestone:** None
-**Last Completed:** 113 — Browser And Load Evidence
+**Last Completed:** 115 — Imported Contract Codegen
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (754 tests passed, 0 failures)
+**Test Status:** GREEN (756 tests passed, 0 failures)
 **Linter:** PASSING (zero violations)
+
+### Milestone 115: Imported Contract Codegen
+> Make the mandatory generated contract handle real multi-module apps where
+> `Model`, `Msg`, and private `ServerState` live in imported modules, and make
+> unsupported shapes fail before Beacon writes stale or broken generated files.
+
+- [x] Track `Model`, `Msg`, and `Local` ownership in the build analyzer
+      instead of assuming those types live in the entry module
+- [x] Generate server and browser contracts with qualified imported types such
+      as `model.Model`, `msg.Msg`, and `server_state.ServerState`
+- [x] Validate the full enhanced client-state contract before writing
+      `src/beacon_codec.gleam` or `build/beacon_contract.json`
+- [x] Make the legacy `build.build_base_client()` path run the full mandatory
+      app build and panic on failure so ignored `Result`s do not hide missing
+      `decode_event` / `render_model`
+- [x] Add regression tests for imported `Model` + imported `Msg` + external
+      `ServerState`, plus a private-view unsupported-shape case
+- [x] Probe sprite-dash-gleam in a temp vendored copy and verify its
+      unsupported current shape exits nonzero without modifying
+      `src/beacon_codec.gleam`
+
+**Notes:**
+- A positive temp integration app with `Model` in `app/model`, `Msg` in
+  `app/msg`, and `ServerState` in `app/server_state` generated
+  `encode_model`, `decode_model`, `decode_event`, and `render_model` with the
+  correct qualified types and compiled after codegen.
+- The current sprite-dash source now fails earlier and honestly: its `Msg`
+  contract contains browser-originated variants with unsupported `Result` and
+  `Route` payloads. The generated codec hash stayed unchanged during the
+  failed probe, proving Beacon no longer corrupts `src/beacon_codec.gleam`
+  before rejecting the app.
+- Consumers that previously called `build.build_base_client()` must either let
+  it run the full app build or switch to `gleam run -m beacon/build
+  src/<entry>.gleam`; base-runtime-only builds are no longer a public app path.
+
+### Milestone 114: Single App Constructor
+> Break the alpha API on purpose: remove the public distinction between
+> model-only, local-state, server-state, and effectful app constructors. Every
+> app now uses `beacon.app(init, init_local, init_server, update, view)` with
+> `beacon.no_local` / `beacon.no_server` for absent state.
+
+- [x] Replace public examples with one `beacon.app` shape and pure
+      `update(model, local, server, msg) -> #(model, local, server)`
+- [x] Remove `app_with_local`, `app_with_server`, and `app_with_effects` from
+      the public API surface
+- [x] Regenerate all example client bundles/codecs against the universal
+      `#(Model, Local, Server)` state contract
+- [x] Update codegen so model-only/server-state apps do not compile server-only
+      `update` bodies into the browser bundle
+- [x] Update docs/tests/comments to stop teaching old constructor names
+- [x] Run final `gleam build`, `gleam test`, and `gleam run -m beacon/lint`
+
+**Notes:**
+- `init` now returns `#(Model, effect.Effect(Msg))`; startup effects remain
+  explicit while normal `update` stays pure.
+- `view` receives `Model` and `Local` only. `Server` stays private and is never
+  passed to view or generated client render code.
+- Generated server codecs/renderers use one state tuple. Apps with no Local or
+  Server use `Nil` via `beacon.no_local` and `beacon.no_server`.
+- The full desktop CDP pass initially found a real Pong regression after
+  model-only client updates were disabled. Codegen now includes pure model-only
+  updates when extraction proves them client-safe, while omitting server-only
+  updates such as dashboard's `debug.stats()`.
+- Verification: regenerated and built every example bundle, `gleam build`,
+  `gleam test` (754 passed, 0 failures), `gleam run -m beacon/lint`,
+  `git diff --check`, and focused desktop CDP
+  `BEACON_CDP_VIEWPORTS=desktop PYTHONUNBUFFERED=1 scripts/run_all_cdp.sh pong`
+  (9 passed, 0 failed, 22 skipped). The earlier full desktop CDP run reached
+  414 passed / 1 failed before the Pong fix.
 
 ### Milestone 113: Browser And Load Evidence
 > Prove the simplified model in the browser and under pressure: no flicker, no

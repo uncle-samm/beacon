@@ -10,7 +10,7 @@ It exercises the framework pieces that must work together in real apps:
 - HttpOnly `beacon_session` cookie for application auth
 - `ws_auth` via `auth.ws_session_auth` to reject unauthenticated WebSocket upgrades
 - `ws_init` to hydrate server/private state from the upgrade request
-- `app_with_server` so session IDs, CSRF tokens, and audit keys stay server-only
+- `Server state` so session IDs, CSRF tokens, and audit keys stay server-only
 - Route-aware SSR for `/login`, `/app`, `/settings`, and `/admin`
 - Server-authoritative model updates after hydration
 

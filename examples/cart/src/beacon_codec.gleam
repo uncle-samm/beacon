@@ -45,9 +45,8 @@ fn server_decode_cartitem() -> decode.Decoder(cart.CartItem) {
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: #(cart.Model, cart.Local)) -> String {
+pub fn encode_model(state: #(cart.Model, cart.Local, Nil)) -> String {
   let model = state.0
-  let local = state.1
   json.object([
     #("products", json.array(model.products, encode_product)),
     #("cart_items", json.array(model.cart_items, encode_cartitem)),
@@ -56,24 +55,24 @@ pub fn encode_model(state: #(cart.Model, cart.Local)) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: #(cart.Model, cart.Local)) -> String {
+pub fn render_model(state: #(cart.Model, cart.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   cart.view(model, local)
   |> element.to_string
 }
 
-/// Decode a #(Model, Local) from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(#(cart.Model, cart.Local), String) {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(cart.Model, cart.Local, Nil), String) {
   let state_decoder = {
     use products <- decode.field("products", decode.list(server_decode_product()))
     use cart_items <- decode.field("cart_items", decode.list(server_decode_cartitem()))
 
-    decode.success(#(cart.Model(products: products, cart_items: cart_items), cart.Local))
+    decode.success(#(cart.Model(products: products, cart_items: cart_items), cart.Local, Nil))
   }
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
-    Error(_) -> Error("Failed to decode model+local")
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 
@@ -165,13 +164,13 @@ fn decode_msg(json_str: String) -> Result(cart.Msg, String) {
   }
 }
 
-pub fn encode_substate_products(state: #(cart.Model, cart.Local)) -> String {
+pub fn encode_substate_products(state: #(cart.Model, cart.Local, Nil)) -> String {
   let model = state.0
   json.array(model.products, encode_product)
   |> json.to_string
 }
 
-pub fn encode_substate_cart_items(state: #(cart.Model, cart.Local)) -> String {
+pub fn encode_substate_cart_items(state: #(cart.Model, cart.Local, Nil)) -> String {
   let model = state.0
   json.array(model.cart_items, encode_cartitem)
   |> json.to_string
@@ -181,7 +180,7 @@ pub fn substate_names() -> List(String) {
   ["products", "cart_items"]
 }
 
-pub fn encode_flat_fields(_state: #(cart.Model, cart.Local)) -> String {
+pub fn encode_flat_fields(_state: #(cart.Model, cart.Local, Nil)) -> String {
   json.object([])
   |> json.to_string
 }

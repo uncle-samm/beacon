@@ -15,8 +15,8 @@ import gleam/dynamic/decode
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: pong.Model) -> String {
-  let model = state
+pub fn encode_model(state: #(pong.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("left_y", json.int(model.left_y)),
     #("right_y", json.int(model.right_y)),
@@ -32,15 +32,16 @@ pub fn encode_model(state: pong.Model) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: pong.Model) -> String {
-  let model = state
-  pong.view(model)
+pub fn render_model(state: #(pong.Model, Nil, Nil)) -> String {
+  let model = state.0
+  let local = Nil
+  pong.view(model, local)
   |> element.to_string
 }
 
-/// Decode a Model from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(pong.Model, String) {
-  let model_decoder = {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(pong.Model, Nil, Nil), String) {
+  let state_decoder = {
     use left_y <- decode.field("left_y", decode.int)
     use right_y <- decode.field("right_y", decode.int)
     use ball_x <- decode.field("ball_x", decode.int)
@@ -50,11 +51,12 @@ pub fn decode_model(json_str: String) -> Result(pong.Model, String) {
     use left_score <- decode.field("left_score", decode.int)
     use right_score <- decode.field("right_score", decode.int)
     use running <- decode.field("running", decode.bool)
-    decode.success(pong.Model(left_y: left_y, right_y: right_y, ball_x: ball_x, ball_y: ball_y, ball_dx: ball_dx, ball_dy: ball_dy, left_score: left_score, right_score: right_score, running: running))
+
+    decode.success(#(pong.Model(left_y: left_y, right_y: right_y, ball_x: ball_x, ball_y: ball_y, ball_dx: ball_dx, ball_dy: ball_dy, left_score: left_score, right_score: right_score, running: running), Nil, Nil))
   }
-  case json.parse(json_str, model_decoder) {
-    Ok(model) -> Ok(model)
-    Error(_) -> Error("Failed to decode model")
+  case json.parse(json_str, state_decoder) {
+    Ok(state) -> Ok(state)
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 

@@ -25,12 +25,15 @@ pub type Msg {
   RefreshPublicSummary
 }
 
-pub fn init() -> Model {
-  Model(
-    user: "Ada",
-    public_balance: 1200,
-    approved_actions: 0,
-    last_public_event: "Session opened",
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(
+    Model(
+      user: "Ada",
+      public_balance: 1200,
+      approved_actions: 0,
+      last_public_event: "Session opened",
+    ),
+    effect.none(),
   )
 }
 
@@ -44,9 +47,10 @@ pub fn init_server() -> Server {
 
 pub fn update(
   model: Model,
+  _local: Nil,
   server: Server,
   msg: Msg,
-) -> #(Model, Server, effect.Effect(Msg)) {
+) -> #(Model, Nil, Server) {
   case msg {
     ApproveTransfer -> {
       let audit =
@@ -58,15 +62,15 @@ pub fn update(
           approved_actions: model.approved_actions + 1,
           last_public_event: "Transfer approved",
         ),
+        Nil,
         Server(..server, audit_entries: [audit, ..server.audit_entries]),
-        effect.none(),
       )
     }
 
     DenyTransfer -> #(
       Model(..model, last_public_event: "Transfer denied"),
+      Nil,
       Server(..server, denied_attempts: server.denied_attempts + 1),
-      effect.none(),
     )
 
     RefreshPublicSummary -> #(
@@ -76,13 +80,13 @@ pub fn update(
           <> int.to_string(list.length(server.audit_entries))
           <> " audited server events",
       ),
+      Nil,
       server,
-      effect.none(),
     )
   }
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   html.main(
     [
       html.style(
@@ -144,7 +148,7 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
 }
 
 pub fn main() {
-  beacon.app_with_server(init, init_server, update, view)
+  beacon.app(init, beacon.no_local, init_server, update, view)
   |> beacon.title("Private Session")
   |> beacon.start(8080)
 }

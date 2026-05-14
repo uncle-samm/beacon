@@ -25,7 +25,7 @@ Override defaults via the builder:
 import beacon
 import beacon/transport
 
-beacon.app(init, update, view)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 |> beacon.security_limits(transport.SecurityLimits(
   ..transport.default_security_limits(),
   max_connections: 5000,
@@ -93,7 +93,7 @@ The cookie is `HttpOnly`, `SameSite=Lax`, path `/`, and has `Max-Age=86400`. Jav
 Auto-generated secret keys are warned about at startup. Set an explicit key for production:
 
 ```gleam
-beacon.app(init, update, view)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 |> beacon.secret_key("your-production-secret")
 |> beacon.start(8080)
 ```

@@ -59,8 +59,13 @@ pub fn init_local(_model: Model) -> Local {
   Local(local_count: 0)
 }
 
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg {
+pub fn update(
+  model: Model,
+  local: Local,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Local, Nil) {
+  let #(model, local) = case msg {
     // === SHARED: update the public model; on_update writes the store ===
     SharedIncrement -> #(
       Model(..model, shared_count: model.shared_count + 1),
@@ -81,13 +86,14 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
     LocalIncrement -> #(model, Local(local_count: local.local_count + 1))
     LocalDecrement -> #(model, Local(local_count: local.local_count - 1))
   }
+  #(model, local, Nil)
 }
 
 fn make_on_update(
   shared: store.Store(Int),
-) -> fn(#(Model, Local), Msg) -> effect.Effect(Msg) {
-  fn(state: #(Model, Local), msg: Msg) -> effect.Effect(Msg) {
-    let #(model, _local) = state
+) -> fn(#(Model, Local, Nil), Msg) -> effect.Effect(Msg) {
+  fn(state: #(Model, Local, Nil), msg: Msg) -> effect.Effect(Msg) {
+    let #(model, _local, _server) = state
     case msg {
       SharedIncrement | SharedDecrement ->
         effect.from(fn(_dispatch) {
@@ -196,7 +202,13 @@ pub fn start() {
   let shared = store.new("shared_counter")
   store.put(shared, "count", 0)
 
-  beacon.app_with_local(make_init(shared), init_local, update, view)
+  beacon.app(
+    fn() { #(make_init(shared)(), effect.none()) },
+    init_local,
+    beacon.no_server,
+    update,
+    view,
+  )
   |> beacon.title("Triple Counter")
   |> beacon.on_update(make_on_update(shared))
   |> beacon.subscriptions(fn(_model) { ["store:shared_counter"] })

@@ -26,9 +26,8 @@ fn server_decode_cell() -> decode.Decoder(spreadsheet.Cell) {
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: #(spreadsheet.Model, spreadsheet.Local)) -> String {
+pub fn encode_model(state: #(spreadsheet.Model, spreadsheet.Local, Nil)) -> String {
   let model = state.0
-  let local = state.1
   json.object([
     #("cells", json.array(model.cells, encode_cell)),
     #("selected_row", json.int(model.selected_row)),
@@ -40,15 +39,15 @@ pub fn encode_model(state: #(spreadsheet.Model, spreadsheet.Local)) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: #(spreadsheet.Model, spreadsheet.Local)) -> String {
+pub fn render_model(state: #(spreadsheet.Model, spreadsheet.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   spreadsheet.view(model, local)
   |> element.to_string
 }
 
-/// Decode a #(Model, Local) from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(#(spreadsheet.Model, spreadsheet.Local), String) {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(spreadsheet.Model, spreadsheet.Local, Nil), String) {
   let state_decoder = {
     use cells <- decode.field("cells", decode.list(server_decode_cell()))
     use selected_row <- decode.field("selected_row", decode.int)
@@ -56,11 +55,11 @@ pub fn decode_model(json_str: String) -> Result(#(spreadsheet.Model, spreadsheet
     use editing <- decode.field("editing", decode.bool)
     use edit_buffer <- decode.field("edit_buffer", decode.string)
 
-    decode.success(#(spreadsheet.Model(cells: cells, selected_row: selected_row, selected_col: selected_col, editing: editing, edit_buffer: edit_buffer), spreadsheet.Local))
+    decode.success(#(spreadsheet.Model(cells: cells, selected_row: selected_row, selected_col: selected_col, editing: editing, edit_buffer: edit_buffer), spreadsheet.Local, Nil))
   }
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
-    Error(_) -> Error("Failed to decode model+local")
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 
@@ -160,7 +159,7 @@ fn decode_msg(json_str: String) -> Result(spreadsheet.Msg, String) {
   }
 }
 
-pub fn encode_substate_cells(state: #(spreadsheet.Model, spreadsheet.Local)) -> String {
+pub fn encode_substate_cells(state: #(spreadsheet.Model, spreadsheet.Local, Nil)) -> String {
   let model = state.0
   json.array(model.cells, encode_cell)
   |> json.to_string
@@ -170,7 +169,7 @@ pub fn substate_names() -> List(String) {
   ["cells"]
 }
 
-pub fn encode_flat_fields(state: #(spreadsheet.Model, spreadsheet.Local)) -> String {
+pub fn encode_flat_fields(state: #(spreadsheet.Model, spreadsheet.Local, Nil)) -> String {
   let model = state.0
   json.object([
     #("selected_row", json.int(model.selected_row)),

@@ -1,5 +1,5 @@
 /// Build codec tests — verify the analysis pipeline produces correct
-/// codec inputs for every app type (standard, app_with_server, app_with_local, multi-file).
+/// codec inputs for every app type (standard, server_state, local_state, multi-file).
 import beacon/build
 import beacon/build/analyzer
 import gleam/list
@@ -18,14 +18,14 @@ pub type Msg {
   Dec
   SetName(String)
 }
-pub fn update(model: Model, msg: Msg) -> Model {
+pub fn update(model: Model, _local: Nil, _server: Nil, msg: Msg) -> #(Model, Nil, Nil) {
   case msg {
-    Inc -> Model(..model, count: model.count + 1)
-    Dec -> Model(..model, count: model.count - 1)
-    SetName(n) -> Model(..model, name: n)
+    Inc -> #(Model(..model, count: model.count + 1), Nil, Nil)
+    Dec -> #(Model(..model, count: model.count - 1), Nil, Nil)
+    SetName(n) -> #(Model(..model, name: n), Nil, Nil)
   }
 }
-pub fn view(model: Model) { model }
+pub fn view(model: Model, _local: Nil) { model }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert False = analysis.has_server
@@ -37,7 +37,7 @@ pub fn view(model: Model) { model }
     list.any(analysis.model_fields, fn(f) { f.name == "active" })
 }
 
-pub fn app_with_server_excludes_server_from_model_fields_test() {
+pub fn server_state_excludes_server_from_model_fields_test() {
   let source =
     "
 pub type Model {
@@ -49,10 +49,10 @@ pub type Server {
 pub type Msg {
   Inc
 }
-pub fn update(model: Model, msg: Msg) -> Model {
-  model
+pub fn update(model: Model, _local: Nil, server: Server, _msg: Msg) -> #(Model, Nil, Server) {
+  #(model, Nil, server)
 }
-pub fn view(model: Model) { model }
+pub fn view(model: Model, _local: Nil) { model }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert True = analysis.has_server
@@ -66,7 +66,7 @@ pub fn view(model: Model) { model }
     list.any(analysis.model_fields, fn(f) { f.name == "db_url" })
 }
 
-pub fn app_with_server_detects_has_server_flag_test() {
+pub fn server_state_detects_has_server_flag_test() {
   let source =
     "
 pub type Model {
@@ -78,16 +78,16 @@ pub type Server {
 pub type Msg {
   Inc
 }
-pub fn update(model: Model, msg: Msg) -> Model {
-  model
+pub fn update(model: Model, _local: Nil, server: Server, _msg: Msg) -> #(Model, Nil, Server) {
+  #(model, Nil, server)
 }
-pub fn view(model: Model) { model }
+pub fn view(model: Model, _local: Nil) { model }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert True = analysis.has_server
 }
 
-pub fn app_with_local_detects_has_local_flag_test() {
+pub fn local_state_detects_has_local_flag_test() {
   let source =
     "
 pub type Model {
@@ -100,8 +100,8 @@ pub type Msg {
   Inc
   SetInput(String)
 }
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  #(model, local)
+pub fn update(model: Model, local: Local, _server: Nil, _msg: Msg) -> #(Model, Local, Nil) {
+  #(model, local, Nil)
 }
 pub fn view(model: Model, local: Local) { model }
 "
@@ -282,6 +282,96 @@ pub type Item {
     list.any(analysis.server_fields, fn(f) { f.name == "db_pool" })
   let assert False =
     list.any(analysis.model_fields, fn(f) { f.name == "db_pool" })
+}
+
+pub fn multi_file_imported_model_msg_and_server_are_primary_contract_test() {
+  let app_source =
+    "
+import app/model
+import app/msg
+import app/server_state
+
+pub fn view(model: model.Model, _local: Nil) { model }
+pub fn update(
+  model: model.Model,
+  _local: Nil,
+  server: server_state.ServerState,
+  _msg: msg.Msg,
+) -> #(model.Model, Nil, server_state.ServerState) {
+  #(model, Nil, server)
+}
+"
+  let model_source =
+    "
+pub type Model {
+  Model(count: Int, title: String)
+}
+"
+  let msg_source =
+    "
+pub type Msg {
+  Inc
+  SetTitle(String)
+}
+"
+  let server_source =
+    "
+pub type ServerState {
+  ServerState(secret: String)
+}
+"
+
+  let assert Ok(analysis) =
+    analyzer.analyze_multi(app_source, [
+      #("model", "app/model", model_source),
+      #("msg", "app/msg", msg_source),
+      #("server_state", "app/server_state", server_source),
+    ])
+
+  let assert True = analysis.has_model
+  let assert "model" = analysis.model_module
+  let assert True = list.any(analysis.model_fields, fn(f) { f.name == "count" })
+  let assert True = list.any(analysis.model_fields, fn(f) { f.name == "title" })
+  let assert "msg" = analysis.msg_module
+  let assert True = list.any(analysis.msg_variants, fn(v) { v.name == "Inc" })
+  let assert True =
+    list.any(analysis.msg_variants, fn(v) { v.name == "SetTitle" })
+  let assert True = analysis.has_server
+  let assert "server_state" = analysis.server_module
+  let assert Ok(True) = build.can_build_enhanced_bundle(app_source, analysis)
+}
+
+pub fn multi_file_imported_contract_requires_public_view_test() {
+  let app_source =
+    "
+import app/model
+import app/msg
+
+fn view(model: model.Model, _local: Nil) { model }
+"
+  let model_source =
+    "
+pub type Model {
+  Model(count: Int)
+}
+"
+  let msg_source =
+    "
+pub type Msg {
+  Inc
+}
+"
+
+  let assert Ok(analysis) =
+    analyzer.analyze_multi(app_source, [
+      #("model", "app/model", model_source),
+      #("msg", "app/msg", msg_source),
+    ])
+
+  let assert True = analysis.has_model
+  let assert "model" = analysis.model_module
+  let assert "msg" = analysis.msg_module
+  let assert Ok(False) = build.can_build_enhanced_bundle(app_source, analysis)
 }
 
 // === Substate Tests ===

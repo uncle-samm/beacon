@@ -56,7 +56,7 @@ fn pages() -> List(route.Page(Model, Msg)) {
 }
 
 pub fn main() {
-  beacon.app(init, update, view)
+  beacon.app(init, beacon.no_local, beacon.no_server, update, view)
   |> beacon.route_pages(pages())
   |> beacon.start(8080)
 }
@@ -95,7 +95,7 @@ fn pages() -> List(route.Page(Model, Msg)) {
   ]
 }
 
-beacon.app(init, update, view)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 |> beacon.route_pages(pages())
 |> beacon.start(8080)
 ```
@@ -150,35 +150,41 @@ pub type Msg {
   Counter(counter.Msg)
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
+pub fn update(model: Model, _local: Nil, _server: Nil, msg: Msg) -> #(Model, Nil, Nil) {
   case msg {
-    RouteChanged(path) -> Model(..model, path: path)
-    Counter(child_msg) ->
-      route.update_model(
+    RouteChanged(path) -> #(Model(..model, path: path), Nil, Nil)
+    Counter(child_msg) -> {
+      let model = route.update_model(
         model,
         child_msg,
         fn(model) { model.counter },
         fn(model, counter) { Model(..model, counter: counter) },
         counter.update,
       )
+      #(model, Nil, Nil)
+    }
   }
 }
 
-fn pages() -> List(route.Page(Model, Msg)) {
+fn pages() -> List(route.Page(#(Model, Nil, Nil), Msg)) {
   [
     counter.page(
       fn(r) { RouteChanged(r.path) },
-      fn(model) { model.counter },
+      fn(state) {
+        let #(model, _local, _server) = state
+        model.counter
+      },
       Counter,
     ),
   ]
 }
 ```
 
-For `app_with_local`, use the same pattern with `route.Page(#(Model, Local), Msg)`
-and select the route-local value from the tuple.
+For Local state, use the same pattern with
+`route.Page(#(Model, Local, Nil), Msg)` and select the route-local value from
+the tuple.
 
-For `app_with_server`, the root app embeds route server state in its own
+For `Server state`, the root app embeds route server state in its own
 `Server` and uses `route.update_server_model` to update the child model and
 child server value together. The route module may define `pub type Server`,
 `init_server`, and `update_server`, but the generated client bundle strips those

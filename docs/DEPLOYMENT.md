@@ -23,7 +23,7 @@ This generates `priv/static/beacon_client_<hash>.js` and `beacon_client.manifest
 Always set an explicit key in production. The auto-generated key changes on restart, invalidating all tokens:
 
 ```gleam
-beacon.app(init, update, view)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 |> beacon.secret_key(config.secret_key())
 |> beacon.start(config.port())
 ```

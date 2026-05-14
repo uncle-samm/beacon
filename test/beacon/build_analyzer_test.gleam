@@ -110,7 +110,8 @@ pub fn view(model: Model) { model }
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert 2 = list.length(analysis.msg_variants)
   let assert 1 = list.length(analysis.client_msg_variants)
-  let assert "Increment" = find_variant(analysis.client_msg_variants, "Increment").name
+  let assert "Increment" =
+    find_variant(analysis.client_msg_variants, "Increment").name
 }
 
 pub fn state_diagnostics_describe_model_local_server_shape_test() {
@@ -182,8 +183,8 @@ pub fn extracts_model_fields_test() {
 pub type Model { Model(count: Int) }
 pub type Local { Local(input: String, menu_open: Bool) }
 pub type Msg { Increment }
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg { Increment -> #(Model(count: model.count + 1), local) }
+pub fn update(model: Model, local: Local, _server: Nil, msg: Msg) -> #(Model, Local, Nil) {
+  case msg { Increment -> #(Model(count: model.count + 1), local, Nil) }
 }
 pub fn view(model: Model, local: Local) { model }
 "
@@ -219,9 +220,9 @@ pub type Model { Model(count: Int) }
 pub type Local { Local(input: String) }
 pub type Msg { Increment }
 pub fn init_local(_m: Model) -> Local { Local(input: \"\") }
-pub fn make_update(store) -> fn(Model, Local, Msg) -> #(Model, Local) {
-  fn(model, local, msg) {
-    case msg { Increment -> #(Model(count: model.count + 1), local) }
+pub fn make_update(store) -> fn(Model, Local, Nil, Msg) -> #(Model, Local, Nil) {
+  fn(model, local, _server, msg) {
+    case msg { Increment -> #(Model(count: model.count + 1), local, Nil) }
   }
 }
 pub fn view(model: Model, local: Local) { model }

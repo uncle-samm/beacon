@@ -7,15 +7,17 @@ Beacon has three state layers: **Shared** (cross-user), **Server** (per-session)
 Each browser tab gets its own BEAM process holding the Model. Updates go through the server.
 
 ```gleam
-beacon.app(init, update, view) |> beacon.start(8080)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view) |> beacon.start(8080)
 ```
 
 ## Local State (Zero Traffic)
 
-Split state into Model (server-synced) and Local (instant, no network). `update` receives `(model, local, msg)` and returns `#(model, local)`. Messages that only change Local run in the browser.
+Split state into Model (server-synced) and Local (instant, no network).
+`update` always receives `(model, local, server, msg)` and returns
+`#(model, local, server)`. Messages that only change Local run in the browser.
 
 ```gleam
-beacon.app_with_local(init, init_local, update, view) |> beacon.start(8080)
+beacon.app(init, init_local, beacon.no_server, update, view) |> beacon.start(8080)
 ```
 
 ## Shared State (Store)
@@ -59,7 +61,7 @@ pubsub.unsubscribe("chat:lobby")
 Subscribe to topics derived from the model. The framework diffs subscriptions after each update.
 
 ```gleam
-beacon.app(init, update, view)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 |> beacon.subscriptions(fn(model) { ["room:" <> model.current_room] })
 |> beacon.on_notify(fn(topic) { RoomUpdated(topic) })
 |> beacon.start(8080)

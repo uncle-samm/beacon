@@ -55,8 +55,13 @@ pub fn init_local(_model: Model) -> Local {
 
 // --- Update (pure — compiles to JS) ---
 
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg {
+pub fn update(
+  model: Model,
+  local: Local,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Local, Nil) {
+  let #(model, local) = case msg {
     SetInput(text) -> #(Model(..model, input_text: text), local)
 
     SetFilter(f) -> #(model, Local(filter: f))
@@ -69,10 +74,9 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
           let new_todo = Todo(id: model.next_id, text: title, completed: False)
           #(
             Model(
-              ..model,
               todos: list.append(model.todos, [new_todo]),
-              next_id: model.next_id + 1,
               input_text: "",
+              next_id: model.next_id + 1,
             ),
             local,
           )
@@ -134,15 +138,16 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
       #(Model(..model, todos: todos, next_id: next_id), local)
     }
   }
+  #(model, local, Nil)
 }
 
 // --- Side Effects ---
 
 fn make_on_update(
   todo_store: store.ListStore(Todo),
-) -> fn(#(Model, Local), Msg) -> effect.Effect(Msg) {
-  fn(state: #(Model, Local), msg: Msg) -> effect.Effect(Msg) {
-    let #(model, _local) = state
+) -> fn(#(Model, Local, Nil), Msg) -> effect.Effect(Msg) {
+  fn(state: #(Model, Local, Nil), msg: Msg) -> effect.Effect(Msg) {
+    let #(model, _local, _server) = state
     case msg {
       AddTodo | ToggleTodo(_) | DeleteTodo(_) | ClearCompleted -> {
         effect.from(fn(_dispatch) {
@@ -348,7 +353,13 @@ pub fn start() {
     Model(todos: todos, input_text: "", next_id: next_id)
   }
 
-  beacon.app_with_local(init_from_store, init_local, update, view)
+  beacon.app(
+    fn() { #(init_from_store(), effect.none()) },
+    init_local,
+    beacon.no_server,
+    update,
+    view,
+  )
   |> beacon.title("Todo App")
   |> beacon.on_update(make_on_update(todo_store))
   |> beacon.subscriptions(fn(_model) { ["todo:updated"] })

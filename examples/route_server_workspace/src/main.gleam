@@ -25,12 +25,15 @@ pub type Msg {
   Settings(settings.Msg)
 }
 
-pub fn init() -> Model {
-  Model(
-    path: "/",
-    accounts: accounts.init(),
-    settings: settings.init(),
-    visits: 0,
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(
+    Model(
+      path: "/",
+      accounts: accounts.init(),
+      settings: settings.init(),
+      visits: 0,
+    ),
+    effect.none(),
   )
 }
 
@@ -40,14 +43,15 @@ pub fn init_server() -> Server {
 
 pub fn update(
   model: Model,
+  _local: Nil,
   server: Server,
   msg: Msg,
-) -> #(Model, Server, effect.Effect(Msg)) {
+) -> #(Model, Nil, Server) {
   case msg {
     RouteChanged(path) -> #(
       Model(..model, path: path, visits: model.visits + 1),
+      Nil,
       server,
-      effect.none(),
     )
 
     Accounts(child_msg) -> {
@@ -66,7 +70,7 @@ pub fn update(
           },
           accounts.update_server,
         )
-      #(model, server, effect.none())
+      #(model, Nil, server)
     }
 
     Settings(child_msg) -> {
@@ -85,12 +89,12 @@ pub fn update(
           },
           settings.update_server,
         )
-      #(model, server, effect.none())
+      #(model, Nil, server)
     }
   }
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   // Invariant: route_pages validates paths before `RouteChanged` is dispatched.
   let assert Ok(page) = route.dispatch_view(pages(), model, model.path)
   html.main(
@@ -127,20 +131,20 @@ fn pages() -> List(route.Page(Model, Msg)) {
   ]
 }
 
-fn server_pages() -> List(route.Page(#(Model, Server), Msg)) {
+fn server_pages() -> List(route.Page(#(Model, Nil, Server), Msg)) {
   [
     accounts.page(
       fn(r: route.Route) { RouteChanged(r.path) },
-      fn(state: #(Model, Server)) {
-        let #(model, _server) = state
+      fn(state: #(Model, Nil, Server)) {
+        let #(model, _local, _server) = state
         model.accounts
       },
       Accounts,
     ),
     settings.page(
       fn(r: route.Route) { RouteChanged(r.path) },
-      fn(state: #(Model, Server)) {
-        let #(model, _server) = state
+      fn(state: #(Model, Nil, Server)) {
+        let #(model, _local, _server) = state
         model.settings
       },
       Settings,
@@ -153,7 +157,7 @@ fn int_to_string(value: Int) -> String {
 }
 
 pub fn main() {
-  beacon.app_with_server(init, init_server, update, view)
+  beacon.app(init, beacon.no_local, init_server, update, view)
   |> beacon.title("Route Server Workspace")
   |> beacon.route_pages(server_pages())
   |> beacon.start(8080)

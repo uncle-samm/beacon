@@ -4,7 +4,6 @@
 /// - Shared store for game state (all players see same board)
 /// - Per-connection state (each player has their own snake)
 /// - Collision detection (walls, self)
-
 import beacon
 import beacon/effect
 import beacon/html
@@ -82,12 +81,17 @@ pub fn init() -> Model {
 
 // --- Update ---
 
-pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
-  case msg {
+pub fn update(
+  model: Model,
+  _local: Nil,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Nil, Nil) {
+  let model = case msg {
     Tick -> {
       case model.game_state {
-        GameOver -> #(model, effect.none())
-        Playing -> #(advance_snake(model), effect.none())
+        GameOver -> model
+        Playing -> advance_snake(model)
       }
     }
 
@@ -98,8 +102,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
         _, _ -> True
       }
       case valid {
-        True -> #(Model(..model, direction: dir), effect.none())
-        False -> #(model, effect.none())
+        True -> Model(..model, direction: dir)
+        False -> model
       }
     }
 
@@ -108,41 +112,30 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
       let new_food = next_food(new_snake, model.score + 1)
       // Don't start a new timer — the existing one from SetName still runs.
       // Just reset the game state. The Tick handler checks game_state.
-      #(
-        Model(
-          ..model,
-          snake: new_snake,
-          direction: Right,
-          food: new_food,
-          score: 0,
-          game_state: Playing,
-          high_score_pending: False,
-        ),
-        effect.none(),
+      Model(
+        ..model,
+        snake: new_snake,
+        direction: Right,
+        food: new_food,
+        score: 0,
+        game_state: Playing,
+        high_score_pending: False,
       )
     }
 
-    UpdateNameInput(text) -> #(
-      Model(..model, name_input: text),
-      effect.none(),
-    )
+    UpdateNameInput(text) -> Model(..model, name_input: text)
 
     SetName -> {
       let name = string.trim(model.name_input)
       case string.is_empty(name) {
-        True -> #(model, effect.none())
-        False -> #(
-          Model(..model, player_name: name, has_name: True),
-          effect.every(150, fn() { Tick }),
-        )
+        True -> model
+        False -> Model(..model, player_name: name, has_name: True)
       }
     }
 
-    HighScoreUpdated -> #(
-      Model(..model, high_score_pending: False),
-      effect.none(),
-    )
+    HighScoreUpdated -> Model(..model, high_score_pending: False)
   }
+  #(model, Nil, Nil)
 }
 
 fn advance_snake(model: Model) -> Model {
@@ -181,12 +174,7 @@ fn advance_snake(model: Model) -> Model {
             True -> next_food(new_snake, new_score)
             False -> model.food
           }
-          Model(
-            ..model,
-            snake: new_snake,
-            food: new_food,
-            score: new_score,
-          )
+          Model(..model, snake: new_snake, food: new_food, score: new_score)
         }
       }
     }
@@ -213,9 +201,15 @@ fn next_food(snake: List(Point), seed: Int) -> Point {
 
 fn make_on_update(
   high_scores: store.ListStore(String),
-) -> fn(Model, Msg) -> effect.Effect(Msg) {
-  fn(model: Model, msg: Msg) -> effect.Effect(Msg) {
+) -> fn(#(Model, Nil, Nil), Msg) -> effect.Effect(Msg) {
+  fn(state: #(Model, Nil, Nil), msg: Msg) -> effect.Effect(Msg) {
+    let model = state.0
     case msg, model.high_score_pending {
+      SetName, _ ->
+        case model.has_name {
+          True -> effect.every(150, fn() { Tick })
+          False -> effect.none()
+        }
       Tick, True ->
         effect.from(fn(dispatch) {
           let entry = model.player_name <> ": " <> int.to_string(model.score)
@@ -229,7 +223,7 @@ fn make_on_update(
 
 // --- View ---
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   case model.has_name {
     False -> view_name_entry(model)
     True -> view_game(model)
@@ -280,9 +274,7 @@ fn view_game(model: Model) -> beacon.Node(Msg) {
       html.h1([], [html.text("Snake — " <> model.player_name)]),
       html.p([], [
         html.text(
-          "Score: "
-          <> int.to_string(model.score)
-          <> " | Use arrow keys",
+          "Score: " <> int.to_string(model.score) <> " | Use arrow keys",
         ),
       ]),
       // Game board
@@ -313,14 +305,8 @@ fn view_game(model: Model) -> beacon.Node(Msg) {
               html.element(
                 "text",
                 [
-                  html.attribute(
-                    "x",
-                    int.to_string(grid_w * cell_size / 2),
-                  ),
-                  html.attribute(
-                    "y",
-                    int.to_string(grid_h * cell_size / 2),
-                  ),
+                  html.attribute("x", int.to_string(grid_w * cell_size / 2)),
+                  html.attribute("y", int.to_string(grid_h * cell_size / 2)),
                   html.attribute("text-anchor", "middle"),
                   html.attribute("fill", "white"),
                   html.attribute("font-size", "32"),
@@ -371,8 +357,10 @@ pub fn main() {
 pub fn start() {
   let high_scores = store.new_list("snake_scores")
 
-  beacon.app_with_effects(
+  beacon.app(
     fn() { #(init(), effect.none()) },
+    beacon.no_local,
+    beacon.no_server,
     update,
     view,
   )

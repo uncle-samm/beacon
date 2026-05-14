@@ -15,8 +15,8 @@ import gleam/dynamic/decode
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: counter.Model) -> String {
-  let model = state
+pub fn encode_model(state: #(counter.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("count", json.int(model.count)),
   ])
@@ -24,21 +24,23 @@ pub fn encode_model(state: counter.Model) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: counter.Model) -> String {
-  let model = state
-  counter.view(model)
+pub fn render_model(state: #(counter.Model, Nil, Nil)) -> String {
+  let model = state.0
+  let local = Nil
+  counter.view(model, local)
   |> element.to_string
 }
 
-/// Decode a Model from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(counter.Model, String) {
-  let model_decoder = {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(counter.Model, Nil, Nil), String) {
+  let state_decoder = {
     use count <- decode.field("count", decode.int)
-    decode.success(counter.Model(count: count))
+
+    decode.success(#(counter.Model(count: count), Nil, Nil))
   }
-  case json.parse(json_str, model_decoder) {
-    Ok(model) -> Ok(model)
-    Error(_) -> Error("Failed to decode model")
+  case json.parse(json_str, state_decoder) {
+    Ok(state) -> Ok(state)
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 

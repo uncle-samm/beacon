@@ -40,8 +40,8 @@ fn server_decode_board_column_value(s: String) -> board.Column {
 }
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: app.Model) -> String {
-  let model = state
+pub fn encode_model(state: #(app.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("cards", json.array(model.cards, encode_board_card)),
     #("next_id", json.int(model.next_id)),
@@ -52,24 +52,26 @@ pub fn encode_model(state: app.Model) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: app.Model) -> String {
-  let model = state
-  app.view(model)
+pub fn render_model(state: #(app.Model, Nil, Nil)) -> String {
+  let model = state.0
+  let local = Nil
+  app.view(model, local)
   |> element.to_string
 }
 
-/// Decode a Model from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(app.Model, String) {
-  let model_decoder = {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(app.Model, Nil, Nil), String) {
+  let state_decoder = {
     use cards <- decode.field("cards", decode.list(server_decode_board_card()))
     use next_id <- decode.field("next_id", decode.int)
     use input <- decode.field("input", decode.string)
     use dragging_id <- decode.field("dragging_id", decode.int)
-    decode.success(app.Model(cards: cards, next_id: next_id, input: input, dragging_id: dragging_id))
+
+    decode.success(#(app.Model(cards: cards, next_id: next_id, input: input, dragging_id: dragging_id), Nil, Nil))
   }
-  case json.parse(json_str, model_decoder) {
-    Ok(model) -> Ok(model)
-    Error(_) -> Error("Failed to decode model")
+  case json.parse(json_str, state_decoder) {
+    Ok(state) -> Ok(state)
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 
@@ -160,8 +162,8 @@ fn decode_msg(json_str: String) -> Result(app.Msg, String) {
   }
 }
 
-pub fn encode_substate_cards(state: app.Model) -> String {
-  let model = state
+pub fn encode_substate_cards(state: #(app.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.array(model.cards, encode_board_card)
   |> json.to_string
 }
@@ -170,8 +172,8 @@ pub fn substate_names() -> List(String) {
   ["cards"]
 }
 
-pub fn encode_flat_fields(state: app.Model) -> String {
-  let model = state
+pub fn encode_flat_fields(state: #(app.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("next_id", json.int(model.next_id)),
     #("input", json.string(model.input)),

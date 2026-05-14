@@ -25,6 +25,7 @@ Minimal app:
 
 ```gleam
 import beacon
+import beacon/effect
 import beacon/html
 import gleam/int
 
@@ -36,35 +37,33 @@ pub type Msg {
   Increment
 }
 
-pub fn init() -> Model {
-  Model(count: 0)
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(Model(count: 0), effect.none())
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
+pub fn update(model: Model, _local: Nil, _server: Nil, msg: Msg) -> #(Model, Nil, Nil) {
   case msg {
-    Increment -> Model(count: model.count + 1)
+    Increment -> #(Model(count: model.count + 1), Nil, Nil)
   }
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   html.button([beacon.on_click(Increment)], [
     html.text("Count: " <> int.to_string(model.count)),
   ])
 }
 
 pub fn main() {
-  beacon.app(init, update, view)
+  beacon.app(init, beacon.no_local, beacon.no_server, update, view)
   |> beacon.start(8080)
 }
 ```
 
 ## Recommended APIs
 
-- Use `beacon.app(init, update, view)` for model-only apps.
-- Use `beacon.app_with_local(init, init_local, update, view)` when you define
-  per-tab `Local` state.
-- Use `beacon.app_with_server(init, init_server, update, view)` when you need
-  private server state that must not ship to the browser.
+- Use one constructor: `beacon.app(init, init_local, init_server, update, view)`.
+- Use `beacon.no_local` when the app has no per-tab `Local` state.
+- Use `beacon.no_server` when the app has no private `Server` state.
 - Use `beacon.route_pages([...])` for routed apps.
 - Use `beacon/api.routes`, `api.json_value`, `api.read_text`, and
   `api.read_form` for API routes.

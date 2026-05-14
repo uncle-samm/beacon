@@ -6,16 +6,16 @@
 ///   /admin/*    → requires X-Admin header (protected by middleware)
 ///   /api/*      → adds X-Api-Version header
 ///   /healthz    → health check endpoint (exact match)
-
 import beacon
+import beacon/effect
 import beacon/html
 import beacon/middleware
+import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
 import gleam/bytes_tree
 import gleam/http
 import gleam/http/request
 import gleam/http/response
 import gleam/int
-import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
 
 pub type Model {
   Model(count: Int, page: String)
@@ -27,45 +27,78 @@ pub type Msg {
   Navigate(String)
 }
 
-pub fn init() -> Model {
-  Model(count: 0, page: "home")
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(Model(count: 0, page: "home"), effect.none())
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
-  case msg {
+pub fn update(
+  model: Model,
+  _local: Nil,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Nil, Nil) {
+  let model = case msg {
     Increment -> Model(..model, count: model.count + 1)
     Decrement -> Model(..model, count: model.count - 1)
     Navigate(page) -> Model(..model, page: page)
   }
+  #(model, Nil, Nil)
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   html.div(
-    [html.style("font-family:system-ui;max-width:700px;margin:2rem auto;padding:0 1rem")],
+    [
+      html.style(
+        "font-family:system-ui;max-width:700px;margin:2rem auto;padding:0 1rem",
+      ),
+    ],
     [
       html.h1([], [html.text("Middleware Demo")]),
       html.p([html.style("color:#666")], [
-        html.text("Route-scoped middleware: only(), except(), at(), methods(), group()"),
+        html.text(
+          "Route-scoped middleware: only(), except(), at(), methods(), group()",
+        ),
       ]),
       // Counter
-      html.div([html.style("margin:1.5rem 0;padding:1rem;background:#f5f5f5;border-radius:8px")], [
-        html.h2([], [html.text("Counter: " <> int.to_string(model.count))]),
-        html.button(
-          [beacon.on_click(Decrement), html.style("padding:8px 16px;margin-right:8px;border:none;border-radius:4px;cursor:pointer")],
-          [html.text("-")],
-        ),
-        html.button(
-          [beacon.on_click(Increment), html.style("padding:8px 16px;border:none;border-radius:4px;cursor:pointer")],
-          [html.text("+")],
-        ),
-      ]),
+      html.div(
+        [
+          html.style(
+            "margin:1.5rem 0;padding:1rem;background:#f5f5f5;border-radius:8px",
+          ),
+        ],
+        [
+          html.h2([], [html.text("Counter: " <> int.to_string(model.count))]),
+          html.button(
+            [
+              beacon.on_click(Decrement),
+              html.style(
+                "padding:8px 16px;margin-right:8px;border:none;border-radius:4px;cursor:pointer",
+              ),
+            ],
+            [html.text("-")],
+          ),
+          html.button(
+            [
+              beacon.on_click(Increment),
+              html.style(
+                "padding:8px 16px;border:none;border-radius:4px;cursor:pointer",
+              ),
+            ],
+            [html.text("+")],
+          ),
+        ],
+      ),
       // Middleware info
       html.div([html.style("margin-top:1.5rem")], [
         html.h2([], [html.text("Active Middleware")]),
         html.ul([], [
           html.li([], [html.text("Logger — global, all requests")]),
-          html.li([], [html.text("Admin auth — only /admin/* (checks X-Admin header)")]),
-          html.li([], [html.text("API versioning — only /api/* (adds X-Api-Version)")]),
+          html.li([], [
+            html.text("Admin auth — only /admin/* (checks X-Admin header)"),
+          ]),
+          html.li([], [
+            html.text("API versioning — only /api/* (adds X-Api-Version)"),
+          ]),
           html.li([], [html.text("POST rate limit — only POST/PUT methods")]),
           html.li([], [html.text("Health check — exact match /healthz")]),
         ]),
@@ -85,7 +118,9 @@ fn require_admin() -> middleware.Middleware {
       Ok("true") -> next(req)
       _ ->
         response.new(403)
-        |> response.set_body(Bytes(bytes_tree.from_string("Forbidden: admin access required")))
+        |> response.set_body(
+          Bytes(bytes_tree.from_string("Forbidden: admin access required")),
+        )
     }
   }
 }
@@ -125,7 +160,7 @@ fn block_writes() -> middleware.Middleware {
 }
 
 pub fn main() {
-  beacon.app(init, update, view)
+  beacon.app(init, beacon.no_local, beacon.no_server, update, view)
   |> beacon.title("Middleware Demo")
   // Global: logger on all requests
   |> beacon.with_middleware(middleware.logger())
@@ -136,8 +171,9 @@ pub fn main() {
   // /api/*: adds version header
   |> beacon.with_middleware(middleware.only("/api", api_version()))
   // POST/PUT on /api: blocked (demo of method + path combo)
-  |> beacon.with_middleware(
-    middleware.only("/api", middleware.methods([http.Post, http.Put], block_writes())),
-  )
+  |> beacon.with_middleware(middleware.only(
+    "/api",
+    middleware.methods([http.Post, http.Put], block_writes()),
+  ))
   |> beacon.start(8080)
 }

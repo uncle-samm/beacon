@@ -106,8 +106,13 @@ pub fn init_local(_model: Model) -> Local {
 
 // --- Update (pure — no stores, no side effects) ---
 
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg {
+pub fn update(
+  model: Model,
+  local: Local,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Local, Nil) {
+  let #(model, local) = case msg {
     UpdateInput(text) -> #(Model(..model, new_card_input: text), local)
 
     AddCard -> {
@@ -170,15 +175,16 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
       local,
     )
   }
+  #(model, local, Nil)
 }
 
 // --- Side Effects (server only — store writes) ---
 
 fn make_on_update(
   card_store: store.ListStore(Card),
-) -> fn(#(Model, Local), Msg) -> effect.Effect(Msg) {
-  fn(state: #(Model, Local), msg: Msg) -> effect.Effect(Msg) {
-    let #(model, _local) = state
+) -> fn(#(Model, Local, Nil), Msg) -> effect.Effect(Msg) {
+  fn(state: #(Model, Local, Nil), msg: Msg) -> effect.Effect(Msg) {
+    let #(model, _local, _server) = state
     case msg {
       AddCard | DropOnColumn(_) | DeleteCard(_) ->
         // Write full card list to shared store and notify other users
@@ -367,7 +373,13 @@ pub fn start() {
     Model(cards: cards, next_id: next_id, new_card_input: "", dragging_id: -1)
   }
 
-  beacon.app_with_local(init_from_store, init_local, update, view)
+  beacon.app(
+    fn() { #(init_from_store(), effect.none()) },
+    init_local,
+    beacon.no_server,
+    update,
+    view,
+  )
   |> beacon.title("Kanban Board")
   |> beacon.on_update(make_on_update(card_store))
   |> beacon.subscriptions(fn(_model) { ["kanban:cards"] })

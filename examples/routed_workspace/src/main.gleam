@@ -1,4 +1,5 @@
 import beacon
+import beacon/effect
 import beacon/html
 import beacon/log
 import beacon/route
@@ -55,21 +56,24 @@ pub type Msg {
   SaveProfile(String)
 }
 
-pub fn init() -> Model {
-  Model(
-    path: "/",
-    open_tickets: 7,
-    deploys: 3,
-    incidents: 1,
-    cards: [
-      Card(id: 1, title: "Add browser conformance checks", lane: "doing"),
-      Card(id: 2, title: "Verify server-private state", lane: "todo"),
-      Card(id: 3, title: "Document native browser workflow", lane: "done"),
-    ],
-    next_id: 4,
-    display_name: "Ada",
-    role: "owner",
-    saved_version: 1,
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(
+    Model(
+      path: "/",
+      open_tickets: 7,
+      deploys: 3,
+      incidents: 1,
+      cards: [
+        Card(id: 1, title: "Add browser conformance checks", lane: "doing"),
+        Card(id: 2, title: "Verify server-private state", lane: "todo"),
+        Card(id: 3, title: "Document native browser workflow", lane: "done"),
+      ],
+      next_id: 4,
+      display_name: "Ada",
+      role: "owner",
+      saved_version: 1,
+    ),
+    effect.none(),
   )
 }
 
@@ -86,8 +90,13 @@ pub fn init_local(model: Model) -> Local {
   )
 }
 
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg {
+pub fn update(
+  model: Model,
+  local: Local,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Local, Nil) {
+  let #(model, local) = case msg {
     RouteChanged(path) -> #(Model(..model, path: path), local)
     ToggleInspector -> #(
       model,
@@ -156,6 +165,7 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
       }
     }
   }
+  #(model, local, Nil)
 }
 
 fn advance_card(card: Card, id: Int) -> Card {
@@ -176,7 +186,7 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
   // Invariant: `model.path` is initialized to "/" and later updated only from
   // `route_pages()` entries through RouteChanged.
   let assert Ok(page) =
-    route.dispatch_view(pages(), #(model, local), model.path)
+    route.dispatch_view(pages(), #(model, local, Nil), model.path)
   page
 }
 
@@ -509,35 +519,35 @@ fn bool_text(value: Bool) -> String {
 }
 
 pub fn main() {
-  beacon.app_with_local(init, init_local, update, view)
+  beacon.app(init, init_local, beacon.no_server, update, view)
   |> beacon.title("Beacon Routed Workspace")
   |> beacon.route_pages(pages())
   |> beacon.start(8080)
 }
 
-fn pages() -> List(route.Page(#(Model, Local), Msg)) {
+fn pages() -> List(route.Page(#(Model, Local, Nil), Msg)) {
   [
     route.page(
       "/",
       fn(r: route.Route) { RouteChanged(r.path) },
-      fn(state: #(Model, Local), route) {
-        let #(model, local) = state
+      fn(state: #(Model, Local, Nil), route) {
+        let #(model, local, _server) = state
         shell(route.path, [overview_view(model, local)])
       },
     ),
     route.page(
       "/pipeline",
       fn(r: route.Route) { RouteChanged(r.path) },
-      fn(state: #(Model, Local), route) {
-        let #(model, local) = state
+      fn(state: #(Model, Local, Nil), route) {
+        let #(model, local, _server) = state
         shell(route.path, [pipeline_view(model, local)])
       },
     ),
     route.page(
       "/settings",
       fn(r: route.Route) { RouteChanged(r.path) },
-      fn(state: #(Model, Local), route) {
-        let #(model, local) = state
+      fn(state: #(Model, Local, Nil), route) {
+        let #(model, local, _server) = state
         shell(route.path, [settings_view(model, local)])
       },
     ),

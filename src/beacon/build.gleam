@@ -20,21 +20,27 @@ import simplifile
 pub fn build_from_source(path: String) -> Nil {
   // Clean stale codec artifacts to prevent type mismatches between apps
   case clean_codec_artifacts() {
-    Error(reason) -> log.error("beacon.build", reason)
+    Error(reason) -> {
+      log.error("beacon.build", reason)
+      exit_failure(reason)
+    }
     Ok(Nil) ->
       case simplifile.read(path) {
         Ok(source) -> {
           log.info("beacon.build", "Auto-building: " <> path)
           case compile_module(path, source) {
             Ok(Nil) -> Nil
-            Error(reason) -> log.error("beacon.build", reason)
+            Error(reason) -> {
+              log.error("beacon.build", reason)
+              exit_failure(reason)
+            }
           }
         }
-        Error(err) ->
-          log.error(
-            "beacon.build",
-            "Cannot read " <> path <> ": " <> string.inspect(err),
-          )
+        Error(err) -> {
+          let reason = "Cannot read " <> path <> ": " <> string.inspect(err)
+          log.error("beacon.build", reason)
+          exit_failure(reason)
+        }
       }
   }
 }
@@ -42,7 +48,10 @@ pub fn build_from_source(path: String) -> Nil {
 fn log_compile_result(result: Result(Nil, String)) -> Nil {
   case result {
     Ok(Nil) -> Nil
-    Error(reason) -> log.error("beacon.build", reason)
+    Error(reason) -> {
+      log.error("beacon.build", reason)
+      exit_failure(reason)
+    }
   }
 }
 
@@ -465,16 +474,24 @@ fn compile_module(path: String, source: String) -> Result(Nil, String) {
 
       use Nil <- result_try(analyzer.validate_client_update_purity(source))
       use Nil <- result_try(validate_event_contract(analysis))
+      use enhanced_supported <- result_try(can_build_enhanced_bundle(
+        source,
+        analysis,
+      ))
+      case enhanced_supported {
+        False -> Error(unsupported_client_bundle_shape_message())
+        True -> {
+          // Generate beacon_codec.gleam — model encoder for state-over-the-wire.
+          let module_path = extract_module_path(path)
+          use Nil <- result_try(write_contract_report(
+            path,
+            module_path,
+            analysis,
+          ))
+          generate_codec_module(module_path, analysis, source)
 
-      // Generate beacon_codec.gleam — model encoder for state-over-the-wire
-      let module_path = extract_module_path(path)
-      use Nil <- result_try(write_contract_report(path, module_path, analysis))
-      generate_codec_module(module_path, analysis, source)
-
-      case can_build_enhanced_bundle(source, analysis) {
-        Ok(True) -> {
-          // Build enhanced bundle: view + decode_model compiled to JS
-          // Required for state-over-the-wire — client renders view locally
+          // Build enhanced bundle: view + decode_model compiled to JS.
+          // Required for state-over-the-wire — client renders view locally.
           log.info("beacon.build", "Building enhanced bundle...")
           case build_enhanced_bundle(path, source, analysis) {
             Ok(Nil) -> {
@@ -490,8 +507,6 @@ fn compile_module(path: String, source: String) -> Result(Nil, String) {
             }
           }
         }
-        Ok(False) -> Error(unsupported_client_bundle_shape_message())
-        Error(reason) -> Error(reason)
       }
     }
     Error(reason) -> Error("Analysis failed: " <> reason)
@@ -614,9 +629,18 @@ fn resolve_sibling_sources(
 pub fn generate_codec() -> Result(Nil, String) {
   case analyze_app("src") {
     Ok(#(path, source, analysis)) -> {
-      let module_path = extract_module_path(path)
-      generate_codec_module(module_path, analysis, source)
-      Ok(Nil)
+      use enhanced_supported <- result_try(can_build_enhanced_bundle(
+        source,
+        analysis,
+      ))
+      case enhanced_supported {
+        False -> Error(unsupported_client_bundle_shape_message())
+        True -> {
+          let module_path = extract_module_path(path)
+          generate_codec_module(module_path, analysis, source)
+          Ok(Nil)
+        }
+      }
     }
     Error(reason) -> Error(reason)
   }
@@ -638,21 +662,25 @@ pub fn try_enhanced_bundle() -> Result(Nil, String) {
 }
 
 /// Determine whether the app shape supports an enhanced client bundle.
-/// Current codegen requires client-visible Model, Msg, and view. For
-/// app_with_server, update stays server-only and is intentionally omitted.
+/// Current codegen requires client-visible Model, Msg, and view. Client update
+/// code is only generated for Local apps without private Server state.
 pub fn can_build_enhanced_bundle(
   source: String,
   analysis: analyzer.Analysis,
 ) -> Result(Bool, String) {
-  use Nil <- result_try(analyzer.validate_client_update_purity(source))
   use Nil <- result_try(validate_event_contract(analysis))
-  case analyzer.extract_client_source(source) {
+  let update_required = analysis.has_local && !analysis.has_server
+  use Nil <- result_try(case update_required {
+    True -> analyzer.validate_client_update_purity(source)
+    False -> Ok(Nil)
+  })
+  case analyzer.extract_client_source_for_bundle(source, !analysis.has_server) {
     Ok(client_source) -> {
-      let has_model = string.contains(client_source, "pub type Model")
+      let has_model = analysis.has_model
       let has_msg = !list.is_empty(analysis.msg_variants)
-      let has_view = string.contains(client_source, "pub fn view")
-      let has_client_update = string.contains(client_source, "pub fn update")
-      let update_required = analysis.has_local && !analysis.has_server
+      let has_view = analysis.has_direct_view
+      let has_client_update =
+        string.contains(client_source, "pub fn update") && !analysis.has_server
       Ok(
         has_model
         && has_msg
@@ -891,10 +919,13 @@ fn build_enhanced_bundle(
   let beacon_root = find_beacon_root()
   let dir = "build/beacon_client_app"
 
-  use client_source <- result_try(case analyzer.extract_client_source(source) {
-    Ok(client_source) -> Ok(client_source)
-    Error(reason) -> Error("Source extraction failed: " <> reason)
-  })
+  let include_update = !analysis.has_server
+  use client_source <- result_try(
+    case analyzer.extract_client_source_for_bundle(source, include_update) {
+      Ok(client_source) -> Ok(client_source)
+      Error(reason) -> Error("Source extraction failed: " <> reason)
+    },
+  )
   use Nil <- result_try(delete_path_if_exists(dir))
   use Nil <- result_try(case create_build_directories(dir) {
     Ok(Nil) -> Ok(Nil)
@@ -972,7 +1003,8 @@ fn build_enhanced_bundle(
     },
   )
 
-  let has_client_update = string.contains(client_source, "pub fn update(")
+  let has_client_update =
+    string.contains(client_source, "pub fn update(") && !analysis.has_server
   let entry = generate_entry_point(analysis, source, has_client_update)
   use Nil <- result_try(
     case simplifile.write(dir <> "/src/beacon_app_entry.gleam", entry) {
@@ -1530,21 +1562,33 @@ fn generate_entry_point(
         Error(_) -> f.name <> ": " <> f.name
       }
     })
+  let model_prefix = client_constructor_prefix(analysis.model_module)
   let constructor_call =
-    "app.Model(" <> string.join(model_constructor_args, ", ") <> ")"
+    model_prefix
+    <> ".Model("
+    <> string.join(model_constructor_args, ", ")
+    <> ")"
 
-  // Determine view/init_local signatures based on has_local
+  // Determine init_local signature based on whether the app defines Local.
   // init_local tries app.init_local if available, otherwise returns stub
-  let #(init_local_fn, view_fn) = case analysis.has_local {
-    True -> #(
-      "pub fn init_local(model: app.Model) -> app.Local {\n  case True {\n    True -> app.init_local(model)\n    _ -> app.init_local(model)\n  }\n}",
-      "pub fn view_to_html(model: app.Model, local: app.Local) -> String {\n  element.to_string(app.view(model, local))\n}",
-    )
-    False -> #(
-      "pub fn init_local(_model: app.Model) -> Nil {\n  Nil\n}",
-      "pub fn view_to_html(model: app.Model, _local: Nil) -> String {\n  element.to_string(app.view(model))\n}",
-    )
+  let init_local_fn = case analysis.has_local {
+    True ->
+      "pub fn init_local(model: "
+      <> client_model_type(analysis)
+      <> ") -> "
+      <> client_local_type(analysis)
+      <> " {\n  case True {\n    True -> app.init_local(model)\n    _ -> app.init_local(model)\n  }\n}"
+    False ->
+      "pub fn init_local(_model: "
+      <> client_model_type(analysis)
+      <> ") -> Nil {\n  Nil\n}"
   }
+  let view_fn =
+    "pub fn view_to_html(model: "
+    <> client_model_type(analysis)
+    <> ", local: "
+    <> client_local_type(analysis)
+    <> ") -> String {\n  element.to_string(app.view(model, local))\n}"
 
   // Generate default model constructor with zero/empty values for init stub
   let default_model_args =
@@ -1553,7 +1597,7 @@ fn generate_entry_point(
       f.name <> ": " <> default_val
     })
   let default_model =
-    "app.Model(" <> string.join(default_model_args, ", ") <> ")"
+    model_prefix <> ".Model(" <> string.join(default_model_args, ", ") <> ")"
 
   // Generate external module imports for the entry point
   let entry_ext_imports = generate_external_imports(analysis, source, False)
@@ -1577,7 +1621,7 @@ import gleam/dynamic/decode
 import gleam/json
 " <> option_import <> entry_ext_imports_section <> "
 /// Stub init — the real model comes from server via model_sync.
-pub fn init() -> app.Model {
+pub fn init() -> " <> client_model_type(analysis) <> " {
   " <> default_model <> "
 }
 
@@ -1599,7 +1643,7 @@ pub fn resolve_handler(registry, handler_id: String, data: String) {
 " <> generate_update_and_classifier(analysis, has_client_update) <> "
 " <> custom_decoders_code <> "
 
-pub fn decode_model(json_str: String) -> Result(app.Model, String) {
+pub fn decode_model(json_str: String) -> Result(" <> client_model_type(analysis) <> ", String) {
   let model_decoder = {
 " <> decode_body <> "
     decode.success(" <> constructor_call <> ")
@@ -1699,7 +1743,7 @@ fn generate_client_encode_model(
   case analysis.has_local {
     False -> custom_encoders_code <> "
 /// Encode model to JSON string for patch diffing.
-pub fn encode_model(model: app.Model, _local: Nil) -> String {
+pub fn encode_model(model: " <> client_model_type(analysis) <> ", _local: Nil) -> String {
   json.object([
 " <> model_fields <> "
   ])
@@ -1716,7 +1760,9 @@ pub fn encode_model(model: app.Model, _local: Nil) -> String {
       custom_encoders_code <> "
 /// Encode model+local to JSON for patch diffing.
 /// Matches server model_sync format (both Model and Local fields).
-pub fn encode_model(model: app.Model, local: app.Local) -> String {
+pub fn encode_model(model: " <> client_model_type(analysis) <> ", local: " <> client_local_type(
+        analysis,
+      ) <> ") -> String {
   json.object([
 " <> all_fields <> "
   ])
@@ -1747,8 +1793,8 @@ fn generate_client_encode_msg(analysis: analyzer.Analysis) -> String {
   let top =
     generate_client_msg_encoder_fn(
       "encode_msg",
-      "app",
-      "app.Msg",
+      client_constructor_prefix(analysis.msg_module),
+      client_msg_type(analysis),
       client_event_variants(analysis),
       analysis,
       uses_client_msg_allowlist(analysis),
@@ -2086,12 +2132,22 @@ fn generate_update_and_classifier(
     False -> ""
     True -> {
       // Generate update function
-      let update_fn = case analysis.has_local {
-        True ->
-          "pub fn update(model: app.Model, local: app.Local, msg: app.Msg) -> #(app.Model, app.Local) {\n  app.update(model, local, msg)\n}"
-        False ->
-          "pub fn update(model: app.Model, local: Nil, msg: app.Msg) -> #(app.Model, Nil) {\n  #(app.update(model, msg), Nil)\n}"
+      let local_type = case analysis.has_local {
+        True -> client_local_type(analysis)
+        False -> "Nil"
       }
+      let update_fn =
+        "pub fn update(model: "
+        <> client_model_type(analysis)
+        <> ", local: "
+        <> local_type
+        <> ", msg: "
+        <> client_msg_type(analysis)
+        <> ") -> #("
+        <> client_model_type(analysis)
+        <> ", "
+        <> local_type
+        <> ") {\n  let #(new_model, new_local, _server) = app.update(model, local, Nil, msg)\n  #(new_model, new_local)\n}"
 
       // Generate msg_affects_model classifier
       let affects_model_arms =
@@ -2100,7 +2156,9 @@ fn generate_update_and_classifier(
             True -> "True"
             False -> "False"
           }
-          "    app."
+          "    "
+          <> client_constructor_prefix(analysis.msg_module)
+          <> "."
           <> v.name
           <> case string.contains(v.name, "(") {
             True -> ""
@@ -2115,7 +2173,7 @@ fn generate_update_and_classifier(
       "
 " <> update_fn <> "
 
-pub fn msg_affects_model(msg: app.Msg) -> Bool {
+pub fn msg_affects_model(msg: " <> client_msg_type(analysis) <> ") -> Bool {
   case msg {
 " <> affects_model_body <> "
   }
@@ -2161,12 +2219,16 @@ fn generate_local_decoder(
           }
         })
       let local_constructor = case local_args {
-        [] -> "app.Local"
-        _ -> "app.Local(" <> string.join(local_args, ", ") <> ")"
+        [] -> client_constructor_prefix(analysis.local_module) <> ".Local"
+        _ ->
+          client_constructor_prefix(analysis.local_module)
+          <> ".Local("
+          <> string.join(local_args, ", ")
+          <> ")"
       }
 
       "
-pub fn decode_local(json_str: String) -> Result(app.Local, String) {
+pub fn decode_local(json_str: String) -> Result(" <> client_local_type(analysis) <> ", String) {
   let local_decoder = {
 " <> string.join(decode_fields, "\n") <> "
     decode.success(" <> local_constructor <> ")
@@ -2180,94 +2242,17 @@ pub fn decode_local(json_str: String) -> Result(app.Local, String) {
   }
 }
 
-/// Auto-build: find the app module in src/ and build enhanced bundle.
-/// Build the base client JS for routed apps (no app-specific codec/view).
-/// This bundles only the core runtime: WebSocket, morphing, event delegation.
+/// Legacy name retained for older build scripts.
+///
+/// Beacon no longer supports building only the base runtime for public apps.
+/// This function runs the full mandatory app build and panics on failure so
+/// callers that ignore the `Result` still fail loudly.
 pub fn build_base_client() -> Result(Nil, String) {
-  let beacon_root = find_beacon_root()
-  let dir = "build/beacon_client_base"
-  // The beacon_client package has a pre-built JS output tree
-  let bc_js = beacon_root <> "/beacon_client/build/dev/javascript"
-
-  // Clean and recreate build directory
-  use Nil <- result_try(delete_path_if_exists(dir))
-  use Nil <- result_try(case simplifile.create_directory_all(dir) {
+  case auto_build() {
     Ok(Nil) -> Ok(Nil)
-    Error(err) ->
-      Error("Failed to create " <> dir <> ": " <> string.inspect(err))
-  })
-
-  // Ensure beacon_client is built (JS target)
-  use bc_build_result <- result_try(
-    case
-      run_program(beacon_root <> "/beacon_client", "gleam", [
-        "build",
-        "--target",
-        "javascript",
-      ])
-    {
-      Ok(output) -> Ok(output)
-      Error(reason) -> Error("beacon_client JS build failed:\n" <> reason)
-    },
-  )
-  log.debug("beacon.build", "beacon_client build: " <> bc_build_result)
-
-  // Resolve absolute path for the entry point import
-  use abs_bc_path <- result_try(absolute_path(bc_js))
-
-  // Create entry point — just import the client module.
-  // It auto-boots via the data-beacon-auto script attribute detection.
-  let entry_js =
-    "import '" <> abs_bc_path <> "/beacon_client/beacon_client_ffi.mjs';\n"
-  case simplifile.write(dir <> "/entry.mjs", entry_js) {
-    Error(err) -> Error("Failed to write entry: " <> string.inspect(err))
-    Ok(Nil) -> {
-      // Create priv/static
-      case simplifile.create_directory_all("priv/static") {
-        Error(err) ->
-          Error("Failed to create priv/static: " <> string.inspect(err))
-        Ok(Nil) -> {
-          let hash = generate_safe_hash()
-          let filename = "beacon_client_" <> hash <> ".js"
-          // Clean old bundles before writing new one.
-          case clean_old_client_bundles("priv/static") {
-            Error(reason) -> Error(reason)
-            Ok(Nil) -> {
-              case
-                run_program(dir, "npx", [
-                  "esbuild",
-                  "entry.mjs",
-                  "--bundle",
-                  "--format=iife",
-                  "--outfile=../../priv/static/" <> filename,
-                  "--minify",
-                ])
-              {
-                Ok(_result) -> {
-                  case
-                    simplifile.write(
-                      "priv/static/beacon_client.manifest",
-                      filename,
-                    )
-                  {
-                    Ok(Nil) -> {
-                      log.info(
-                        "beacon.build",
-                        "Base client JS built: " <> filename,
-                      )
-                      Ok(Nil)
-                    }
-                    Error(err) ->
-                      Error("Failed to write manifest: " <> string.inspect(err))
-                  }
-                }
-                Error(result) ->
-                  Error("esbuild failed for base client:\n" <> result)
-              }
-            }
-          }
-        }
-      }
+    Error(reason) -> {
+      log.error("beacon.build", reason)
+      exit_failure_result(reason)
     }
   }
 }
@@ -2304,12 +2289,65 @@ fn qualify_type_server(
   }
 }
 
+fn server_model_type(module_name: String, analysis: analyzer.Analysis) -> String {
+  qualify_type_server(
+    module_name,
+    analysis.model_module,
+    analysis.model_type_name,
+  )
+}
+
+fn server_msg_type(module_name: String, analysis: analyzer.Analysis) -> String {
+  qualify_type_server(module_name, analysis.msg_module, analysis.msg_type_name)
+}
+
+fn server_local_type(module_name: String, analysis: analyzer.Analysis) -> String {
+  case analysis.has_local {
+    True ->
+      qualify_type_server(
+        module_name,
+        analysis.local_module,
+        analysis.local_type_name,
+      )
+    False -> "Nil"
+  }
+}
+
+fn server_constructor_prefix(module_name: String, type_module: String) -> String {
+  case type_module {
+    "" -> module_name
+    mod -> mod
+  }
+}
+
 /// Qualify a type name for the client-side entry point.
 /// Local types use `app.TypeName`, external types use `alias.TypeName`.
 fn qualify_type_client(type_module: String, type_name: String) -> String {
   case type_module {
     "" -> "app." <> type_name
     mod -> mod <> "." <> type_name
+  }
+}
+
+fn client_model_type(analysis: analyzer.Analysis) -> String {
+  qualify_type_client(analysis.model_module, analysis.model_type_name)
+}
+
+fn client_msg_type(analysis: analyzer.Analysis) -> String {
+  qualify_type_client(analysis.msg_module, analysis.msg_type_name)
+}
+
+fn client_local_type(analysis: analyzer.Analysis) -> String {
+  case analysis.has_local {
+    True -> qualify_type_client(analysis.local_module, analysis.local_type_name)
+    False -> "Nil"
+  }
+}
+
+fn client_constructor_prefix(type_module: String) -> String {
+  case type_module {
+    "" -> "app"
+    mod -> mod
   }
 }
 
@@ -2445,8 +2483,18 @@ pub fn generate_external_imports(
     })
     |> list.unique
 
+  let boundary_modules =
+    [
+      analysis.model_module,
+      analysis.msg_module,
+      analysis.local_module,
+    ]
+    |> list.filter(fn(alias) { alias != "" })
+
   let modules_to_import =
-    list.unique(list.append(modules_with_server, enum_modules))
+    list.unique(
+      list.flatten([modules_with_server, enum_modules, boundary_modules]),
+    )
 
   list.filter_map(modules_to_import, fn(alias) {
     case list.find(analysis.imported_modules, fn(im) { im.alias == alias }) {
@@ -2760,25 +2808,27 @@ fn generate_codec_module(
     False -> []
   }
 
-  // Qualified server type name: uses actual module/type from analysis
-  let qualified_server_type = case analysis.server_module {
-    "" -> module_name <> "." <> analysis.server_type_name
-    mod -> mod <> "." <> analysis.server_type_name
+  let server_type = case analysis.has_server {
+    True ->
+      qualify_type_server(
+        module_name,
+        analysis.server_module,
+        analysis.server_type_name,
+      )
+    False -> "Nil"
   }
-
-  let #(param_type, model_extract) = case
-    analysis.has_local,
-    analysis.has_server
-  {
-    True, _ -> #(
-      "#(" <> module_name <> ".Model, " <> module_name <> ".Local)",
-      "  let model = state.0\n  let local = state.1\n",
-    )
-    _, True -> #(
-      "#(" <> module_name <> ".Model, " <> qualified_server_type <> ")",
-      "  let model = state.0\n",
-    )
-    False, False -> #(module_name <> ".Model", "  let model = state\n")
+  let param_type =
+    "#("
+    <> server_model_type(module_name, analysis)
+    <> ", "
+    <> server_local_type(module_name, analysis)
+    <> ", "
+    <> server_type
+    <> ")"
+  let model_extract = "  let model = state.0\n"
+  let encode_local_extract = case analysis.has_local, analysis.local_fields {
+    True, [_, ..] -> "  let local = state.1\n"
+    _, _ -> ""
   }
 
   // Computed field encoders — @computed functions called server-side, results included in model_sync
@@ -2855,6 +2905,10 @@ fn generate_codec_module(
     imports -> imports <> "\n"
   }
 
+  let object_body = case all_field_encoders {
+    [] -> "[]"
+    fields -> "[\n" <> string.join(fields, ",\n") <> ",\n  ]"
+  }
   let body =
     string.join(custom_encoders, "\n\n")
     <> "\n\n"
@@ -2868,9 +2922,10 @@ pub fn encode_model(state: "
     <> param_type
     <> ") -> String {\n"
     <> model_extract
-    <> "  json.object([\n"
-    <> string.join(all_field_encoders, ",\n")
-    <> ",\n  ])\n  |> json.to_string\n}\n"
+    <> encode_local_extract
+    <> "  json.object("
+    <> object_body
+    <> ")\n  |> json.to_string\n}\n"
     <> generate_server_render_model(
       module_name,
       param_type,
@@ -2931,16 +2986,18 @@ fn generate_server_render_model(
   model_extract: String,
   analysis: analyzer.Analysis,
 ) -> String {
-  let view_call = case analysis.has_local {
-    True -> module_name <> ".view(model, local)"
-    False -> module_name <> ".view(model)"
+  let local_extract = case analysis.has_local {
+    True -> "  let local = state.1\n"
+    False -> "  let local = Nil\n"
   }
   "\n/// Render the model with the same generated server contract used for SSR.\npub fn render_model(state: "
   <> param_type
   <> ") -> String {\n"
   <> model_extract
+  <> local_extract
   <> "  "
-  <> view_call
+  <> module_name
+  <> ".view(model, local)"
   <> "\n  |> element.to_string\n}\n"
 }
 
@@ -2953,30 +3010,25 @@ fn generate_substate_encoders(
   case analysis.substates {
     [] -> ""
     substates -> {
-      // For Local/Server apps, encoders take the tuple and extract model
-      let sub_qualified_server = case analysis.server_module {
-        "" -> module_name <> "." <> analysis.server_type_name
-        mod -> mod <> "." <> analysis.server_type_name
+      let server_type = case analysis.has_server {
+        True ->
+          qualify_type_server(
+            module_name,
+            analysis.server_module,
+            analysis.server_type_name,
+          )
+        False -> "Nil"
       }
-      let #(param_type, model_extract) = case
-        analysis.has_local,
-        analysis.has_server
-      {
-        True, _ -> #(
-          "#(" <> module_name <> ".Model, " <> module_name <> ".Local)",
-          "  let model = state.0\n",
-        )
-        _, True -> #(
-          "#(" <> module_name <> ".Model, " <> sub_qualified_server <> ")",
-          "  let model = state.0\n",
-        )
-        False, False -> #(module_name <> ".Model", "  let model = state\n")
-      }
-      let param_name = case analysis.has_local, analysis.has_server {
-        _, True -> "state"
-        True, _ -> "state"
-        False, False -> "state"
-      }
+      let param_type =
+        "#("
+        <> server_model_type(module_name, analysis)
+        <> ", "
+        <> server_local_type(module_name, analysis)
+        <> ", "
+        <> server_type
+        <> ")"
+      let model_extract = "  let model = state.0\n"
+      let param_name = "state"
       // Generate encode_substate_<name> for each substate
       let substate_fns =
         list.map(substates, fn(s) {
@@ -3085,58 +3137,54 @@ fn generate_server_decode_model(
       }
     })
   let model_constructor =
-    module_name <> ".Model(" <> string.join(model_constructor_args, ", ") <> ")"
+    server_constructor_prefix(module_name, analysis.model_module)
+    <> ".Model("
+    <> string.join(model_constructor_args, ", ")
+    <> ")"
 
-  case analysis.has_local, analysis.has_server {
-    _, True -> {
+  let local_type = server_local_type(module_name, analysis)
+  let server_type = case analysis.has_server {
+    True ->
       // Server state cannot be reconstructed from client JSON.
-      // app_with_server runs all events server-side, so decode_model is not used.
-      let decode_server_type = case analysis.server_module {
-        "" -> module_name <> "." <> analysis.server_type_name
-        mod -> mod <> "." <> analysis.server_type_name
-      }
-      "\n/// Decode is not supported for app_with_server — Server state cannot be reconstructed from client JSON.\npub fn decode_model(_json_str: String) -> Result(#("
-      <> module_name
-      <> ".Model, "
-      <> decode_server_type
+      qualify_type_server(
+        module_name,
+        analysis.server_module,
+        analysis.server_type_name,
+      )
+    False -> "Nil"
+  }
+  case analysis.has_server {
+    True ->
+      "\n/// Decode is not supported when Server state is present — Server state cannot be reconstructed from client JSON.\npub fn decode_model(_json_str: String) -> Result(#("
+      <> server_model_type(module_name, analysis)
+      <> ", "
+      <> local_type
+      <> ", "
+      <> server_type
       <> "), String) {\n"
-      <> "  Error(\"decode_model not supported for app_with_server\")\n"
+      <> "  Error(\"decode_model not supported when Server state is present\")\n"
       <> "}\n"
-    }
-
-    False, False ->
-      "\n/// Decode a Model from JSON string (for applying client patches).\npub fn decode_model(json_str: String) -> Result("
-      <> module_name
-      <> ".Model, String) {\n"
-      <> "  let model_decoder = {\n"
-      <> model_decode_body
-      <> "\n    decode.success("
-      <> model_constructor
-      <> ")\n  }\n"
-      <> "  case json.parse(json_str, model_decoder) {\n"
-      <> "    Ok(model) -> Ok(model)\n"
-      <> "    Error(_) -> Error(\"Failed to decode model\")\n"
-      <> "  }\n}\n"
-
-    True, _ -> {
-      // Also decode Local fields and return the tuple #(Model, Local)
+    False -> {
       let local_fields = analysis.local_fields
-      let local_decode_fields =
-        list.map(local_fields, fn(f) {
-          let decoder =
-            server_decoder_for_field(
-              f,
-              analysis.custom_types,
-              analysis.enum_types,
-            )
-          "    use "
-          <> f.name
-          <> " <- decode.field(\""
-          <> f.name
-          <> "\", "
-          <> decoder
-          <> ")"
-        })
+      let local_decode_fields = case analysis.has_local {
+        True ->
+          list.map(local_fields, fn(f) {
+            let decoder =
+              server_decoder_for_field(
+                f,
+                analysis.custom_types,
+                analysis.enum_types,
+              )
+            "    use "
+            <> f.name
+            <> " <- decode.field(\""
+            <> f.name
+            <> "\", "
+            <> decoder
+            <> ")"
+          })
+        False -> []
+      }
       let local_decode_body = string.join(local_decode_fields, "\n")
       let local_constructor_args =
         list.map(local_fields, fn(f) {
@@ -3151,20 +3199,25 @@ fn generate_server_decode_model(
             Error(_) -> f.name <> ": " <> f.name
           }
         })
-      let local_constructor = case local_constructor_args {
-        [] -> module_name <> ".Local"
-        _ ->
-          module_name
+      let local_constructor = case analysis.has_local, local_constructor_args {
+        False, _ -> "Nil"
+        True, [] ->
+          server_constructor_prefix(module_name, analysis.local_module)
+          <> ".Local"
+        True, _ ->
+          server_constructor_prefix(module_name, analysis.local_module)
           <> ".Local("
           <> string.join(local_constructor_args, ", ")
           <> ")"
       }
 
-      "\n/// Decode a #(Model, Local) from JSON string (for applying client patches).\npub fn decode_model(json_str: String) -> Result(#("
-      <> module_name
-      <> ".Model, "
-      <> module_name
-      <> ".Local), String) {\n"
+      "\n/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).\npub fn decode_model(json_str: String) -> Result(#("
+      <> server_model_type(module_name, analysis)
+      <> ", "
+      <> local_type
+      <> ", "
+      <> server_type
+      <> "), String) {\n"
       <> "  let state_decoder = {\n"
       <> model_decode_body
       <> "\n"
@@ -3173,10 +3226,11 @@ fn generate_server_decode_model(
       <> model_constructor
       <> ", "
       <> local_constructor
+      <> ", Nil"
       <> "))\n  }\n"
       <> "  case json.parse(json_str, state_decoder) {\n"
       <> "    Ok(state) -> Ok(state)\n"
-      <> "    Error(_) -> Error(\"Failed to decode model+local\")\n"
+      <> "    Error(_) -> Error(\"Failed to decode model+local+server\")\n"
       <> "  }\n}\n"
     }
   }
@@ -3201,15 +3255,15 @@ fn generate_server_decode_event(
   let top_decoder =
     generate_server_decode_msg_fn(
       "decode_msg",
-      module_name,
-      module_name <> ".Msg",
+      server_constructor_prefix(module_name, analysis.msg_module),
+      server_msg_type(module_name, analysis),
       client_event_variants(analysis),
       analysis,
     )
 
   "\n/// Decode the generated client event contract. Live event decoding never\n/// renders the server view or reads the handler registry.\npub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result("
-  <> module_name
-  <> ".Msg, String) {\n"
+  <> server_msg_type(module_name, analysis)
+  <> ", String) {\n"
   <> "  let envelope_decoder = {\n"
   <> "    use msg_json <- decode.field(\"__beacon_msg\", decode.string)\n"
   <> "    decode.success(msg_json)\n"
@@ -3645,7 +3699,7 @@ fn find_app_module(dir: String) -> Result(#(String, String), String) {
   // Two-pass search:
   // 1. Entrypoint app module: full app module that actually starts Beacon.
   // 2. Full app module: update + view + Model + Msg in one file.
-  // 3. Model-only module: pub type Model in any file (app_with_server, multi-file)
+  // 3. Model-only module: pub type Model in any file (server-state, multi-file)
   //    The codec only needs Model fields — the analyzer handles cross-file resolution.
   let all_files = collect_gleam_files(dir)
   let entrypoint_match =
@@ -3790,8 +3844,11 @@ fn run_program(
   args: List(String),
 ) -> Result(String, String)
 
-@external(erlang, "beacon_build_ffi", "absolute_path")
-fn absolute_path(path: String) -> Result(String, String)
+@external(erlang, "beacon_build_ffi", "exit_failure")
+fn exit_failure(reason: String) -> Nil
+
+@external(erlang, "beacon_build_ffi", "exit_failure")
+fn exit_failure_result(reason: String) -> Result(Nil, String)
 
 @external(erlang, "beacon_build_ffi", "generate_safe_hash")
 fn do_generate_safe_hash() -> String

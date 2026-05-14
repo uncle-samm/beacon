@@ -15,8 +15,8 @@ import gleam/dynamic/decode
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: dashboard.Model) -> String {
-  let model = state
+pub fn encode_model(state: #(dashboard.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("process_count", json.int(model.process_count)),
     #("memory_mb", json.float(model.memory_mb)),
@@ -29,26 +29,28 @@ pub fn encode_model(state: dashboard.Model) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: dashboard.Model) -> String {
-  let model = state
-  dashboard.view(model)
+pub fn render_model(state: #(dashboard.Model, Nil, Nil)) -> String {
+  let model = state.0
+  let local = Nil
+  dashboard.view(model, local)
   |> element.to_string
 }
 
-/// Decode a Model from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(dashboard.Model, String) {
-  let model_decoder = {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(dashboard.Model, Nil, Nil), String) {
+  let state_decoder = {
     use process_count <- decode.field("process_count", decode.int)
     use memory_mb <- decode.field("memory_mb", decode.float)
     use uptime_seconds <- decode.field("uptime_seconds", decode.int)
     use process_history <- decode.field("process_history", decode.list(decode.int))
     use memory_history <- decode.field("memory_history", decode.list(decode.float))
     use tick_count <- decode.field("tick_count", decode.int)
-    decode.success(dashboard.Model(process_count: process_count, memory_mb: memory_mb, uptime_seconds: uptime_seconds, process_history: process_history, memory_history: memory_history, tick_count: tick_count))
+
+    decode.success(#(dashboard.Model(process_count: process_count, memory_mb: memory_mb, uptime_seconds: uptime_seconds, process_history: process_history, memory_history: memory_history, tick_count: tick_count), Nil, Nil))
   }
-  case json.parse(json_str, model_decoder) {
-    Ok(model) -> Ok(model)
-    Error(_) -> Error("Failed to decode model")
+  case json.parse(json_str, state_decoder) {
+    Ok(state) -> Ok(state)
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 

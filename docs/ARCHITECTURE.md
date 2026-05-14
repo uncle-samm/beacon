@@ -110,7 +110,7 @@ first paint, so hydrated state matches the HTML. There is one public route API:
 **Route mini-apps:** `route.page_model` lets a page module own a child `Model`,
 `Msg`, `update`, and `view` while the root app embeds that child state and wraps
 child messages. `route.update_model` handles the select-update-replace loop.
-`route.update_server_model` does the same for `app_with_server`, updating the
+`route.update_server_model` does the same for `Server state`, updating the
 embedded child `Model` and private child `Server` together. Client bundle
 generation sanitizes imported route modules before copying them into the JS
 project, so route-local `Server`, `init_server`, `update_server`, and `server_`
@@ -244,7 +244,7 @@ Files: `beacon_client.gleam` (Gleam types), `beacon_client_ffi.mjs` (JS runtime)
 - **`state_manager.gleam`** — ETS-backed state storage for cross-process access.
 
 ### Application Layer
-- **`beacon.gleam`** — Top-level API. `AppBuilder` with builder pattern: `app(init, update, view)`, `app_with_effects(...)`, `app_with_local(...)`, and `app_with_server(...)`. These are type-specific entrypoints into one state model (`Model`, optional `Local`, optional `Server`), not separate runtimes. Event helpers: `on_click`, `on_input`, `on_submit`, `on_change`, `on_mousedown`, `on_mouseup`, `on_mousemove`, `on_keydown`, `on_dragstart`, `on_dragover`, `on_drop`. Configuration: `title`, `secret_key`, `static_dir`, `route_pages`, `security_limits`. Starts with `beacon.start(port)`.
+- **`beacon.gleam`** — Top-level API. `AppBuilder` with one constructor: `app(init, init_local, init_server, update, view)`. `beacon.no_local` and `beacon.no_server` supply `Nil` state when an app does not need Local or Server. Event helpers: `on_click`, `on_input`, `on_submit`, `on_submit_local`, `on_change`, `on_mousedown`, `on_mouseup`, `on_mousemove`, `on_keydown`, `on_dragstart`, `on_dragover`, `on_drop`. Configuration: `title`, `secret_key`, `static_dir`, `route_pages`, `security_limits`. Starts with `beacon.start(port)`.
 - **`application.gleam`** — OTP application with supervision tree. `AppConfig` wraps all config. Supervisor manages transport, state manager, per-connection runtimes.
 - **`component.gleam`** — Composable MVU units: `Component(init, update, view, to_parent)` with message mapping.
 - **`config.gleam`** — Environment-based configuration: `get_env`, `get_env_or`, `get_env_int`, `port()`.
@@ -260,8 +260,8 @@ Files: `beacon_client.gleam` (Gleam types), `beacon_client_ffi.mjs` (JS runtime)
 - **`cookie.gleam`** — Cookie parsing and setting utilities (parse, get, set, delete with secure defaults).
 
 ### Build Tooling
-- **`build.gleam`** — Client JS codegen: `gleam run -m beacon/build`. Codec generation and JS bundling are independent concerns. Three public functions: `generate_codec()` (always runs when Model type is found), `try_enhanced_bundle()` (requires client-visible Model + Msg + view, and update unless it is an `app_with_server` shape), `analyze_app()` (Glance-based analysis). Two-pass `find_app_module` search handles full, multi-file, route-aware, and server-state app shapes.
-- **`build/analyzer.gleam`** — Glance-based source analysis for codegen. Extracts `Model`, optional `Local`, optional `Server`, message impacts (`LOCAL`, `MODEL`, `MODEL+LOCAL`), model fields, and event handlers from user source.
+- **`build.gleam`** — Client JS codegen: `gleam run -m beacon/build src/<entry>.gleam`. Beacon validates the full SSR + generated client-state contract before writing `src/beacon_codec.gleam` or `build/beacon_contract.json`; codec-only or base-client builds are not a public app path. `build_base_client()` remains as a legacy name, but it delegates to the full app build and exits on failure so missing `decode_event` / `render_model` cannot be hidden.
+- **`build/analyzer.gleam`** — Glance-based source analysis for codegen. Extracts `Model`, optional `Local`, optional private `Server`, primary `Msg`, message impacts (`LOCAL`, `MODEL`, `MODEL+LOCAL`), model fields, and event handlers from the entry module or imported client-visible modules.
 - **`lint.gleam`** — Custom Glance-based linter enforcing engineering principles: no `todo`/`panic`, no silent catch-alls, logging requirements.
 
 ### Error Handling and Logging

@@ -1,7 +1,7 @@
 /// Multi-file Todo — demonstrates external types with Local state.
 /// TodoItem and Filter types live in domains/task.gleam.
-
 import beacon
+import beacon/effect
 import beacon/html
 import domains/task
 import gleam/int
@@ -9,11 +9,7 @@ import gleam/list
 import gleam/string
 
 pub type Model {
-  Model(
-    todos: List(task.TodoItem),
-    input: String,
-    next_id: Int,
-  )
+  Model(todos: List(task.TodoItem), input: String, next_id: Int)
 }
 
 pub type Local {
@@ -29,15 +25,18 @@ pub type Msg {
   ClearCompleted
 }
 
-pub fn init() -> Model {
-  Model(
-    todos: [
-      task.TodoItem(id: 1, text: "Learn Gleam", completed: True),
-      task.TodoItem(id: 2, text: "Build with Beacon", completed: False),
-      task.TodoItem(id: 3, text: "Ship it", completed: False),
-    ],
-    input: "",
-    next_id: 4,
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(
+    Model(
+      todos: [
+        task.TodoItem(id: 1, text: "Learn Gleam", completed: True),
+        task.TodoItem(id: 2, text: "Build with Beacon", completed: False),
+        task.TodoItem(id: 3, text: "Ship it", completed: False),
+      ],
+      input: "",
+      next_id: 4,
+    ),
+    effect.none(),
   )
 }
 
@@ -45,8 +44,13 @@ pub fn init_local(_model: Model) -> Local {
   Local(filter: task.All)
 }
 
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg {
+pub fn update(
+  model: Model,
+  local: Local,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Local, Nil) {
+  let #(model, local) = case msg {
     SetInput(text) -> #(Model(..model, input: text), local)
     AddTodo -> {
       let text = string.trim(model.input)
@@ -76,11 +80,10 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
         })
       #(Model(..model, todos: todos), local)
     }
-    DeleteTodo(id) ->
-      #(
-        Model(..model, todos: list.filter(model.todos, fn(t) { t.id != id })),
-        local,
-      )
+    DeleteTodo(id) -> #(
+      Model(..model, todos: list.filter(model.todos, fn(t) { t.id != id })),
+      local,
+    )
     SetFilter(f) -> {
       let filter = case f {
         "active" -> task.Active
@@ -89,15 +92,12 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
       }
       #(model, Local(filter: filter))
     }
-    ClearCompleted ->
-      #(
-        Model(
-          ..model,
-          todos: list.filter(model.todos, fn(t) { !t.completed }),
-        ),
-        local,
-      )
+    ClearCompleted -> #(
+      Model(..model, todos: list.filter(model.todos, fn(t) { !t.completed })),
+      local,
+    )
   }
+  #(model, local, Nil)
 }
 
 pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
@@ -225,7 +225,7 @@ fn view_item(item: task.TodoItem) -> beacon.Node(Msg) {
 }
 
 pub fn main() {
-  beacon.app_with_local(init, init_local, update, view)
+  beacon.app(init, init_local, beacon.no_server, update, view)
   |> beacon.title("Multi-File Todo")
   |> beacon.start(8080)
 }

@@ -2,25 +2,27 @@
 
 Effects are descriptions of side effects that the Beacon runtime executes. Following Lustre's design, effects are data -- not actions. The `Effect(msg)` type is opaque and composed via combinators.
 
-## Returning Effects from Update
+## Effects Outside Update
 
 Prefer a pure `update` plus `beacon.on_update` for application side effects.
 That shape keeps the generated client renderer predictable: `update` can be
 analyzed and compiled for client rendering, while stores, PubSub, HTTP, env
 reads, randomness, and other BEAM-only work stay on the server.
 
-`beacon.app_with_effects` is still available for server-authoritative effect
-apps where `update` returns a tuple of the new model and an effect:
+`init` returns the initial model and a startup effect. Event-triggered effects
+belong in `on_update`; `update` returns only the new `Model`, `Local`, and
+`Server` values.
 
 ```gleam
-fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
-  case msg {
-    Increment -> #(Model(..model, count: model.count + 1), effect.none())
-    LoadData -> #(model, effect.background(fn(dispatch) {
-      let data = fetch_data()
-      dispatch(DataLoaded(data))
-    }))
-  }
+fn init() -> #(Model, effect.Effect(Msg)) {
+  #(Model(loading: True), effect.background(fn(dispatch) {
+    let data = fetch_data()
+    dispatch(DataLoaded(data))
+  }))
+}
+
+fn update(model: Model, local: Nil, server: Nil, msg: Msg) -> #(Model, Nil, Nil) {
+  #(handle_msg(model, msg), local, server)
 }
 ```
 
@@ -42,13 +44,12 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
 ## Server-Side Effect Handler
 
-For apps using `app_with_local`, or any app that should keep `update`
-client-visible, use `beacon.on_update` to attach server-only effects that run
-after update:
+Use `beacon.on_update` to attach server-only effects that run after update:
 
 ```gleam
-beacon.app_with_local(init, init_local, update, view)
-|> beacon.on_update(fn(model, msg) {
+beacon.app(init, init_local, beacon.no_server, update, view)
+|> beacon.on_update(fn(state, msg) {
+  let #(model, _local, _server) = state
   case msg {
     SaveItem(item) -> effect.from(fn(_) { db.save(item) })
     _ -> effect.none()

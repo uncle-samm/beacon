@@ -15,7 +15,7 @@ import gleam/dynamic/decode
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: #(triple_counter.Model, triple_counter.Local)) -> String {
+pub fn encode_model(state: #(triple_counter.Model, triple_counter.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   json.object([
@@ -27,24 +27,24 @@ pub fn encode_model(state: #(triple_counter.Model, triple_counter.Local)) -> Str
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: #(triple_counter.Model, triple_counter.Local)) -> String {
+pub fn render_model(state: #(triple_counter.Model, triple_counter.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   triple_counter.view(model, local)
   |> element.to_string
 }
 
-/// Decode a #(Model, Local) from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(#(triple_counter.Model, triple_counter.Local), String) {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(triple_counter.Model, triple_counter.Local, Nil), String) {
   let state_decoder = {
     use my_count <- decode.field("my_count", decode.int)
     use shared_count <- decode.field("shared_count", decode.int)
     use local_count <- decode.field("local_count", decode.int)
-    decode.success(#(triple_counter.Model(my_count: my_count, shared_count: shared_count), triple_counter.Local(local_count: local_count)))
+    decode.success(#(triple_counter.Model(my_count: my_count, shared_count: shared_count), triple_counter.Local(local_count: local_count), Nil))
   }
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
-    Error(_) -> Error("Failed to decode model+local")
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 

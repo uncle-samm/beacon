@@ -5,7 +5,7 @@
 /// import beacon/html
 ///
 /// pub fn main() {
-///   beacon.app(init, update, view)
+///   beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 ///   |> beacon.title("My App")
 ///   |> beacon.start(8080)
 /// }
@@ -197,8 +197,7 @@ pub opaque type AppBuilder(model, msg) {
     static_dir: Option(String),
     serialize_model: Option(fn(model) -> String),
     deserialize_model: Option(fn(String) -> Result(model, String)),
-    /// For app_with_local: wraps model+local into a combined model type.
-    /// When set, the "model" in the builder is actually #(Model, Local).
+    /// True when the app defines client-owned Local state.
     has_local: Bool,
     /// Route patterns for URL matching (e.g., ["/", "/blog/:slug"]).
     route_patterns: List(route.RoutePattern),
@@ -238,189 +237,61 @@ pub opaque type AppBuilder(model, msg) {
   )
 }
 
-/// Create an app whose state shape is only `Model`.
+/// Default Local initializer for apps without client-owned state.
+///
+/// Use as the second argument to `app` when the app does not need drafts,
+/// dropdown state, pointer trails, or other client-only UI state.
+pub fn no_local(_model: model) -> Nil {
+  Nil
+}
+
+/// Default Server initializer for apps without private server state.
+///
+/// Use as the third argument to `app` when the app does not need session,
+/// secret, database, audit, or other server-only state.
+pub fn no_server() -> Nil {
+  Nil
+}
+
+/// Create a Beacon app.
 ///
 /// `Model` is server-authoritative state: SSR uses it for first paint, then the
 /// client receives model sync/patch updates and renders from generated code.
+/// `Local` is client-owned per-tab state. Use `Nil` via `no_local` when absent.
+/// `Server` is private per-session state. Use `Nil` via `no_server` when absent.
+/// The view receives `Model` and `Local`; it never receives `Server`.
+///
 /// ```gleam
-/// beacon.app(init, update, view) |> beacon.start(8080)
+/// beacon.app(fn() { #(init(), effect.none()) }, beacon.no_local, beacon.no_server, update, view)
+/// |> beacon.start(8080)
 /// ```
 pub fn app(
-  init: fn() -> model,
-  update: fn(model, msg) -> model,
-  view: fn(model) -> Node(msg),
-) -> AppBuilder(model, msg) {
-  AppBuilder(
-    init_simple: Some(init),
-    init_effect: None,
-    update_simple: Some(update),
-    update_effect: None,
-    view: view,
-    title: "Beacon",
-    secret_key: generate_secret(),
-    middlewares: [middleware.secure_headers()],
-    static_dir: None,
-    serialize_model: None,
-    deserialize_model: None,
-    has_local: False,
-    route_patterns: [],
-    on_route_change: None,
-    on_route_leave: None,
-    dynamic_subscriptions: None,
-    on_notify: None,
-    on_notification: None,
-    on_update_effect: None,
-    security_limits: transport.default_security_limits(),
-    head_html: None,
-    api_handler: None,
-    ws_auth: None,
-    ws_init: None,
-    dev_mode: False,
-  )
-}
-
-/// Create an app whose `Model` update can return effects.
-///
-/// This is the same `Model` state shape as `app`, with an effect-capable
-/// `init`/`update` signature for async work, timers, broadcasts, and other side
-/// effects.
-pub fn app_with_effects(
   init: fn() -> #(model, effect.Effect(msg)),
-  update: fn(model, msg) -> #(model, effect.Effect(msg)),
-  view: fn(model) -> Node(msg),
-) -> AppBuilder(model, msg) {
-  AppBuilder(
-    init_simple: None,
-    init_effect: Some(init),
-    update_simple: None,
-    update_effect: Some(update),
-    view: view,
-    title: "Beacon",
-    secret_key: generate_secret(),
-    middlewares: [middleware.secure_headers()],
-    static_dir: None,
-    serialize_model: None,
-    deserialize_model: None,
-    has_local: False,
-    route_patterns: [],
-    on_route_change: None,
-    on_route_leave: None,
-    dynamic_subscriptions: None,
-    on_notify: None,
-    on_notification: None,
-    on_update_effect: None,
-    security_limits: transport.default_security_limits(),
-    head_html: None,
-    api_handler: None,
-    ws_auth: None,
-    ws_init: None,
-    dev_mode: False,
-  )
-}
-
-/// Create an app whose state shape is `Model + Local`.
-///
-/// `Model` remains server-authoritative. `Local` is client-only per-tab state
-/// for drafts, dropdowns, focus state, and other instant UI. `init_local` derives
-/// initial `Local` from the initial `Model`.
-///
-/// The build analyzer classifies messages from `update`: `LOCAL` messages update
-/// only `Local` and produce zero WebSocket traffic, while `MODEL` and
-/// `MODEL+LOCAL` messages still sync the model through the server.
-///
-/// ```gleam
-/// beacon.app_with_local(init, init_local, update, view) |> beacon.start(8080)
-/// ```
-pub fn app_with_local(
-  init: fn() -> model,
   init_local: fn(model) -> local,
-  update: fn(model, local, msg) -> #(model, local),
+  init_server: fn() -> server,
+  update: fn(model, local, server, msg) -> #(model, local, server),
   view: fn(model, local) -> Node(msg),
-) -> AppBuilder(#(model, local), msg) {
-  // Wrap into a combined model: #(model, local)
+) -> AppBuilder(#(model, local, server), msg) {
+  // Wrap into one runtime state: #(Model, Local, Server). The generated model
+  // encoder serializes only Model plus client-visible Local; Server is private.
   let combined_init = fn() {
-    let model = init()
+    let #(model, initial_effect) = init()
     let local = init_local(model)
-    #(model, local)
+    let server = init_server()
+    #(#(model, local, server), initial_effect)
   }
-  let combined_update = fn(combined: #(model, local), msg: msg) {
-    let #(model, local) = combined
-    let #(new_model, new_local) = update(model, local, msg)
-    #(new_model, new_local)
+  let combined_update = fn(combined: #(model, local, server), msg: msg) {
+    let #(model, local, server) = combined
+    let #(new_model, new_local, new_server) = update(model, local, server, msg)
+    #(#(new_model, new_local, new_server), effect.none())
   }
-  let combined_view = fn(combined: #(model, local)) {
-    let #(model, local) = combined
+  let combined_view = fn(combined: #(model, local, server)) {
+    let #(model, local, _server) = combined
     view(model, local)
   }
   AppBuilder(
-    init_simple: Some(combined_init),
-    init_effect: None,
-    update_simple: Some(combined_update),
-    update_effect: None,
-    view: combined_view,
-    title: "Beacon",
-    secret_key: generate_secret(),
-    middlewares: [middleware.secure_headers()],
-    static_dir: None,
-    serialize_model: None,
-    deserialize_model: None,
-    has_local: True,
-    route_patterns: [],
-    on_route_change: None,
-    on_route_leave: None,
-    dynamic_subscriptions: None,
-    on_notify: None,
-    on_notification: None,
-    on_update_effect: None,
-    security_limits: transport.default_security_limits(),
-    head_html: None,
-    api_handler: None,
-    ws_auth: None,
-    ws_init: None,
-    dev_mode: False,
-  )
-}
-
-/// Create an app whose state shape is `Model + Server`.
-///
-/// `Model` remains server-authoritative and client-rendered after SSR. `Server`
-/// is private per-session state for sessions, database handles, audit state, or
-/// secrets. `update` receives both `Model` and `Server`, returns both plus
-/// effects. `view` receives only `Model`, so `Server` is never accessible in the
-/// view.
-///
-/// Server state is NEVER serialized, NEVER sent to client, NEVER in the JS bundle.
-/// Gleam's type system enforces this at compile time.
-///
-/// ```gleam
-/// beacon.app_with_server(init, init_server, update, view) |> beacon.start(8080)
-/// ```
-pub fn app_with_server(
-  init: fn() -> model,
-  init_server: fn() -> server,
-  update: fn(model, server, msg) -> #(model, server, effect.Effect(msg)),
-  view: fn(model) -> Node(msg),
-) -> AppBuilder(#(model, server), msg) {
-  // Wrap into a combined model: #(model, server)
-  // The runtime sees #(model, server) as a single "model" but only the
-  // model part is serialized/sent to client (via model_encoder wrapping).
-  let combined_init = fn() {
-    let model = init()
-    let server = init_server()
-    #(model, server)
-  }
-  let combined_update = fn(combined: #(model, server), msg: msg) {
-    let #(model, server) = combined
-    let #(new_model, new_server, effects) = update(model, server, msg)
-    #(#(new_model, new_server), effects)
-  }
-  let combined_view = fn(combined: #(model, server)) {
-    let #(model, _server) = combined
-    view(model)
-  }
-  AppBuilder(
     init_simple: None,
-    init_effect: Some(fn() { #(combined_init(), effect.none()) }),
+    init_effect: Some(combined_init),
     update_simple: None,
     update_effect: Some(combined_update),
     view: combined_view,
@@ -430,7 +301,7 @@ pub fn app_with_server(
     static_dir: None,
     serialize_model: None,
     deserialize_model: None,
-    has_local: False,
+    has_local: True,
     route_patterns: [],
     on_route_change: None,
     on_route_leave: None,
@@ -484,7 +355,7 @@ pub fn dev_mode(
 /// Use this for stylesheets, meta tags, fonts, or other head content.
 ///
 /// ```gleam
-/// beacon.app(init, update, view)
+/// beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 /// |> beacon.head_html("<link rel=\"stylesheet\" href=\"/static/styles.css\">")
 /// |> beacon.start(8080)
 /// ```
@@ -508,7 +379,7 @@ pub fn head_html(
 /// ```gleam
 /// import beacon/api
 ///
-/// beacon.app(init, update, view)
+/// beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 /// |> beacon.api_routes(api.routes([
 ///   api.get("/api/status", fn(_req) { api.json(200, "{\"ok\":true}") }),
 ///   api.post("/api/webhook", handle_webhook),
@@ -525,7 +396,7 @@ pub fn head_html(
 /// import gleam/option.{None, Some}
 /// import beacon/transport/server.{type Connection, type ResponseBody, Bytes}
 ///
-/// beacon.app(init, update, view)
+/// beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 /// |> beacon.api_routes(fn(req) {
 ///   case req.method, request.path_segments(req) {
 ///     http.Post, ["api", "login"] -> Some(handle_login(req))
@@ -548,7 +419,7 @@ pub fn api_routes(
 /// Return `Ok(Nil)` to allow the connection, `Error(reason)` to reject with 401.
 ///
 /// ```gleam
-/// beacon.app(init, update, view)
+/// beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 /// |> beacon.ws_auth(fn(req) {
 ///   case beacon.get_cookie(req, "session_token") {
 ///     Ok(token) -> validate_session(token)
@@ -568,14 +439,15 @@ pub fn ws_auth(
 /// Replaces both `init` and `init_server` with a function that receives the HTTP request
 /// from the WebSocket upgrade, so it can read cookies, headers, query params, etc.
 ///
-/// Use with `app_with_server` to populate server state from session cookies:
+/// Use with `app` to populate request-aware model/local/server state from
+/// session cookies:
 ///
 /// ```gleam
-/// beacon.app_with_server(init, init_server, update, view)
+/// beacon.app(init, beacon.no_local, init_server, update, view)
 /// |> beacon.ws_init(fn(req) {
 ///   case beacon.get_cookie(req, "session_token") {
-///     Ok(token) -> #(Model, ServerState(user_id: validate(token), ..))
-///     Error(Nil) -> #(Model, ServerState(user_id: None, ..))
+///     Ok(token) -> #(Model(user_id: validate(token)), Nil, init_server())
+///     Error(Nil) -> #(Model(user_id: None), Nil, init_server())
 ///   }
 /// })
 /// |> beacon.start(8080)
@@ -592,8 +464,8 @@ pub fn ws_init(
 /// Set a model encoder for model_sync.
 /// The encoder serializes the Model to JSON so the server can send
 /// authoritative state to the client after model-affecting events.
-/// For app_with_local, the encoder receives the full #(model, local)
-/// but should only serialize the model part.
+/// The generated encoder receives the full #(Model, Local, Server) state and
+/// excludes private Server fields.
 pub fn model_encoder(
   builder: AppBuilder(model, msg),
   encoder: fn(model) -> String,
@@ -607,7 +479,7 @@ pub fn model_encoder(
 /// pattern and the message to send when the route is entered.
 ///
 /// ```gleam
-/// beacon.app(init, update, view)
+/// beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 /// |> beacon.route_pages([
 ///   route.page(
 ///     "/",
@@ -699,7 +571,7 @@ pub fn hard_redirect(path: String) -> effect.Effect(msg) {
 /// Called after every update. The framework diffs the result against
 /// the current subscription set and subscribes/unsubscribes as needed.
 /// ```gleam
-/// beacon.app(init, update, view)
+/// beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 /// |> beacon.subscriptions(fn(model) { ["room:" <> model.current_room] })
 /// |> beacon.on_notify(fn(topic) { RoomUpdated(topic) })
 /// |> beacon.start(8080)
@@ -732,8 +604,8 @@ pub fn on_notification(
 /// Runs AFTER update on the server — use for stores, PubSub, BEAM operations.
 /// This keeps update() pure (compilable to JS for LOCAL events).
 /// ```gleam
-/// beacon.app_with_local(init, init_local, update, view)
-/// |> beacon.on_update(fn(model, msg) {
+/// beacon.app(init, init_local, beacon.no_server, update, view)
+/// |> beacon.on_update(fn(state, msg) {
 ///   case msg {
 ///     AddCard -> effect.from(fn(_) { store.put(store, "v", ...) })
 ///     _ -> effect.none()
@@ -753,7 +625,7 @@ pub fn on_update(
 ///
 /// Example:
 /// ```gleam
-/// beacon.app(init, update, view)
+/// beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 /// |> beacon.security_limits(transport.SecurityLimits(
 ///   ..transport.default_security_limits(),
 ///   max_connections: 5000,
@@ -820,7 +692,7 @@ pub fn start(
         Some(init_fn) -> Ok(fn() { #(init_fn(), effect.none()) })
         None ->
           Error(error.ConfigError(
-            reason: "No init function provided — use beacon.app() or beacon.app_with_effects()",
+            reason: "No init function provided — use beacon.app()",
           ))
       }
   }
@@ -832,7 +704,7 @@ pub fn start(
           Ok(fn(model, msg) { #(update_fn(model, msg), effect.none()) })
         None ->
           Error(error.ConfigError(
-            reason: "No update function provided — use beacon.app() or beacon.app_with_effects()",
+            reason: "No update function provided — use beacon.app()",
           ))
       }
   }

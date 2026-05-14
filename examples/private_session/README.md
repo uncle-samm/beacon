@@ -1,6 +1,6 @@
 # Private Session
 
-Private Session exercises `beacon.app_with_server` with a public model and private server state.
+Private Session exercises `beacon.Server state` with a public model and private server state.
 
 Use this for browser integration coverage:
 

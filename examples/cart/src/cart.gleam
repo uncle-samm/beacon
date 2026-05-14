@@ -9,10 +9,8 @@ import beacon/html
 import beacon/log
 import beacon/pubsub
 import beacon/store
-import gleam/float
 import gleam/int
 import gleam/list
-import gleam/string
 
 // --- Types ---
 
@@ -63,8 +61,13 @@ pub fn init_local(_model: Model) -> Local {
 
 // --- Update (pure — compiles to JS) ---
 
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg {
+pub fn update(
+  model: Model,
+  local: Local,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Local, Nil) {
+  let #(model, local) = case msg {
     AddToCart(id_str) -> {
       case int.parse(id_str) {
         Ok(id) -> {
@@ -208,7 +211,9 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
             }
             Error(_) -> {
               // Quantity is 1, remove instead
-              update(model, local, RemoveFromCart(id_str))
+              let #(model, local, _server) =
+                update(model, local, Nil, RemoveFromCart(id_str))
+              #(model, local)
             }
           }
         }
@@ -223,15 +228,16 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
 
     SetProducts(products) -> #(Model(..model, products: products), local)
   }
+  #(model, local, Nil)
 }
 
 // --- Side Effects ---
 
 fn make_on_update(
   product_store: store.ListStore(Product),
-) -> fn(#(Model, Local), Msg) -> effect.Effect(Msg) {
-  fn(state: #(Model, Local), msg: Msg) -> effect.Effect(Msg) {
-    let #(model, _local) = state
+) -> fn(#(Model, Local, Nil), Msg) -> effect.Effect(Msg) {
+  fn(state: #(Model, Local, Nil), msg: Msg) -> effect.Effect(Msg) {
+    let #(model, _local, _server) = state
     case msg {
       AddToCart(_) | RemoveFromCart(_) | IncrementQty(_) | DecrementQty(_) ->
         effect.from(fn(_dispatch) {
@@ -241,7 +247,7 @@ fn make_on_update(
         })
       StockUpdated -> {
         let store_products = store.get_all(product_store, "products")
-        case list.length(store_products) > 0 {
+        case store_products != [] {
           True ->
             effect.from(fn(dispatch) { dispatch(SetProducts(store_products)) })
           False -> effect.none()
@@ -458,7 +464,13 @@ pub fn start() {
     Model(products: products, cart_items: [])
   }
 
-  beacon.app_with_local(init_from_store, init_local, update, view)
+  beacon.app(
+    fn() { #(init_from_store(), effect.none()) },
+    init_local,
+    beacon.no_server,
+    update,
+    view,
+  )
   |> beacon.title("Shopping Cart")
   |> beacon.on_update(make_on_update(product_store))
   |> beacon.subscriptions(fn(_model) { ["cart:stock"] })

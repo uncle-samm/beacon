@@ -234,7 +234,7 @@ pub type AgentRunStatus {
 }
 
 // Note: Server field exclusion is tested in build_codec_test.gleam
-// (app_with_server_excludes_server_from_model_fields_test,
+// (server_state_excludes_server_from_model_fields_test,
 //  server_fields_tracked_separately_test).
 
 pub fn codec_computed_fields_have_correct_types_test() {

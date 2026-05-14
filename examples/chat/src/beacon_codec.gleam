@@ -28,8 +28,8 @@ fn server_decode_chatmessage() -> decode.Decoder(chat.ChatMessage) {
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: chat.Model) -> String {
-  let model = state
+pub fn encode_model(state: #(chat.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("username", json.string(model.username)),
     #("username_input", json.string(model.username_input)),
@@ -46,15 +46,16 @@ pub fn encode_model(state: chat.Model) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: chat.Model) -> String {
-  let model = state
-  chat.view(model)
+pub fn render_model(state: #(chat.Model, Nil, Nil)) -> String {
+  let model = state.0
+  let local = Nil
+  chat.view(model, local)
   |> element.to_string
 }
 
-/// Decode a Model from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(chat.Model, String) {
-  let model_decoder = {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(chat.Model, Nil, Nil), String) {
+  let state_decoder = {
     use username <- decode.field("username", decode.string)
     use username_input <- decode.field("username_input", decode.string)
     use has_username <- decode.field("has_username", decode.bool)
@@ -65,11 +66,12 @@ pub fn decode_model(json_str: String) -> Result(chat.Model, String) {
     use online_users <- decode.field("online_users", decode.list(decode.string))
     use session_id <- decode.field("session_id", decode.int)
     use typing_user <- decode.field("typing_user", decode.string)
-    decode.success(chat.Model(username: username, username_input: username_input, has_username: has_username, current_room: current_room, input_text: input_text, available_rooms: available_rooms, visible_messages: visible_messages, online_users: online_users, session_id: session_id, typing_user: typing_user))
+
+    decode.success(#(chat.Model(username: username, username_input: username_input, has_username: has_username, current_room: current_room, input_text: input_text, available_rooms: available_rooms, visible_messages: visible_messages, online_users: online_users, session_id: session_id, typing_user: typing_user), Nil, Nil))
   }
-  case json.parse(json_str, model_decoder) {
-    Ok(model) -> Ok(model)
-    Error(_) -> Error("Failed to decode model")
+  case json.parse(json_str, state_decoder) {
+    Ok(state) -> Ok(state)
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 
@@ -179,8 +181,8 @@ fn decode_msg(json_str: String) -> Result(chat.Msg, String) {
   }
 }
 
-pub fn encode_substate_visible_messages(state: chat.Model) -> String {
-  let model = state
+pub fn encode_substate_visible_messages(state: #(chat.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.array(model.visible_messages, encode_chatmessage)
   |> json.to_string
 }
@@ -189,8 +191,8 @@ pub fn substate_names() -> List(String) {
   ["visible_messages"]
 }
 
-pub fn encode_flat_fields(state: chat.Model) -> String {
-  let model = state
+pub fn encode_flat_fields(state: #(chat.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("username", json.string(model.username)),
     #("username_input", json.string(model.username_input)),

@@ -2,6 +2,7 @@
 /// - Model.count is server state (shared, synced)
 /// - Local.input and Local.menu_open are client state (instant, per-tab)
 import beacon
+import beacon/effect
 import beacon/html
 import gleam/int
 
@@ -22,16 +23,21 @@ pub type Msg {
   ToggleMenu
 }
 
-pub fn init() -> Model {
-  Model(count: 0)
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(Model(count: 0), effect.none())
 }
 
 pub fn init_local(_model: Model) -> Local {
   Local(input: "", menu_open: False)
 }
 
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg {
+pub fn update(
+  model: Model,
+  local: Local,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Local, Nil) {
+  let #(model, local) = case msg {
     // These change Model → will sync with server when client-side execution is enabled
     Increment -> #(Model(count: model.count + 1), local)
     Decrement -> #(Model(count: model.count - 1), local)
@@ -39,6 +45,7 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
     SetInput(text) -> #(model, Local(..local, input: text))
     ToggleMenu -> #(model, Local(..local, menu_open: !local.menu_open))
   }
+  #(model, local, Nil)
 }
 
 pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
@@ -72,7 +79,7 @@ pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
 }
 
 pub fn main() {
-  beacon.app_with_local(init, init_local, update, view)
+  beacon.app(init, init_local, beacon.no_server, update, view)
   |> beacon.title("Counter with Local State")
   |> beacon.start(8080)
 }

@@ -1,7 +1,8 @@
 -module(beacon_build_ffi).
 -export([string_to_bytes/1, bytes_to_string/1,
          run_program/3, absolute_path/1, generate_safe_hash/0,
-         is_any_source_newer_than_manifest/1, is_any_source_newer_than/2]).
+         exit_failure/1, is_any_source_newer_than_manifest/1,
+         is_any_source_newer_than/2]).
 
 %% Run a program without invoking a shell. This prevents build-time command
 %% injection through project paths or path dependencies.
@@ -51,6 +52,11 @@ collect_port_output(Port, Acc) ->
 absolute_path(Path0) ->
     Path = binary_to_list(Path0),
     {ok, unicode:characters_to_binary(filename:absname(Path))}.
+
+exit_failure(Reason0) ->
+    Reason = binary_to_list(Reason0),
+    io:format(standard_error, "~s~n", [Reason]),
+    erlang:halt(1).
 
 generate_safe_hash() ->
     Seed = term_to_binary({erlang:monotonic_time(), erlang:unique_integer([positive])}),

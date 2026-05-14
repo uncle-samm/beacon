@@ -26,7 +26,7 @@ fn server_decode_todo() -> decode.Decoder(todo_app.Todo) {
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: #(todo_app.Model, todo_app.Local)) -> String {
+pub fn encode_model(state: #(todo_app.Model, todo_app.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   json.object([
@@ -39,25 +39,25 @@ pub fn encode_model(state: #(todo_app.Model, todo_app.Local)) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: #(todo_app.Model, todo_app.Local)) -> String {
+pub fn render_model(state: #(todo_app.Model, todo_app.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   todo_app.view(model, local)
   |> element.to_string
 }
 
-/// Decode a #(Model, Local) from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(#(todo_app.Model, todo_app.Local), String) {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(todo_app.Model, todo_app.Local, Nil), String) {
   let state_decoder = {
     use todos <- decode.field("todos", decode.list(server_decode_todo()))
     use input_text <- decode.field("input_text", decode.string)
     use next_id <- decode.field("next_id", decode.int)
     use filter <- decode.field("filter", decode.string)
-    decode.success(#(todo_app.Model(todos: todos, input_text: input_text, next_id: next_id), todo_app.Local(filter: filter)))
+    decode.success(#(todo_app.Model(todos: todos, input_text: input_text, next_id: next_id), todo_app.Local(filter: filter), Nil))
   }
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
-    Error(_) -> Error("Failed to decode model+local")
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 
@@ -167,7 +167,7 @@ fn decode_msg(json_str: String) -> Result(todo_app.Msg, String) {
   }
 }
 
-pub fn encode_substate_todos(state: #(todo_app.Model, todo_app.Local)) -> String {
+pub fn encode_substate_todos(state: #(todo_app.Model, todo_app.Local, Nil)) -> String {
   let model = state.0
   json.array(model.todos, encode_todo)
   |> json.to_string
@@ -177,7 +177,7 @@ pub fn substate_names() -> List(String) {
   ["todos"]
 }
 
-pub fn encode_flat_fields(state: #(todo_app.Model, todo_app.Local)) -> String {
+pub fn encode_flat_fields(state: #(todo_app.Model, todo_app.Local, Nil)) -> String {
   let model = state.0
   json.object([
     #("input_text", json.string(model.input_text)),

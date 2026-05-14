@@ -1,5 +1,4 @@
 /// Board domain types — columns and cards for the kanban board.
-
 pub type Column {
   Todo
   Doing

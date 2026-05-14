@@ -2,7 +2,9 @@
 /// Re-run `gleam run -m beacon/build` to regenerate.
 
 import privacy_demo
+import beacon/element
 import gleam/json
+import gleam/dynamic/decode
 
 fn encode_item(s: privacy_demo.Item) -> json.Json {
   json.object([
@@ -19,7 +21,7 @@ fn encode_item(s: privacy_demo.Item) -> json.Json {
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: #(privacy_demo.Model, privacy_demo.Server)) -> String {
+pub fn encode_model(state: #(privacy_demo.Model, Nil, privacy_demo.Server)) -> String {
   let model = state.0
   json.object([
     #("items", json.array(model.items, encode_item)),
@@ -31,12 +33,67 @@ pub fn encode_model(state: #(privacy_demo.Model, privacy_demo.Server)) -> String
   |> json.to_string
 }
 
-/// Decode is not supported for app_with_server — Server state cannot be reconstructed from client JSON.
-pub fn decode_model(_json_str: String) -> Result(#(privacy_demo.Model, privacy_demo.Server), String) {
-  Error("decode_model not supported for app_with_server")
+/// Render the model with the same generated server contract used for SSR.
+pub fn render_model(state: #(privacy_demo.Model, Nil, privacy_demo.Server)) -> String {
+  let model = state.0
+  let local = Nil
+  privacy_demo.view(model, local)
+  |> element.to_string
 }
 
-pub fn encode_substate_items(state: #(privacy_demo.Model, privacy_demo.Server)) -> String {
+/// Decode is not supported when Server state is present — Server state cannot be reconstructed from client JSON.
+pub fn decode_model(_json_str: String) -> Result(#(privacy_demo.Model, Nil, privacy_demo.Server), String) {
+  Error("decode_model not supported when Server state is present")
+}
+
+/// Decode the generated client event contract. Live event decoding never
+/// renders the server view or reads the handler registry.
+pub fn decode_event(_name: String, _handler_id: String, data: String, _target_path: String) -> Result(privacy_demo.Msg, String) {
+  let envelope_decoder = {
+    use msg_json <- decode.field("__beacon_msg", decode.string)
+    decode.success(msg_json)
+  }
+  case json.parse(data, envelope_decoder) {
+    Ok(msg_json) -> decode_msg(msg_json)
+    Error(_) -> Error("Client event missing generated Beacon message envelope")
+  }
+}
+
+
+fn decode_msg(json_str: String) -> Result(privacy_demo.Msg, String) {
+  let tag_decoder = {
+    use tag <- decode.field("tag", decode.string)
+    decode.success(tag)
+  }
+  case json.parse(json_str, tag_decoder) {
+    Ok(tag) -> {
+      case tag {
+    "AddItem" -> {
+      let msg_decoder = {
+      decode.success(privacy_demo.AddItem)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag AddItem")
+      }
+    }
+    "ClearItems" -> {
+      let msg_decoder = {
+      decode.success(privacy_demo.ClearItems)
+      }
+      case json.parse(json_str, msg_decoder) {
+        Ok(msg) -> Ok(msg)
+        Error(_) -> Error("Generated Beacon message payload did not match tag ClearItems")
+      }
+    }
+        _ -> Error("Unknown generated Beacon message tag " <> tag)
+      }
+    }
+    Error(_) -> Error("Generated Beacon message payload missing tag")
+  }
+}
+
+pub fn encode_substate_items(state: #(privacy_demo.Model, Nil, privacy_demo.Server)) -> String {
   let model = state.0
   json.array(model.items, encode_item)
   |> json.to_string
@@ -46,7 +103,7 @@ pub fn substate_names() -> List(String) {
   ["items"]
 }
 
-pub fn encode_flat_fields(state: #(privacy_demo.Model, privacy_demo.Server)) -> String {
+pub fn encode_flat_fields(state: #(privacy_demo.Model, Nil, privacy_demo.Server)) -> String {
   let model = state.0
   json.object([
     #("tax_rate", json.float(model.tax_rate)),

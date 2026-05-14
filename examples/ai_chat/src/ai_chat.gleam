@@ -61,60 +61,62 @@ pub fn init() -> #(Model, effect.Effect(Msg)) {
 
 // --- Update ---
 
-pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
-  case msg {
-    UpdateInput(text) -> #(Model(..model, input_text: text), effect.none())
+pub fn update(
+  model: Model,
+  _local: Nil,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Nil, Nil) {
+  let model = case msg {
+    UpdateInput(text) -> Model(..model, input_text: text)
 
     SendPrompt -> {
       let text = string.trim(model.input_text)
       case string.is_empty(text) || model.is_streaming {
-        True -> #(model, effect.none())
+        True -> model
         False -> {
           let user_msg = ChatMessage(role: User, content: text)
           let new_messages = list.append(model.messages, [user_msg])
-          #(
-            Model(
-              messages: new_messages,
-              input_text: "",
-              is_streaming: True,
-              streaming_text: "",
-            ),
-            start_streaming(new_messages),
+          Model(
+            messages: new_messages,
+            input_text: "",
+            is_streaming: True,
+            streaming_text: "",
           )
         }
       }
     }
 
-    CharDelta(ch) -> #(
-      Model(..model, streaming_text: model.streaming_text <> ch),
-      effect.none(),
-    )
+    CharDelta(ch) -> Model(..model, streaming_text: model.streaming_text <> ch)
 
     StreamDone -> {
       let ai_msg = ChatMessage(role: Assistant, content: model.streaming_text)
-      #(
-        Model(
-          ..model,
-          messages: list.append(model.messages, [ai_msg]),
-          is_streaming: False,
-          streaming_text: "",
-        ),
-        effect.none(),
+      Model(
+        ..model,
+        messages: list.append(model.messages, [ai_msg]),
+        is_streaming: False,
+        streaming_text: "",
       )
     }
 
     StreamError(err) -> {
       let error_msg = ChatMessage(role: Assistant, content: "Error: " <> err)
-      #(
-        Model(
-          ..model,
-          messages: list.append(model.messages, [error_msg]),
-          is_streaming: False,
-          streaming_text: "",
-        ),
-        effect.none(),
+      Model(
+        ..model,
+        messages: list.append(model.messages, [error_msg]),
+        is_streaming: False,
+        streaming_text: "",
       )
     }
+  }
+  #(model, Nil, Nil)
+}
+
+fn after_update(state: #(Model, Nil, Nil), msg: Msg) -> effect.Effect(Msg) {
+  let model = state.0
+  case msg, model.is_streaming {
+    SendPrompt, True -> start_streaming(model.messages)
+    _, _ -> effect.none()
   }
 }
 
@@ -248,14 +250,15 @@ fn sleep(ms: Int) -> Nil
 // --- Start ---
 
 pub fn main() {
-  beacon.app_with_effects(init, update, view)
+  beacon.app(init, beacon.no_local, beacon.no_server, update, view)
+  |> beacon.on_update(after_update)
   |> beacon.title("Beacon AI Chat")
   |> beacon.start(8080)
 }
 
 // --- View ---
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   html.div(
     [
       html.style(

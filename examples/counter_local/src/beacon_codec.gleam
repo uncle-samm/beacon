@@ -15,7 +15,7 @@ import gleam/dynamic/decode
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: #(counter_local.Model, counter_local.Local)) -> String {
+pub fn encode_model(state: #(counter_local.Model, counter_local.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   json.object([
@@ -27,24 +27,24 @@ pub fn encode_model(state: #(counter_local.Model, counter_local.Local)) -> Strin
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: #(counter_local.Model, counter_local.Local)) -> String {
+pub fn render_model(state: #(counter_local.Model, counter_local.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   counter_local.view(model, local)
   |> element.to_string
 }
 
-/// Decode a #(Model, Local) from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(#(counter_local.Model, counter_local.Local), String) {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(counter_local.Model, counter_local.Local, Nil), String) {
   let state_decoder = {
     use count <- decode.field("count", decode.int)
     use input <- decode.field("input", decode.string)
     use menu_open <- decode.field("menu_open", decode.bool)
-    decode.success(#(counter_local.Model(count: count), counter_local.Local(input: input, menu_open: menu_open)))
+    decode.success(#(counter_local.Model(count: count), counter_local.Local(input: input, menu_open: menu_open), Nil))
   }
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
-    Error(_) -> Error("Failed to decode model+local")
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 

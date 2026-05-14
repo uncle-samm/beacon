@@ -22,6 +22,7 @@ gleam add beacon
 ```gleam
 // src/my_app.gleam
 import beacon
+import beacon/effect
 import beacon/html
 import gleam/int
 
@@ -34,18 +35,23 @@ pub type Msg {
   Decrement
 }
 
-pub fn init() -> Model {
-  Model(count: 0)
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(Model(count: 0), effect.none())
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
+pub fn update(
+  model: Model,
+  _local: Nil,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Nil, Nil) {
   case msg {
-    Increment -> Model(count: model.count + 1)
-    Decrement -> Model(count: model.count - 1)
+    Increment -> #(Model(count: model.count + 1), Nil, Nil)
+    Decrement -> #(Model(count: model.count - 1), Nil, Nil)
   }
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   html.div([], [
     html.h1([], [html.text("Counter")]),
     html.button([beacon.on_click(Decrement)], [html.text("-")]),
@@ -55,7 +61,7 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
 }
 
 pub fn main() {
-  beacon.app(init, update, view)
+  beacon.app(init, beacon.no_local, beacon.no_server, update, view)
   |> beacon.title("My Counter")
   |> beacon.start(8080)
 }
@@ -121,10 +127,9 @@ pub type ClientMsg {
 The generated contract will decode browser events into `Increment` only;
 `AdminReset` remains server/internal.
 
-The current public API still uses typed entrypoints such as `app`,
-`app_with_local`, and `app_with_server` because Gleam does not support overloaded
-functions. Treat them as type-specific doors into the same runtime model, not as
-separate application modes.
+The public API uses one constructor:
+`beacon.app(init, init_local, init_server, update, view)`. Use
+`beacon.no_local` or `beacon.no_server` when a state area is absent.
 
 ### Local State (Zero Traffic)
 
@@ -136,7 +141,7 @@ pub type Msg {
   SetInput(String) // → changes Local → instant, zero traffic
 }
 
-beacon.app_with_local(init, init_local, update, view)
+beacon.app(init, init_local, beacon.no_server, update, view)
 ```
 
 `init_local(model)` receives the initial `Model`, so the first client-only values
@@ -158,22 +163,23 @@ stale-handler bug caused by closing over server-side Local in
 ### Routing
 
 ```gleam
-fn pages() -> List(route.Page(Model, Msg)) {
+fn pages() -> List(route.Page(#(Model, Nil, Nil), Msg)) {
   [
-    route.page("/", RouteChanged, fn(_model, _route) { home_view() }),
-    route.page("/about", RouteChanged, fn(_model, _route) { about_view() }),
-    route.page("/blog/:slug", RouteChanged, fn(model, route) {
+    route.page("/", fn(r) { RouteChanged(r.path) }, fn(_state, _route) { home_view() }),
+    route.page("/about", fn(r) { RouteChanged(r.path) }, fn(_state, _route) { about_view() }),
+    route.page("/blog/:slug", fn(r) { RouteChanged(r.path) }, fn(state, route) {
+      let #(model, _local, _server) = state
       blog_view(model, route)
     }),
   ]
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
-  let assert Ok(page) = route.dispatch_view(pages(), model, model.path)
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
+  let assert Ok(page) = route.dispatch_view(pages(), #(model, Nil, Nil), model.path)
   page
 }
 
-beacon.app(init, update, view)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 |> beacon.route_pages(pages())
 |> beacon.start(8080)
 ```
@@ -190,17 +196,19 @@ pub type Msg {
   Home(home.Msg)
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
+pub fn update(model: Model, _local: Nil, _server: Nil, msg: Msg) -> #(Model, Nil, Nil) {
   case msg {
-    RouteChanged(path) -> Model(..model, path: path)
-    Home(child_msg) ->
-      route.update_model(
+    RouteChanged(path) -> #(Model(..model, path: path), Nil, Nil)
+    Home(child_msg) -> {
+      let model = route.update_model(
         model,
         child_msg,
         fn(model) { model.home },
         fn(model, home) { Model(..model, home: home) },
         home.update,
       )
+      #(model, Nil, Nil)
+    }
   }
 }
 ```
@@ -211,7 +219,7 @@ pub fn update(model: Model, msg: Msg) -> Model {
 let shared = store.new("counter")
 store.put(shared, "count", 0)
 
-beacon.app_with_local(init, init_local, update, view)
+beacon.app(init, init_local, beacon.no_server, update, view)
 |> beacon.subscriptions(fn(_model) { [store.topic(shared)] })
 |> beacon.on_notify(fn(_topic) { CounterUpdated })
 |> beacon.start(8080)
@@ -223,7 +231,7 @@ beacon.app_with_local(init, init_local, update, view)
 import beacon/api
 import gleam/json
 
-beacon.app(init, update, view)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 |> beacon.api_routes(api.routes([
   api.get("/api/status", fn(_req) {
     api.json_value(200, json.object([#("ok", json.bool(True))]))
@@ -258,7 +266,7 @@ matching, pass a raw `fn(req) -> Option(Response(ResponseBody))` to
 ### Advanced: Custom Head HTML
 
 ```gleam
-beacon.app(init, update, view)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 |> beacon.head_html("<link rel='stylesheet' href='/styles.css'>")
 |> beacon.start(8080)
 ```
@@ -310,7 +318,7 @@ import beacon/session
 let store = session.new_store("my_app_sessions")
 let auth_config = auth.default_session_config()
 
-beacon.app_with_server(init, init_server, update, view)
+beacon.app(init, beacon.no_local, init_server, update, view)
 |> beacon.api_routes(auth.session_routes(store, auth_config, authenticate_login))
 |> beacon.ws_auth(auth.protect_ws(store, auth_config))
 |> beacon.start(8080)
@@ -334,7 +342,7 @@ API handlers.
 ### Advanced: WebSocket Authentication
 
 ```gleam
-beacon.app(init, update, view)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 |> beacon.ws_auth(fn(req) {
   case beacon.get_cookie(req, "session_token") {
     Ok(token) -> validate_session(token)
@@ -351,12 +359,12 @@ If you are using standard Beacon sessions, prefer
 
 ### Request-Aware Server Init
 
-With `app_with_server`, the `init_server` function takes no arguments. Use
+With `Server state`, the `init_server` function takes no arguments. Use
 `auth.init_from_session` when SSR should render a signed-in model on first
 paint:
 
 ```gleam
-beacon.app_with_server(init, init_server, update, view)
+beacon.app(init, beacon.no_local, init_server, update, view)
 |> beacon.ws_auth(auth.protect_ws(store, auth_config))
 |> beacon.ws_init(auth.init_from_session(
   store,
@@ -371,14 +379,14 @@ beacon.app_with_server(init, init_server, update, view)
 
 `beacon.ws_init` is the raw hook underneath this helper. When set, it replaces
 both `init` and `init_server` and returns the full combined state
-`#(Model, Server)`, so keep it for request-aware initialization only.
+`#(Model, Local, Server)`, so keep it for request-aware initialization only.
 
 ### Effects and Async
 
 For apps that need side effects (HTTP calls, database queries, timers):
 
 ```gleam
-beacon.app(init, update, view)
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
 |> beacon.on_update(fn(model, msg) {
   case msg {
     Saved -> effect.from(fn(_) { persist(model) })
@@ -390,10 +398,8 @@ beacon.app(init, update, view)
 
 Keep `update` pure and deterministic. Put stores, PubSub, HTTP, env reads,
 random values, and other BEAM-only work in `on_update`; the build/linter will
-reject those calls inside client-visible `update`. `app_with_effects` remains
-available for server-authoritative effect apps, but the recommended shape is
-`app(init, update, view) |> on_update(...)` when the app should also produce a
-client renderer.
+reject those calls inside client-visible `update`. Keep startup work in
+`init`'s returned effect and event-triggered server work in `on_update`.
 
 Available effects:
 - `effect.from(fn(dispatch) { ... })` -- run async work, dispatch messages back
@@ -408,15 +414,15 @@ Private state that never reaches the client. Add `pub type Server` when the app
 needs secrets, sessions, database handles, audit state, or other private values:
 
 ```gleam
-beacon.app_with_server(init, init_server, update, view)
+beacon.app(init, beacon.no_local, init_server, update, view)
 |> beacon.start(8080)
 ```
 
 - `init_server` returns server-only state (DB pools, API keys, etc.)
-- `update` receives both `model` and `server`, returns `#(model, server, Effect(msg))`
-- `view` receives only `model` -- server state is invisible to the view
+- `update` receives `model`, `local`, and `server`, returning `#(model, local, server)`
+- `view` receives only `model` and `local` -- server state is invisible to the view
 - Server state is never serialized, never sent to client, never in JS bundle
-- Model updates ARE automatically pushed to the client via an auto-generated codec -- the build system generates `beacon_codec.gleam` for `app_with_server` apps too, encoding only Model fields (never Server)
+- Model updates ARE automatically pushed to the client via an auto-generated codec -- the build system generates `beacon_codec.gleam` for `Server state` apps too, encoding only Model fields (never Server)
 
 ### Redirects
 

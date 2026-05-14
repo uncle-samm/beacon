@@ -3,7 +3,6 @@
 /// - Real BEAM runtime metrics via beacon/debug
 /// - Auto-updating UI without any user interaction
 /// - Sparkline rendering with SVG
-
 import beacon
 import beacon/debug
 import beacon/effect
@@ -39,8 +38,7 @@ pub fn init() -> #(Model, effect.Effect(Msg)) {
   #(
     Model(
       process_count: stats.process_count,
-      memory_mb: int.to_float(stats.memory_bytes)
-        /. 1_048_576.0,
+      memory_mb: int.to_float(stats.memory_bytes) /. 1_048_576.0,
       uptime_seconds: stats.uptime_seconds,
       process_history: [stats.process_count],
       memory_history: [
@@ -57,9 +55,11 @@ pub fn init() -> #(Model, effect.Effect(Msg)) {
 
 pub fn update(
   model: Model,
+  _local: Nil,
+  _server: Nil,
   msg: Msg,
-) -> #(Model, effect.Effect(Msg)) {
-  case msg {
+) -> #(Model, Nil, Nil) {
+  let model = case msg {
     RefreshStats -> {
       let stats = debug.stats()
       let mem = int.to_float(stats.memory_bytes) /. 1_048_576.0
@@ -69,19 +69,17 @@ pub fn update(
       let mem_history =
         list.append(model.memory_history, [mem])
         |> take_last(max_history)
-      #(
-        Model(
-          process_count: stats.process_count,
-          memory_mb: mem,
-          uptime_seconds: stats.uptime_seconds,
-          process_history: proc_history,
-          memory_history: mem_history,
-          tick_count: model.tick_count + 1,
-        ),
-        effect.none(),
+      Model(
+        process_count: stats.process_count,
+        memory_mb: mem,
+        uptime_seconds: stats.uptime_seconds,
+        process_history: proc_history,
+        memory_history: mem_history,
+        tick_count: model.tick_count + 1,
       )
     }
   }
+  #(model, Nil, Nil)
 }
 
 fn take_last(items: List(a), n: Int) -> List(a) {
@@ -94,7 +92,7 @@ fn take_last(items: List(a), n: Int) -> List(a) {
 
 // --- View ---
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   html.div(
     [
       html.style(
@@ -127,31 +125,26 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
             float_to_str(model.memory_mb, 1) <> " MB",
             "#2196F3",
           ),
-          metric_card(
-            "Uptime",
-            format_uptime(model.uptime_seconds),
-            "#FF9800",
-          ),
+          metric_card("Uptime", format_uptime(model.uptime_seconds), "#FF9800"),
         ],
       ),
       // Sparklines
-      html.div([html.style("display:grid;grid-template-columns:1fr 1fr;gap:1rem")], [
-        sparkline_card(
-          "Process Count",
-          model.process_history |> list.map(int.to_float),
-          "#4CAF50",
-        ),
-        sparkline_card("Memory (MB)", model.memory_history, "#2196F3"),
-      ]),
+      html.div(
+        [html.style("display:grid;grid-template-columns:1fr 1fr;gap:1rem")],
+        [
+          sparkline_card(
+            "Process Count",
+            model.process_history |> list.map(int.to_float),
+            "#4CAF50",
+          ),
+          sparkline_card("Memory (MB)", model.memory_history, "#2196F3"),
+        ],
+      ),
     ],
   )
 }
 
-fn metric_card(
-  label: String,
-  value: String,
-  color: String,
-) -> beacon.Node(Msg) {
+fn metric_card(label: String, value: String, color: String) -> beacon.Node(Msg) {
   html.div(
     [
       html.style(
@@ -160,9 +153,12 @@ fn metric_card(
       ),
     ],
     [
-      html.div([html.style("color:#666;font-size:0.85rem;margin-bottom:0.5rem")], [
-        html.text(label),
-      ]),
+      html.div(
+        [html.style("color:#666;font-size:0.85rem;margin-bottom:0.5rem")],
+        [
+          html.text(label),
+        ],
+      ),
       html.div([html.style("font-size:1.8rem;font-weight:bold;color:#333")], [
         html.text(value),
       ]),
@@ -177,14 +173,15 @@ fn sparkline_card(
 ) -> beacon.Node(Msg) {
   html.div(
     [
-      html.style(
-        "background:#f8f9fa;border-radius:8px;padding:1rem",
-      ),
+      html.style("background:#f8f9fa;border-radius:8px;padding:1rem"),
     ],
     [
-      html.div([html.style("color:#666;font-size:0.85rem;margin-bottom:0.5rem")], [
-        html.text(label),
-      ]),
+      html.div(
+        [html.style("color:#666;font-size:0.85rem;margin-bottom:0.5rem")],
+        [
+          html.text(label),
+        ],
+      ),
       render_sparkline(values, color, 350, 60),
     ],
   )
@@ -301,7 +298,7 @@ pub fn main() {
 }
 
 pub fn start() {
-  beacon.app_with_effects(init, update, view)
+  beacon.app(init, beacon.no_local, beacon.no_server, update, view)
   |> beacon.title("Live Dashboard")
   |> beacon.start(8080)
 }

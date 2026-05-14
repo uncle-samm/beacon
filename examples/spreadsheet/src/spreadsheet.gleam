@@ -140,8 +140,13 @@ pub fn init_local(_model: Model) -> Local {
 
 // --- Update ---
 
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg {
+pub fn update(
+  model: Model,
+  local: Local,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Local, Nil) {
+  let #(model, local) = case msg {
     SelectCell(key) -> {
       case parse_cell_key(key) {
         Ok(#(row, col)) -> {
@@ -205,15 +210,16 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
 
     SetCells(cells) -> #(Model(..model, cells: cells), local)
   }
+  #(model, local, Nil)
 }
 
 // --- Side Effects ---
 
 fn make_on_update(
   cell_store: store.ListStore(Cell),
-) -> fn(#(Model, Local), Msg) -> effect.Effect(Msg) {
-  fn(state: #(Model, Local), msg: Msg) -> effect.Effect(Msg) {
-    let #(model, _local) = state
+) -> fn(#(Model, Local, Nil), Msg) -> effect.Effect(Msg) {
+  fn(state: #(Model, Local, Nil), msg: Msg) -> effect.Effect(Msg) {
+    let #(model, _local, _server) = state
     case msg {
       ConfirmEdit(_) ->
         effect.from(fn(_dispatch) {
@@ -408,7 +414,13 @@ pub fn start() {
     )
   }
 
-  beacon.app_with_local(init_from_store, init_local, update, view)
+  beacon.app(
+    fn() { #(init_from_store(), effect.none()) },
+    init_local,
+    beacon.no_server,
+    update,
+    view,
+  )
   |> beacon.title("Spreadsheet")
   |> beacon.on_update(make_on_update(cell_store))
   |> beacon.subscriptions(fn(_model) { ["spreadsheet:cells"] })

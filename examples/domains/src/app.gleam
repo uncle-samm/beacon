@@ -1,7 +1,7 @@
 /// Multi-file domain example — demonstrates importing types from domain modules.
 /// Model references auth.User and List(items.Item) from separate files.
-
 import beacon
+import beacon/effect
 import beacon/html
 import domains/auth
 import domains/items
@@ -9,12 +9,7 @@ import gleam/int
 import gleam/list
 
 pub type Model {
-  Model(
-    user: auth.User,
-    items: List(items.Item),
-    next_id: Int,
-    input: String,
-  )
+  Model(user: auth.User, items: List(items.Item), next_id: Int, input: String)
 }
 
 pub type Msg {
@@ -24,23 +19,36 @@ pub type Msg {
   SetRole(String)
 }
 
-pub fn init() -> Model {
-  Model(
-    user: auth.User(name: "Alice", email: "alice@example.com", role: auth.Member),
-    items: [
-      items.Item(id: 1, name: "Buy groceries", done: False),
-      items.Item(id: 2, name: "Write tests", done: True),
-    ],
-    next_id: 3,
-    input: "",
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(
+    Model(
+      user: auth.User(
+        name: "Alice",
+        email: "alice@example.com",
+        role: auth.Member,
+      ),
+      items: [
+        items.Item(id: 1, name: "Buy groceries", done: False),
+        items.Item(id: 2, name: "Write tests", done: True),
+      ],
+      next_id: 3,
+      input: "",
+    ),
+    effect.none(),
   )
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
-  case msg {
+pub fn update(
+  model: Model,
+  _local: Nil,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Nil, Nil) {
+  let model = case msg {
     SetInput(text) -> Model(..model, input: text)
     AddItem -> {
-      let new_item = items.Item(id: model.next_id, name: model.input, done: False)
+      let new_item =
+        items.Item(id: model.next_id, name: model.input, done: False)
       Model(
         ..model,
         items: list.append(model.items, [new_item]),
@@ -67,9 +75,10 @@ pub fn update(model: Model, msg: Msg) -> Model {
       Model(..model, user: auth.User(..model.user, role: role))
     }
   }
+  #(model, Nil, Nil)
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   html.div([html.class("domains-app")], [
     html.h1([], [html.text("Multi-File Domains")]),
     // User info
@@ -88,11 +97,7 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
     // Items list
     html.div([html.class("items")], [
       html.h2([], [
-        html.text(
-          "Items ("
-          <> int.to_string(list.length(model.items))
-          <> ")",
-        ),
+        html.text("Items (" <> int.to_string(list.length(model.items)) <> ")"),
       ]),
       html.div([], list.map(model.items, view_item)),
       html.div([html.class("add-item")], [
@@ -140,7 +145,7 @@ fn role_to_string(role: auth.Role) -> String {
 }
 
 pub fn main() {
-  beacon.app(init, update, view)
+  beacon.app(init, beacon.no_local, beacon.no_server, update, view)
   |> beacon.title("Beacon Domains")
   |> beacon.start(8080)
 }

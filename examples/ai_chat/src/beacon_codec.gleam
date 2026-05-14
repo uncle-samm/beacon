@@ -35,8 +35,8 @@ fn server_decode_role_value(s: String) -> ai_chat.Role {
 }
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: ai_chat.Model) -> String {
-  let model = state
+pub fn encode_model(state: #(ai_chat.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("messages", json.array(model.messages, encode_chatmessage)),
     #("input_text", json.string(model.input_text)),
@@ -47,24 +47,26 @@ pub fn encode_model(state: ai_chat.Model) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: ai_chat.Model) -> String {
-  let model = state
-  ai_chat.view(model)
+pub fn render_model(state: #(ai_chat.Model, Nil, Nil)) -> String {
+  let model = state.0
+  let local = Nil
+  ai_chat.view(model, local)
   |> element.to_string
 }
 
-/// Decode a Model from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(ai_chat.Model, String) {
-  let model_decoder = {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(ai_chat.Model, Nil, Nil), String) {
+  let state_decoder = {
     use messages <- decode.field("messages", decode.list(server_decode_chatmessage()))
     use input_text <- decode.field("input_text", decode.string)
     use is_streaming <- decode.field("is_streaming", decode.bool)
     use streaming_text <- decode.field("streaming_text", decode.string)
-    decode.success(ai_chat.Model(messages: messages, input_text: input_text, is_streaming: is_streaming, streaming_text: streaming_text))
+
+    decode.success(#(ai_chat.Model(messages: messages, input_text: input_text, is_streaming: is_streaming, streaming_text: streaming_text), Nil, Nil))
   }
-  case json.parse(json_str, model_decoder) {
-    Ok(model) -> Ok(model)
-    Error(_) -> Error("Failed to decode model")
+  case json.parse(json_str, state_decoder) {
+    Ok(state) -> Ok(state)
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 
@@ -145,8 +147,8 @@ fn decode_msg(json_str: String) -> Result(ai_chat.Msg, String) {
   }
 }
 
-pub fn encode_substate_messages(state: ai_chat.Model) -> String {
-  let model = state
+pub fn encode_substate_messages(state: #(ai_chat.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.array(model.messages, encode_chatmessage)
   |> json.to_string
 }
@@ -155,8 +157,8 @@ pub fn substate_names() -> List(String) {
   ["messages"]
 }
 
-pub fn encode_flat_fields(state: ai_chat.Model) -> String {
-  let model = state
+pub fn encode_flat_fields(state: #(ai_chat.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("input_text", json.string(model.input_text)),
     #("is_streaming", json.bool(model.is_streaming)),

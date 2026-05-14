@@ -30,7 +30,7 @@ fn server_decode_stroke() -> decode.Decoder(canvas.Stroke) {
 
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: #(canvas.Model, canvas.Local)) -> String {
+pub fn encode_model(state: #(canvas.Model, canvas.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   json.object([
@@ -45,15 +45,15 @@ pub fn encode_model(state: #(canvas.Model, canvas.Local)) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: #(canvas.Model, canvas.Local)) -> String {
+pub fn render_model(state: #(canvas.Model, canvas.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   canvas.view(model, local)
   |> element.to_string
 }
 
-/// Decode a #(Model, Local) from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(#(canvas.Model, canvas.Local), String) {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(canvas.Model, canvas.Local, Nil), String) {
   let state_decoder = {
     use strokes <- decode.field("strokes", decode.list(server_decode_stroke()))
     use color <- decode.field("color", decode.string)
@@ -61,11 +61,11 @@ pub fn decode_model(json_str: String) -> Result(#(canvas.Model, canvas.Local), S
     use cursor_x <- decode.field("cursor_x", decode.int)
     use cursor_y <- decode.field("cursor_y", decode.int)
     use pending_strokes <- decode.field("pending_strokes", decode.list(server_decode_stroke()))
-    decode.success(#(canvas.Model(strokes: strokes, color: color), canvas.Local(drawing: drawing, cursor_x: cursor_x, cursor_y: cursor_y, pending_strokes: pending_strokes)))
+    decode.success(#(canvas.Model(strokes: strokes, color: color), canvas.Local(drawing: drawing, cursor_x: cursor_x, cursor_y: cursor_y, pending_strokes: pending_strokes), Nil))
   }
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
-    Error(_) -> Error("Failed to decode model+local")
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 
@@ -166,7 +166,7 @@ fn decode_msg(json_str: String) -> Result(canvas.Msg, String) {
   }
 }
 
-pub fn encode_substate_strokes(state: #(canvas.Model, canvas.Local)) -> String {
+pub fn encode_substate_strokes(state: #(canvas.Model, canvas.Local, Nil)) -> String {
   let model = state.0
   json.array(model.strokes, encode_stroke)
   |> json.to_string
@@ -176,7 +176,7 @@ pub fn substate_names() -> List(String) {
   ["strokes"]
 }
 
-pub fn encode_flat_fields(state: #(canvas.Model, canvas.Local)) -> String {
+pub fn encode_flat_fields(state: #(canvas.Model, canvas.Local, Nil)) -> String {
   let model = state.0
   json.object([
     #("color", json.string(model.color)),

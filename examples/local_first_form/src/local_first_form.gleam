@@ -1,4 +1,5 @@
 import beacon
+import beacon/effect
 import beacon/html
 import beacon/log
 import gleam/dynamic/decode
@@ -20,16 +21,21 @@ pub type Msg {
   SubmitSearch(String)
 }
 
-pub fn init() -> Model {
-  Model(saved_query: "", saved_filter: "all", submissions: 0)
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(Model(saved_query: "", saved_filter: "all", submissions: 0), effect.none())
 }
 
 pub fn init_local(model: Model) -> Local {
   Local(draft: model.saved_query, filter: model.saved_filter, menu_open: False)
 }
 
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg {
+pub fn update(
+  model: Model,
+  local: Local,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Local, Nil) {
+  let #(model, local) = case msg {
     UpdateDraft(value) -> #(model, Local(..local, draft: value))
     SelectFilter(value) -> #(model, Local(..local, filter: value))
     ToggleMenu -> #(model, Local(..local, menu_open: !local.menu_open))
@@ -53,6 +59,7 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
       }
     }
   }
+  #(model, local, Nil)
 }
 
 pub fn view(model: Model, local: Local) -> beacon.Node(Msg) {
@@ -167,7 +174,7 @@ fn form_field(fields_json: String, field: String) -> Result(String, String) {
 }
 
 pub fn main() {
-  beacon.app_with_local(init, init_local, update, view)
+  beacon.app(init, init_local, beacon.no_server, update, view)
   |> beacon.title("Local First Form")
   |> beacon.start(8080)
 }

@@ -6,7 +6,7 @@ Counter demonstrating the Model + Local state split.
 
 - `Model.count` is server state (synced across the wire)
 - `Local.input` and `Local.menu_open` are client state (instant, per-tab)
-- `beacon.app_with_local` builder for dual-state apps
+- `beacon.Local state` builder for dual-state apps
 - Toggle menu and text input update without server round-trips
 
 ## Run

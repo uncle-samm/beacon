@@ -18,7 +18,13 @@ pub fn main() {
   let store = session.new_store("auth_workspace_sessions")
   let auth_config = auth.dev_session_config()
 
-  beacon.app_with_server(app.init, app.init_server, update, app.view)
+  beacon.app(
+    fn() { #(app.init(), effect.none()) },
+    beacon.no_local,
+    app.init_server,
+    update,
+    view,
+  )
   |> beacon.title("Auth Workspace")
   |> beacon.secret_key("auth-workspace-session-secret-key-32-chars")
   |> beacon.route_pages(auth_pages())
@@ -29,7 +35,7 @@ pub fn main() {
   |> beacon.start(8080)
 }
 
-fn auth_pages() -> List(route.Page(#(app.Model, app.Server), app.Msg)) {
+fn auth_pages() -> List(route.Page(#(app.Model, Nil, app.Server), app.Msg)) {
   [
     auth_page("/"),
     auth_page("/login"),
@@ -39,22 +45,29 @@ fn auth_pages() -> List(route.Page(#(app.Model, app.Server), app.Msg)) {
   ]
 }
 
-fn auth_page(pattern: String) -> route.Page(#(app.Model, app.Server), app.Msg) {
+fn auth_page(
+  pattern: String,
+) -> route.Page(#(app.Model, Nil, app.Server), app.Msg) {
   route.page(
     pattern,
     fn(r: route.Route) { app.RouteChanged(r.path) },
-    fn(state: #(app.Model, app.Server), _route) {
-      let #(model, _server) = state
-      app.view(model)
+    fn(state: #(app.Model, Nil, app.Server), _route) {
+      let #(model, _local, _server) = state
+      app.view(model, Nil)
     },
   )
 }
 
+fn view(model: app.Model, _local: Nil) -> beacon.Node(app.Msg) {
+  app.view(model, Nil)
+}
+
 fn update(
   model: app.Model,
+  _local: Nil,
   server: app.Server,
   msg: app.Msg,
-) -> #(app.Model, app.Server, effect.Effect(app.Msg)) {
+) -> #(app.Model, Nil, app.Server) {
   case msg {
     app.RefreshSession -> {
       let audit_count = list.length(server.audit_entries)
@@ -67,34 +80,34 @@ fn update(
             <> int.to_string(audit_count)
             <> " private audit entries",
         ),
+        Nil,
         app.Server(..server, audit_entries: [
           "refresh-session",
           ..server.audit_entries
         ]),
-        effect.none(),
       )
     }
     app.AdminAudit -> {
       case model.role == "admin" {
         True -> #(
-          app.update(model, msg),
+          app.update_model(model, msg),
+          Nil,
           app.Server(..server, audit_entries: [
             "admin-audit",
             ..server.audit_entries
           ]),
-          effect.none(),
         )
         False -> #(
-          app.update(model, msg),
+          app.update_model(model, msg),
+          Nil,
           app.Server(
             ..server,
             denied_admin_events: server.denied_admin_events + 1,
           ),
-          effect.none(),
         )
       }
     }
-    _ -> #(app.update(model, msg), server, effect.none())
+    _ -> #(app.update_model(model, msg), Nil, server)
   }
 }
 
@@ -194,11 +207,13 @@ fn handle_profile(
 fn init_from_request(
   store: session.SessionStore,
   config: auth.SessionConfig,
-) -> fn(Request(Connection)) -> #(app.Model, app.Server) {
+) -> fn(Request(Connection)) -> #(app.Model, Nil, app.Server) {
   auth.init_from_session(
     store,
     config,
-    fn(req) { #(app.Model(..app.init(), route: req.path), app.init_server()) },
+    fn(req) {
+      #(app.Model(..app.init(), route: req.path), Nil, app.init_server())
+    },
     fn(req, sess, _user_id) {
       let user = session_value(sess, "user_id", "")
       let role = session_value(sess, "role", "user")
@@ -206,6 +221,7 @@ fn init_from_request(
       let csrf_token = session_value(sess, "csrf_token", "")
       #(
         app.authenticated_model(req.path, user, role, display_name, csrf_token),
+        Nil,
         app.Server(
           session_id: sess.id,
           csrf_token: csrf_token,

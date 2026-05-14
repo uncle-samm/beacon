@@ -43,22 +43,30 @@ pub type Msg {
   PauseGame
 }
 
-pub fn init() -> Model {
-  Model(
-    left_y: height / 2,
-    right_y: height / 2,
-    ball_x: width / 2,
-    ball_y: height / 2,
-    ball_dx: 4,
-    ball_dy: 2,
-    left_score: 0,
-    right_score: 0,
-    running: False,
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(
+    Model(
+      left_y: height / 2,
+      right_y: height / 2,
+      ball_x: width / 2,
+      ball_y: height / 2,
+      ball_dx: 4,
+      ball_dy: 2,
+      left_score: 0,
+      right_score: 0,
+      running: False,
+    ),
+    effect.none(),
   )
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
-  case msg {
+pub fn update(
+  model: Model,
+  _local: Nil,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Nil, Nil) {
+  let model = case msg {
     LeftUp ->
       Model(..model, left_y: int.max(paddle_h / 2, model.left_y - paddle_speed))
     LeftDown ->
@@ -93,9 +101,11 @@ pub fn update(model: Model, msg: Msg) -> Model {
         True -> advance_ball(model)
       }
   }
+  #(model, Nil, Nil)
 }
 
-fn after_update(model: Model, msg: Msg) -> effect.Effect(Msg) {
+fn after_update(state: #(Model, Nil, Nil), msg: Msg) -> effect.Effect(Msg) {
+  let model = state.0
   case msg {
     StartGame -> tick_effect()
     Tick ->
@@ -164,7 +174,7 @@ fn advance_ball(model: Model) -> Model {
 @external(erlang, "timer", "sleep")
 fn sleep(ms: Int) -> Nil
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   html.div([html.class("pong-game")], [
     html.h1([], [html.text("Beacon Pong")]),
     html.div([html.class("pong-score")], [
@@ -226,7 +236,7 @@ pub fn view(model: Model) -> beacon.Node(Msg) {
 }
 
 pub fn main() {
-  beacon.app(init, update, view)
+  beacon.app(init, beacon.no_local, beacon.no_server, update, view)
   |> beacon.title("Beacon Pong")
   |> beacon.on_update(after_update)
   |> beacon.start(8080)

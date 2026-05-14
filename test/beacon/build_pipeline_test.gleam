@@ -35,7 +35,7 @@ pub fn privacy_demo_analyzes_correctly_test() {
   let assert True = list.length(analysis.computed_fields) >= 1
 }
 
-pub fn private_session_example_supports_app_with_server_bundle_test() {
+pub fn private_session_example_supports_server_state_bundle_test() {
   let assert Ok(source) =
     simplifile.read("examples/private_session/src/private_session.gleam")
   let assert Ok(analysis) = analyzer.analyze(source)
@@ -46,7 +46,7 @@ pub fn private_session_example_supports_app_with_server_bundle_test() {
   let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
-pub fn auth_workspace_example_supports_app_with_server_bundle_test() {
+pub fn auth_workspace_example_supports_server_state_bundle_test() {
   let assert Ok(source) =
     simplifile.read("examples/auth_workspace/src/auth_workspace/app.gleam")
   let assert Ok(analysis) = analyzer.analyze(source)
@@ -380,23 +380,23 @@ pub fn enhanced_bundle_supported_for_standard_app_test() {
     "
 pub type Model { Model(count: Int) }
 pub type Msg { Inc }
-pub fn update(model: Model, msg: Msg) -> Model { model }
-pub fn view(model: Model) { model }
+pub fn update(model: Model, _local: Nil, _server: Nil, _msg: Msg) -> #(Model, Nil, Nil) { #(model, Nil, Nil) }
+pub fn view(model: Model, _local: Nil) { model }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)
 }
 
-pub fn enhanced_bundle_supported_for_app_with_server_view_test() {
+pub fn enhanced_bundle_supported_for_server_state_view_test() {
   let source =
     "
 pub type Model { Model(count: Int) }
 pub type Server { Server(secret: String) }
 pub type Msg { Inc }
-pub fn update(model: Model, server: Server, msg: Msg) -> #(Model, Server) {
-  #(model, server)
+pub fn update(model: Model, _local: Nil, server: Server, _msg: Msg) -> #(Model, Nil, Server) {
+  #(model, Nil, server)
 }
-pub fn view(model: Model) { model }
+pub fn view(model: Model, _local: Nil) { model }
 "
   let assert Ok(analysis) = analyzer.analyze(source)
   let assert Ok(True) = build.can_build_enhanced_bundle(source, analysis)

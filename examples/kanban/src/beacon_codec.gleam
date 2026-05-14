@@ -39,9 +39,8 @@ fn server_decode_column_value(s: String) -> kanban.Column {
 }
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: #(kanban.Model, kanban.Local)) -> String {
+pub fn encode_model(state: #(kanban.Model, kanban.Local, Nil)) -> String {
   let model = state.0
-  let local = state.1
   json.object([
     #("cards", json.array(model.cards, encode_card)),
     #("next_id", json.int(model.next_id)),
@@ -52,26 +51,26 @@ pub fn encode_model(state: #(kanban.Model, kanban.Local)) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: #(kanban.Model, kanban.Local)) -> String {
+pub fn render_model(state: #(kanban.Model, kanban.Local, Nil)) -> String {
   let model = state.0
   let local = state.1
   kanban.view(model, local)
   |> element.to_string
 }
 
-/// Decode a #(Model, Local) from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(#(kanban.Model, kanban.Local), String) {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(kanban.Model, kanban.Local, Nil), String) {
   let state_decoder = {
     use cards <- decode.field("cards", decode.list(server_decode_card()))
     use next_id <- decode.field("next_id", decode.int)
     use new_card_input <- decode.field("new_card_input", decode.string)
     use dragging_id <- decode.field("dragging_id", decode.int)
 
-    decode.success(#(kanban.Model(cards: cards, next_id: next_id, new_card_input: new_card_input, dragging_id: dragging_id), kanban.Local))
+    decode.success(#(kanban.Model(cards: cards, next_id: next_id, new_card_input: new_card_input, dragging_id: dragging_id), kanban.Local, Nil))
   }
   case json.parse(json_str, state_decoder) {
     Ok(state) -> Ok(state)
-    Error(_) -> Error("Failed to decode model+local")
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 
@@ -182,7 +181,7 @@ fn decode_msg(json_str: String) -> Result(kanban.Msg, String) {
   }
 }
 
-pub fn encode_substate_cards(state: #(kanban.Model, kanban.Local)) -> String {
+pub fn encode_substate_cards(state: #(kanban.Model, kanban.Local, Nil)) -> String {
   let model = state.0
   json.array(model.cards, encode_card)
   |> json.to_string
@@ -192,7 +191,7 @@ pub fn substate_names() -> List(String) {
   ["cards"]
 }
 
-pub fn encode_flat_fields(state: #(kanban.Model, kanban.Local)) -> String {
+pub fn encode_flat_fields(state: #(kanban.Model, kanban.Local, Nil)) -> String {
   let model = state.0
   json.object([
     #("next_id", json.int(model.next_id)),

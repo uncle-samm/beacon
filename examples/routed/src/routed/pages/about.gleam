@@ -12,10 +12,10 @@ pub fn page(
 pub fn view() -> beacon.Node(msg) {
   html.section([], [
     html.h1([], [html.text("About")]),
-      html.p([], [
-        html.text(
-          "This page is imported explicitly from routed/pages/about. Beacon does not scan the filesystem for routes.",
-        ),
-      ]),
+    html.p([], [
+      html.text(
+        "This page is imported explicitly from routed/pages/about. Beacon does not scan the filesystem for routes.",
+      ),
+    ]),
   ])
 }

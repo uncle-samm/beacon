@@ -1,6 +1,7 @@
 /// Multi-file Kanban — demonstrates external enum + record types from domain module.
 /// Card and Column types live in domains/board.gleam.
 import beacon
+import beacon/effect
 import beacon/html
 import beacon/log
 import domains/board
@@ -21,21 +22,29 @@ pub type Msg {
   DeleteCard(Int)
 }
 
-pub fn init() -> Model {
-  Model(
-    cards: [
-      board.Card(id: 1, title: "Design API", column: board.Todo),
-      board.Card(id: 2, title: "Write tests", column: board.Doing),
-      board.Card(id: 3, title: "Build UI", column: board.Todo),
-    ],
-    next_id: 4,
-    input: "",
-    dragging_id: -1,
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(
+    Model(
+      cards: [
+        board.Card(id: 1, title: "Design API", column: board.Todo),
+        board.Card(id: 2, title: "Write tests", column: board.Doing),
+        board.Card(id: 3, title: "Build UI", column: board.Todo),
+      ],
+      next_id: 4,
+      input: "",
+      dragging_id: -1,
+    ),
+    effect.none(),
   )
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
-  case msg {
+pub fn update(
+  model: Model,
+  _local: Nil,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Nil, Nil) {
+  let model = case msg {
     SetInput(text) -> Model(..model, input: text)
     AddCard -> {
       let title = string.trim(model.input)
@@ -84,6 +93,7 @@ pub fn update(model: Model, msg: Msg) -> Model {
         dragging_id: -1,
       )
   }
+  #(model, Nil, Nil)
 }
 
 fn column_from_string(s: String) -> board.Column {
@@ -118,7 +128,7 @@ fn column_color(c: board.Column) -> String {
   }
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   html.div(
     [
       html.style(
@@ -231,7 +241,7 @@ fn render_card(card: board.Card) -> beacon.Node(Msg) {
 }
 
 pub fn main() {
-  beacon.app(init, update, view)
+  beacon.app(init, beacon.no_local, beacon.no_server, update, view)
   |> beacon.title("Multi-File Kanban")
   |> beacon.start(8080)
 }

@@ -66,31 +66,31 @@ pub fn init() -> Model {
   )
 }
 
-pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
-  case msg {
-    UpdateInput(text) -> #(Model(..model, input_text: text), effect.none())
-    UpdateUsername(text) -> #(
-      Model(..model, username_input: text),
-      effect.none(),
-    )
+pub fn update(
+  model: Model,
+  _local: Nil,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Nil, Nil) {
+  let model = case msg {
+    UpdateInput(text) -> Model(..model, input_text: text)
+    UpdateUsername(text) -> Model(..model, username_input: text)
 
     SetUsername -> {
       let name = string.trim(model.username_input)
       case string.is_empty(name) {
-        True -> #(model, effect.none())
-        False -> #(
+        True -> model
+        False ->
           Model(..model, username: name, has_username: True, online_users: [
             name,
-          ]),
-          effect.none(),
-        )
+          ])
       }
     }
 
     SendMessage -> {
       let text = string.trim(model.input_text)
       case string.is_empty(text) {
-        True -> #(model, effect.none())
+        True -> model
         False -> {
           let message =
             ChatMessage(
@@ -99,19 +99,16 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
               room: model.current_room,
               id: model.session_id + list.length(model.visible_messages),
             )
-          #(
-            Model(
-              ..model,
-              input_text: "",
-              visible_messages: list.append(model.visible_messages, [message]),
-            ),
-            effect.none(),
+          Model(
+            ..model,
+            input_text: "",
+            visible_messages: list.append(model.visible_messages, [message]),
           )
         }
       }
     }
 
-    SwitchRoom(room) -> #(
+    SwitchRoom(room) ->
       Model(
         ..model,
         current_room: room,
@@ -121,34 +118,28 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
           False -> [model.username]
         },
         typing_user: "",
-      ),
-      effect.none(),
-    )
+      )
 
     RoomUpdated(topic) -> {
       case string.starts_with(topic, "typing:") {
-        True -> #(
-          Model(..model, typing_user: "Someone"),
-          effect.after(2000, fn() { ClearTypingIndicator }),
-        )
-        False -> #(model, effect.none())
+        True -> Model(..model, typing_user: "Someone")
+        False -> model
       }
     }
 
-    LoadMessages(messages) -> #(
-      Model(..model, visible_messages: messages),
-      effect.none(),
-    )
+    LoadMessages(messages) -> Model(..model, visible_messages: messages)
 
-    ClearTypingIndicator -> #(Model(..model, typing_user: ""), effect.none())
+    ClearTypingIndicator -> Model(..model, typing_user: "")
   }
+  #(model, Nil, Nil)
 }
 
 fn make_on_update(
   messages: store.ListStore(ChatMessage),
   presence: store.ListStore(String),
-) -> fn(Model, Msg) -> effect.Effect(Msg) {
-  fn(model: Model, msg: Msg) -> effect.Effect(Msg) {
+) -> fn(#(Model, Nil, Nil), Msg) -> effect.Effect(Msg) {
+  fn(state: #(Model, Nil, Nil), msg: Msg) -> effect.Effect(Msg) {
+    let model = state.0
     case msg {
       UpdateInput(text) ->
         case string.is_empty(text) {
@@ -183,8 +174,11 @@ fn make_on_update(
           }
         })
       RoomUpdated(topic) ->
-        case string.starts_with(topic, "room:") {
-          True ->
+        case
+          string.starts_with(topic, "room:"),
+          string.starts_with(topic, "typing:")
+        {
+          True, _ ->
             effect.from(fn(dispatch) {
               let room = string.drop_start(topic, 5)
               case room == model.current_room {
@@ -192,7 +186,8 @@ fn make_on_update(
                 False -> Nil
               }
             })
-          False -> effect.none()
+          _, True -> effect.after(2000, fn() { ClearTypingIndicator })
+          _, _ -> effect.none()
         }
       _ -> effect.none()
     }
@@ -200,7 +195,7 @@ fn make_on_update(
 }
 
 /// Render the chat view.
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   case model.has_username {
     False -> view_login(model)
     True -> view_chat(model)
@@ -307,10 +302,17 @@ pub fn start() {
   let messages = store.new_list("chat_messages")
   let presence = store.new_list("chat_presence")
 
-  beacon.app_with_effects(fn() { #(init(), effect.none()) }, update, view)
+  beacon.app(
+    fn() { #(init(), effect.none()) },
+    beacon.no_local,
+    beacon.no_server,
+    update,
+    view,
+  )
   |> beacon.on_update(make_on_update(messages, presence))
   |> beacon.title("Beacon Chat")
-  |> beacon.subscriptions(fn(model: Model) {
+  |> beacon.subscriptions(fn(state: #(Model, Nil, Nil)) {
+    let model = state.0
     // Subscribe to room messages AND typing indicators.
     // When user switches rooms, framework auto-unsubscribes from old.
     ["room:" <> model.current_room, "typing:" <> model.current_room]

@@ -54,8 +54,8 @@ fn server_decode_direction_value(s: String) -> snake.Direction {
 }
 
 /// Encode the Model to JSON for model_sync.
-pub fn encode_model(state: snake.Model) -> String {
-  let model = state
+pub fn encode_model(state: #(snake.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("snake", json.array(model.snake, encode_point)),
     #("direction", json.string(encode_direction(model.direction))),
@@ -73,15 +73,16 @@ pub fn encode_model(state: snake.Model) -> String {
 }
 
 /// Render the model with the same generated server contract used for SSR.
-pub fn render_model(state: snake.Model) -> String {
-  let model = state
-  snake.view(model)
+pub fn render_model(state: #(snake.Model, Nil, Nil)) -> String {
+  let model = state.0
+  let local = Nil
+  snake.view(model, local)
   |> element.to_string
 }
 
-/// Decode a Model from JSON string (for applying client patches).
-pub fn decode_model(json_str: String) -> Result(snake.Model, String) {
-  let model_decoder = {
+/// Decode a #(Model, Local, Server) from JSON string (for applying client patches).
+pub fn decode_model(json_str: String) -> Result(#(snake.Model, Nil, Nil), String) {
+  let state_decoder = {
     use snake <- decode.field("snake", decode.list(server_decode_point()))
     use direction <- decode.field("direction", decode.string)
     use food <- decode.field("food", server_decode_point())
@@ -93,11 +94,12 @@ pub fn decode_model(json_str: String) -> Result(snake.Model, String) {
     use name_input <- decode.field("name_input", decode.string)
     use has_name <- decode.field("has_name", decode.bool)
     use high_score_pending <- decode.field("high_score_pending", decode.bool)
-    decode.success(snake.Model(snake: snake, direction: server_decode_direction_value(direction), food: food, score: score, game_state: server_decode_gamestate_value(game_state), grid_width: grid_width, grid_height: grid_height, player_name: player_name, name_input: name_input, has_name: has_name, high_score_pending: high_score_pending))
+
+    decode.success(#(snake.Model(snake: snake, direction: server_decode_direction_value(direction), food: food, score: score, game_state: server_decode_gamestate_value(game_state), grid_width: grid_width, grid_height: grid_height, player_name: player_name, name_input: name_input, has_name: has_name, high_score_pending: high_score_pending), Nil, Nil))
   }
-  case json.parse(json_str, model_decoder) {
-    Ok(model) -> Ok(model)
-    Error(_) -> Error("Failed to decode model")
+  case json.parse(json_str, state_decoder) {
+    Ok(state) -> Ok(state)
+    Error(_) -> Error("Failed to decode model+local+server")
   }
 }
 
@@ -186,14 +188,14 @@ fn decode_msg(json_str: String) -> Result(snake.Msg, String) {
   }
 }
 
-pub fn encode_substate_snake(state: snake.Model) -> String {
-  let model = state
+pub fn encode_substate_snake(state: #(snake.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.array(model.snake, encode_point)
   |> json.to_string
 }
 
-pub fn encode_substate_food(state: snake.Model) -> String {
-  let model = state
+pub fn encode_substate_food(state: #(snake.Model, Nil, Nil)) -> String {
+  let model = state.0
   encode_point(model.food)
   |> json.to_string
 }
@@ -202,8 +204,8 @@ pub fn substate_names() -> List(String) {
   ["snake", "food"]
 }
 
-pub fn encode_flat_fields(state: snake.Model) -> String {
-  let model = state
+pub fn encode_flat_fields(state: #(snake.Model, Nil, Nil)) -> String {
+  let model = state.0
   json.object([
     #("direction", json.string(encode_direction(model.direction))),
     #("score", json.int(model.score)),

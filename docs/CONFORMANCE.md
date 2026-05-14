@@ -11,7 +11,7 @@ checks.
 | `examples/counter` | Minimal server-authoritative model update |
 | `examples/counter_local` | Client-only Local state with zero WebSocket traffic |
 | `examples/local_first_form` | Local draft/dropdown state with model submit boundary |
-| `examples/private_session` | `app_with_server` privacy and server-only state stripping |
+| `examples/private_session` | `Server state` privacy and server-only state stripping |
 | `examples/routed` | Explicit imported route modules with root-owned `Model`/`Msg` |
 | `examples/routed_workspace` | Explicit route-aware app with Local/model state |
 | `examples/route_server_workspace` | Explicit route mini-apps with route-local private `Server` state |

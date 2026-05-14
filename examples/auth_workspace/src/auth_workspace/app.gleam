@@ -83,7 +83,7 @@ pub fn authenticated_model(
   )
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
+pub fn update_model(model: Model, msg: Msg) -> Model {
   case msg {
     RouteChanged(path) -> Model(..model, route: normalize_route(path))
     SetDisplayName(name) -> Model(..model, display_name: name)
@@ -108,7 +108,16 @@ pub fn update(model: Model, msg: Msg) -> Model {
   }
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
+pub fn update(
+  model: Model,
+  _local: Nil,
+  server: Server,
+  msg: Msg,
+) -> #(Model, Nil, Server) {
+  #(update_model(model, msg), Nil, server)
+}
+
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
   html.main(
     [
       html.style(
@@ -193,42 +202,36 @@ fn nav_view(model: Model) -> beacon.Node(Msg) {
 }
 
 fn app_view(model: Model) -> beacon.Node(Msg) {
-  html.section(
-    [html.attribute("data-testid", "workspace-home")],
-    [
-      html.h2([], [html.text("Workspace")]),
-      html.p([], [html.text("Welcome, " <> model.display_name)]),
-      html.p([], [
-        html.text(
-          "Profiles saved: " <> int.to_string(model.saved_profiles),
-        ),
-      ]),
-      html.button([beacon.on_click(RefreshSession)], [
-        html.text("Refresh session summary"),
-      ]),
-    ],
-  )
+  html.section([html.attribute("data-testid", "workspace-home")], [
+    html.h2([], [html.text("Workspace")]),
+    html.p([], [html.text("Welcome, " <> model.display_name)]),
+    html.p([], [
+      html.text("Profiles saved: " <> int.to_string(model.saved_profiles)),
+    ]),
+    html.button([beacon.on_click(RefreshSession)], [
+      html.text("Refresh session summary"),
+    ]),
+  ])
 }
 
 fn settings_view(model: Model) -> beacon.Node(Msg) {
-  html.section(
-    [html.attribute("data-testid", "settings-panel")],
-    [
-      html.h2([], [html.text("Settings")]),
-      html.label([], [html.text("Display name")]),
-      html.input([
-        html.value(model.display_name),
-        beacon.on_input(fn(value) { SetDisplayName(value) }),
-        html.attribute("data-testid", "display-name-input"),
-      ]),
-      html.button([beacon.on_click(SaveProfile)], [
-        html.text("Save profile"),
-      ]),
-      html.p([], [
-        html.text("CSRF token is available to API clients, not as a session cookie."),
-      ]),
-    ],
-  )
+  html.section([html.attribute("data-testid", "settings-panel")], [
+    html.h2([], [html.text("Settings")]),
+    html.label([], [html.text("Display name")]),
+    html.input([
+      html.value(model.display_name),
+      beacon.on_input(fn(value) { SetDisplayName(value) }),
+      html.attribute("data-testid", "display-name-input"),
+    ]),
+    html.button([beacon.on_click(SaveProfile)], [
+      html.text("Save profile"),
+    ]),
+    html.p([], [
+      html.text(
+        "CSRF token is available to API clients, not as a session cookie.",
+      ),
+    ]),
+  ])
 }
 
 fn admin_view(model: Model) -> beacon.Node(Msg) {

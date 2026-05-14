@@ -64,8 +64,13 @@ pub fn init_local(_model: Model) -> Local {
 
 // --- Update (pure — no stores, compiles to JS) ---
 
-pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
-  case msg {
+pub fn update(
+  model: Model,
+  local: Local,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Local, Nil) {
+  let #(model, local) = case msg {
     StartDrawing(coords) -> {
       case parse_coords(coords) {
         Ok(#(x, y)) -> #(
@@ -143,18 +148,19 @@ pub fn update(model: Model, local: Local, msg: Msg) -> #(Model, Local) {
       }
     }
   }
+  #(model, local, Nil)
 }
 
 // --- Side Effects (server only — store writes) ---
 
 fn make_on_update(
   stroke_store: store.ListStore(Stroke),
-) -> fn(#(Model, Local), Msg) -> effect.Effect(Msg) {
-  fn(state: #(Model, Local), msg: Msg) -> effect.Effect(Msg) {
-    let #(_model, _local) = state
+) -> fn(#(Model, Local, Nil), Msg) -> effect.Effect(Msg) {
+  fn(state: #(Model, Local, Nil), msg: Msg) -> effect.Effect(Msg) {
+    let #(_model, _local, _server) = state
     case msg {
       StopDrawing(_) -> {
-        let #(model, _local) = state
+        let #(model, _local, _server) = state
         // Only append NEW strokes to the store (not the full list).
         // Compare store length vs model length to find the delta.
         // This ensures the diff detects "append" instead of "replace".
@@ -179,7 +185,7 @@ fn make_on_update(
       StrokesUpdated -> {
         // Reload strokes from store (another user drew something).
         // Only dispatch if store has MORE strokes than our model (avoids feedback).
-        let #(model, _local) = state
+        let #(model, _local, _server) = state
         let store_strokes = store.get_all(stroke_store, "canvas")
         case list.length(store_strokes) > list.length(model.strokes) {
           True ->
@@ -401,7 +407,13 @@ pub fn start() {
     Model(strokes: strokes, color: "#000000")
   }
 
-  beacon.app_with_local(init_from_store, init_local, update, view)
+  beacon.app(
+    fn() { #(init_from_store(), effect.none()) },
+    init_local,
+    beacon.no_server,
+    update,
+    view,
+  )
   |> beacon.title("Collaborative Canvas")
   |> beacon.on_update(make_on_update(stroke_store))
   |> beacon.subscriptions(fn(_model) { ["store:canvas_strokes"] })

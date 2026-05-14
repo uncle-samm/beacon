@@ -1468,7 +1468,7 @@ pub fn patch_content_correct_after_many_increments_test() {
 // === Server Type Tests ===
 
 pub fn server_state_not_in_model_sync_test() {
-  // Simulate the pattern from app_with_server:
+  // Simulate the pattern from server_state:
   // Model + Server wrapped as #(Model, Server), serializer only encodes Model part
   let config =
     runtime.RuntimeConfig(
@@ -1541,9 +1541,9 @@ pub fn server_state_not_in_model_sync_test() {
   })
 }
 
-// === app_with_server Model Encoder Tests ===
+// === server_state Model Encoder Tests ===
 
-pub fn app_with_server_background_effect_pushes_update_test() {
+pub fn server_state_background_effect_pushes_update_test() {
   // Verify that background effects (EffectDispatched) push model updates
   // to the client when serialize_model is set for #(Model, Server).
   let config =
@@ -1628,7 +1628,7 @@ pub fn app_with_server_background_effect_pushes_update_test() {
   })
 }
 
-pub fn app_with_server_user_event_pushes_update_test() {
+pub fn server_state_user_event_pushes_update_test() {
   // Verify that user events (ClientEventReceived) push model updates
   // to the client when serialize_model is set for #(Model, Server).
   let config =
