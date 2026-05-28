@@ -1,10 +1,22 @@
 # State Management
 
-Beacon has three state layers: **Shared** (cross-user), **Server** (per-session), and **Local** (client-only).
+Each Beacon session has three state layers, plus cross-user stores:
 
-## Server State (Model)
+- **Model** — server-authoritative UI state. Synced to the client and drives
+  the rendered view.
+- **Local** — client-only, per-tab state. Lives in the browser, is never sent
+  to the server, and costs zero network traffic.
+- **Server** — private, per-session state. Lives on the server only and is
+  never serialized to the client.
+- **Shared stores** — cross-user state shared by all connections (see below).
 
-Each browser tab gets its own BEAM process holding the Model. Updates go through the server.
+`update` always receives `(model, local, server, msg)` and returns
+`#(model, local, server)`.
+
+## Model (Server-Authoritative)
+
+Each browser tab gets its own BEAM process holding the Model. Updates go
+through the server, which re-renders and syncs the Model to the client.
 
 ```gleam
 beacon.app(init, beacon.no_local, beacon.no_server, update, view) |> beacon.start(8080)
@@ -13,11 +25,19 @@ beacon.app(init, beacon.no_local, beacon.no_server, update, view) |> beacon.star
 ## Local State (Zero Traffic)
 
 Split state into Model (server-synced) and Local (instant, no network).
-`update` always receives `(model, local, server, msg)` and returns
-`#(model, local, server)`. Messages that only change Local run in the browser.
+Messages that only change Local run in the browser with no round trip.
 
 ```gleam
 beacon.app(init, init_local, beacon.no_server, update, view) |> beacon.start(8080)
+```
+
+## Server State (Private)
+
+Per-session state that stays on the server and is never sent to the client —
+use it for secrets, tokens, and bookkeeping the browser must not see.
+
+```gleam
+beacon.app(init, beacon.no_local, init_server, update, view) |> beacon.start(8080)
 ```
 
 ## Shared State (Store)

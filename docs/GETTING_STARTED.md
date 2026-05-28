@@ -426,26 +426,31 @@ beacon.app(init, beacon.no_local, init_server, update, view)
 
 ### Redirects
 
-Navigate the client to a new URL from the server:
+Navigate the client to a new URL from the server. Redirects are effects, so
+they are returned from the `on_update` handler — `update` itself stays pure and
+returns only `#(model, local, server)`:
 
 ```gleam
-fn update(model, msg) {
+fn after_update(state: #(Model, Nil, Nil), msg: Msg) -> effect.Effect(Msg) {
   case msg {
-    LoginSuccess -> #(model, beacon.redirect("/dashboard"))
-    Logout -> #(model, beacon.redirect("/login"))
-    _ -> #(model, effect.none())
+    LoginSuccess -> beacon.redirect("/dashboard")
+    Logout -> beacon.redirect("/login")
+    _ -> effect.none()
   }
 }
+
+beacon.app(init, beacon.no_local, beacon.no_server, update, view)
+|> beacon.on_update(after_update)
+|> beacon.start(8080)
 ```
 
 `beacon.hard_redirect(path)` triggers a full page reload via `window.location.href` instead of pushState. Use when the browser needs to make a real HTTP request (e.g., to receive a `Set-Cookie` header after login):
 
 ```gleam
-fn update(model, server, msg) {
+fn after_update(state: #(Model, Nil, Nil), msg: Msg) -> effect.Effect(Msg) {
   case msg {
-    LoginSuccess(token) ->
-      #(model, server, beacon.hard_redirect("/api/auth/session/" <> token))
-    _ -> #(model, server, effect.none())
+    LoginSuccess(token) -> beacon.hard_redirect("/api/auth/session/" <> token)
+    _ -> effect.none()
   }
 }
 ```

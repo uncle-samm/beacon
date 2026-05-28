@@ -11,6 +11,7 @@ each page is entered, and the typed page render function.
 
 ```gleam
 import beacon
+import beacon/effect
 import beacon/html
 import beacon/route
 
@@ -22,34 +23,41 @@ pub type Msg {
   RouteChanged(route.Route)
 }
 
-pub fn init() -> Model {
-  Model(path: "/", project_id: "")
+pub fn init() -> #(Model, effect.Effect(Msg)) {
+  #(Model(path: "/", project_id: ""), effect.none())
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
+pub fn update(
+  model: Model,
+  _local: Nil,
+  _server: Nil,
+  msg: Msg,
+) -> #(Model, Nil, Nil) {
   case msg {
     RouteChanged(r) -> {
       let project_id = case route.param(r, "id") {
         Ok(id) -> id
         Error(Nil) -> ""
       }
-      Model(..model, path: r.path, project_id: project_id)
+      #(Model(..model, path: r.path, project_id: project_id), Nil, Nil)
     }
   }
 }
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
-  let assert Ok(page) = route.dispatch_view(pages(), model, model.path)
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
+  let assert Ok(page) =
+    route.dispatch_view(pages(), #(model, Nil, Nil), model.path)
   page
 }
 
-fn pages() -> List(route.Page(Model, Msg)) {
+fn pages() -> List(route.Page(#(Model, Nil, Nil), Msg)) {
   [
-    route.page("/", RouteChanged, fn(_model, _route) { html.text("Home") }),
-    route.page("/settings", RouteChanged, fn(_model, _route) {
+    route.page("/", RouteChanged, fn(_state, _route) { html.text("Home") }),
+    route.page("/settings", RouteChanged, fn(_state, _route) {
       html.text("Settings")
     }),
-    route.page("/projects/:id", RouteChanged, fn(model, _route) {
+    route.page("/projects/:id", RouteChanged, fn(state, _route) {
+      let #(model, _local, _server) = state
       html.text("Project " <> model.project_id)
     }),
   ]
@@ -79,17 +87,20 @@ import beacon/route
 import pages/dashboard
 import pages/settings
 
-pub fn view(model: Model) -> beacon.Node(Msg) {
-  let assert Ok(page) = route.dispatch_view(pages(), model, model.path)
+pub fn view(model: Model, _local: Nil) -> beacon.Node(Msg) {
+  let assert Ok(page) =
+    route.dispatch_view(pages(), #(model, Nil, Nil), model.path)
   page
 }
 
-fn pages() -> List(route.Page(Model, Msg)) {
+fn pages() -> List(route.Page(#(Model, Nil, Nil), Msg)) {
   [
-    dashboard.page(RouteChanged, fn(model, _route) {
+    dashboard.page(RouteChanged, fn(state, _route) {
+      let #(model, _local, _server) = state
       dashboard.view(model.count, Decrement, Increment)
     }),
-    settings.page(RouteChanged, fn(model, _route) {
+    settings.page(RouteChanged, fn(state, _route) {
+      let #(model, _local, _server) = state
       settings.view(model.name, SetName)
     }),
   ]

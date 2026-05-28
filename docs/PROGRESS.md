@@ -8,10 +8,50 @@
 ## Current Status
 
 **Active Milestone:** None
-**Last Completed:** 115 — Imported Contract Codegen
+**Last Completed:** 116 — Review Hardening (CSRF, Timers, Auth, Cookies, Docs)
 **Build Status:** GREEN (zero errors, zero warnings)
-**Test Status:** GREEN (756 tests passed, 0 failures)
+**Test Status:** GREEN (760 tests passed, 0 failures)
 **Linter:** PASSING (zero violations)
+
+### Milestone 116: Review Hardening (CSRF, Timers, Auth, Cookies, Docs)
+> Fix the five must-fix findings from a full-framework review: a no-op CSRF
+> verifier, a permanent timer-slot leak, silent auth rejections, a substring
+> cookie parser vulnerable to shadowing, and several docs whose code samples no
+> longer type-check against the current `#(Model, Local, Server)` API.
+
+- [x] Remove the no-op `form.verify_csrf` (passed any 16+ char string, never
+      compared against an issued token) and its two tests; the real API is the
+      server-side, one-time-use `generate_session_csrf` / `verify_session_csrf`
+- [x] Fix the timer-limit leak: replace the monotonic `beacon_timer_count`
+      (incremented, never decremented — locked out `effect.every` for the
+      session lifetime after 10 timers) with self-healing live-pid tracking
+      (`live_timer_count` / `register_timer`) that prunes dead timers via
+      `is_process_alive`
+- [x] Log auth rejections in `authenticated` / `csrf_authenticated` instead of
+      silently discarding the `SessionError` (was `Error(_) -> ...`)
+- [x] Route `require_auth` / `csrf_protection` through `cookie.get` (exact-name
+      match) and delete the substring-matching `beacon_auth_ffi:find_cookie`
+      FFI, which let `evil_beacon_session=…; beacon_session=…` shadow the real
+      cookie
+- [x] Fix docs whose samples no longer compile: ROUTING.md (tuple page state +
+      `update`/`view` arity), STATE_MANAGEMENT.md (Model/Local/Server vs the old
+      Shared/Server/Local wording), GETTING_STARTED.md + `beacon.hard_redirect`
+      doc comment (redirects flow through `on_update`, not `update`)
+- [x] Run final `gleam build`, `gleam test`, and `gleam run -m beacon/lint`
+
+**Notes:**
+- The timer counter could not be fixed with a `decrement` call: the counter
+  lives in the runtime process dictionary, but each timer runs in its own BEAM
+  process and cannot touch another process's dictionary. Tracking pids and
+  pruning dead ones on read is the only correct fix, and it is self-healing —
+  a crashed session's timers free their slots automatically.
+- `cookie.get` already existed and does an exact `pair.0 == name` match after
+  parsing, so the fix was to use it everywhere and delete the unsafe FFI; no new
+  parser was written.
+- Doc fixes were verified against the live signatures: `beacon.app` returns
+  `AppBuilder(#(model, local, server), msg)`, so `route_pages`/`dispatch_view`
+  need `route.Page(#(Model, Nil, Nil), Msg)`, and effects come from
+  `on_update : fn(model, msg) -> Effect(msg)`, never from the pure `update`.
 
 ### Milestone 115: Imported Contract Codegen
 > Make the mandatory generated contract handle real multi-module apps where

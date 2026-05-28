@@ -307,7 +307,10 @@ pub fn authenticated(
           Error(Nil) -> unauthorized_response()
         }
       }
-      Error(_) -> unauthorized_response()
+      Error(err) -> {
+        log.warning("beacon.auth", "Auth rejected: " <> error_to_string(err))
+        unauthorized_response()
+      }
     }
   }
 }
@@ -338,7 +341,10 @@ pub fn csrf_authenticated(
           _, Error(Nil) -> unauthorized_response()
         }
       }
-      Error(_) -> unauthorized_response()
+      Error(err) -> {
+        log.warning("beacon.auth", "Auth rejected: " <> error_to_string(err))
+        unauthorized_response()
+      }
     }
   }
 }
@@ -445,11 +451,8 @@ pub fn require_auth(store: session.SessionStore) -> middleware.Middleware {
     req: Request(Connection),
     next: fn(Request(Connection)) -> Response(ResponseBody),
   ) -> Response(ResponseBody) {
-    let cookie_header = request.get_header(req, "cookie")
-    let session_id = case cookie_header {
-      Ok(cookies) -> extract_session_cookie(cookies)
-      Error(Nil) -> None
-    }
+    let session_id =
+      option.from_result(cookie.get(req, default_session_cookie_name))
     case session_id {
       Some(id) -> {
         case session.get(store, id) {
@@ -479,11 +482,8 @@ pub fn csrf_protection(store: session.SessionStore) -> middleware.Middleware {
       _ -> {
         // For state-changing requests, validate CSRF token
         let csrf_header = request.get_header(req, "x-csrf-token")
-        let cookie_header = request.get_header(req, "cookie")
-        let session_id = case cookie_header {
-          Ok(cookies) -> extract_session_cookie(cookies)
-          Error(Nil) -> None
-        }
+        let session_id =
+          option.from_result(cookie.get(req, default_session_cookie_name))
         case csrf_header, session_id {
           Ok(token), Some(sid) -> {
             case session.get(store, sid) {
@@ -502,23 +502,6 @@ pub fn csrf_protection(store: session.SessionStore) -> middleware.Middleware {
     }
   }
 }
-
-/// Extract session ID from cookie header.
-fn extract_session_cookie(cookies: String) -> Option(String) {
-  extract_cookie_value(cookies, default_session_cookie_name)
-}
-
-/// Parse a cookie header and extract a specific cookie value.
-fn extract_cookie_value(header: String, name: String) -> Option(String) {
-  let target = name <> "="
-  case find_cookie(header, target) {
-    Ok(value) -> Some(value)
-    Error(Nil) -> None
-  }
-}
-
-@external(erlang, "beacon_auth_ffi", "find_cookie")
-fn find_cookie(header: String, target: String) -> Result(String, Nil)
 
 fn unauthorized_response() -> Response(ResponseBody) {
   response.new(401)

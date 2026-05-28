@@ -123,15 +123,6 @@ pub fn text_input_with_errors_renders_error_span_test() {
   let assert True = str_contains(html, "Required")
 }
 
-pub fn verify_csrf_valid_test() {
-  let f = form.new("secret")
-  let assert True = form.verify_csrf(f.csrf_token)
-}
-
-pub fn verify_csrf_invalid_test() {
-  let assert False = form.verify_csrf("short")
-}
-
 // --- Session-bound CSRF tests ---
 
 pub fn session_csrf_generate_and_verify_test() {

@@ -192,31 +192,35 @@ const max_timers = 10
 pub fn every(interval_ms: Int, make_msg: fn() -> msg) -> Effect(msg) {
   Effect(callbacks: [
     SpawnedCallback(run: fn(dispatch) {
-      let current = get_timer_count()
+      let current = live_timer_count()
       case current >= max_timers {
         True -> {
           log_timer_limit_warning(current)
           process.spawn_unlinked(fn() { Nil })
         }
         False -> {
-          increment_timer_count()
-          process.spawn_unlinked(fn() {
-            timer_loop(interval_ms, make_msg, dispatch)
-          })
+          let pid =
+            process.spawn_unlinked(fn() {
+              timer_loop(interval_ms, make_msg, dispatch)
+            })
+          register_timer(pid)
+          pid
         }
       }
     }),
   ])
 }
 
-/// Get the current timer count from the process dictionary.
+/// Count live timers for this runtime, pruning any that have exited.
 /// Effects execute inside the runtime process, so the count is per-runtime.
-@external(erlang, "beacon_effect_ffi", "get_timer_count")
-fn get_timer_count() -> Int
+/// Self-healing: timers that died free up slots, so the cap can never
+/// permanently lock out new timers (unlike a monotonic counter).
+@external(erlang, "beacon_effect_ffi", "live_timer_count")
+fn live_timer_count() -> Int
 
-/// Increment the timer count in the process dictionary.
-@external(erlang, "beacon_effect_ffi", "increment_timer_count")
-fn increment_timer_count() -> Nil
+/// Track a spawned timer pid so it counts toward the live limit.
+@external(erlang, "beacon_effect_ffi", "register_timer")
+fn register_timer(pid: process.Pid) -> Nil
 
 /// Log a warning when the timer limit is reached.
 @external(erlang, "beacon_effect_ffi", "log_timer_limit_warning")

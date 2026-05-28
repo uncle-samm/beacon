@@ -516,10 +516,10 @@ pub fn on_route_leave(
 }
 
 /// Create a redirect effect — navigates the client to a new URL via pushState.
-/// Use this in update to redirect after login, logout, etc.
+/// Return this from the `on_update` handler to redirect after login, logout, etc.
 /// The effect sends a ServerNavigate message to ONLY the triggering client
 /// (not broadcast to all connections).
-/// Must be called within an effect context (inside update).
+/// Must be returned from `on_update` so it runs within the connection's effect context.
 /// SECURITY: Only use with validated paths. Never pass raw user input.
 pub fn redirect(path: String) -> effect.Effect(msg) {
   effect.from(fn(_dispatch) {
@@ -542,12 +542,13 @@ pub fn redirect(path: String) -> effect.Effect(msg) {
 /// Use when the browser needs to receive HTTP headers (e.g., Set-Cookie after login).
 /// SECURITY: Only relative paths (starting with /) are allowed by the client.
 ///
+/// Returned from the `on_update` handler (the server-side effect handler);
+/// `update` stays pure.
 /// ```gleam
-/// fn update(model, server, msg) {
+/// fn after_update(state: #(Model, Nil, Nil), msg: Msg) -> effect.Effect(Msg) {
 ///   case msg {
-///     LoginSuccess(token) ->
-///       #(model, server, beacon.hard_redirect("/api/auth/session/" <> token))
-///     _ -> #(model, server, effect.none())
+///     LoginSuccess(token) -> beacon.hard_redirect("/api/auth/session/" <> token)
+///     _ -> effect.none()
 ///   }
 /// }
 /// ```

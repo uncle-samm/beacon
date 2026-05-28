@@ -1,7 +1,7 @@
 -module(beacon_effect_ffi).
 -export([
-    get_timer_count/0,
-    increment_timer_count/0,
+    live_timer_count/0,
+    register_timer/1,
     log_timer_limit_warning/1,
     unique_integer/0,
     register_key_generation/1,
@@ -9,15 +9,28 @@
     is_current_key_generation/2
 ]).
 
-get_timer_count() ->
-    case erlang:get(beacon_timer_count) of
-        undefined -> 0;
-        N -> N
-    end.
+%% Count timers that are still alive, pruning any dead pids from the
+%% tracked list. Self-healing: a timer that exited (e.g. its session
+%% process died) no longer counts against the limit. This runs inside
+%% the runtime process, so the list lives in that process dictionary.
+live_timer_count() ->
+    Pids =
+        case erlang:get(beacon_timer_pids) of
+            undefined -> [];
+            L when is_list(L) -> L
+        end,
+    Alive = [P || P <- Pids, is_process_alive(P)],
+    erlang:put(beacon_timer_pids, Alive),
+    length(Alive).
 
-increment_timer_count() ->
-    Current = get_timer_count(),
-    erlang:put(beacon_timer_count, Current + 1),
+%% Track a newly spawned timer pid so it counts toward the live limit.
+register_timer(Pid) ->
+    Pids =
+        case erlang:get(beacon_timer_pids) of
+            undefined -> [];
+            L when is_list(L) -> L
+        end,
+    erlang:put(beacon_timer_pids, [Pid | Pids]),
     nil.
 
 log_timer_limit_warning(Current) ->

@@ -267,10 +267,10 @@ fn generate_csrf_token(secret_key: String) -> String {
   encode_hex(hash)
 }
 
-/// Verify a CSRF token (checks it's non-empty and well-formed).
-pub fn verify_csrf(token: String) -> Bool {
-  string.length(token) >= 16
-}
+// NOTE: A stateless `verify_csrf(token)` cannot provide real CSRF protection —
+// it has nothing to compare the token against. Use `generate_session_csrf` and
+// `verify_session_csrf` below, which store the token server-side and consume it
+// on use (one-time, replay-resistant).
 
 /// Opaque ETS table for CSRF token storage.
 pub type CsrfStore
